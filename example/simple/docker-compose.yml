@@ -1,0 +1,34 @@
+version: '3.8'
+
+services:
+  mongodb:
+    image: mongo:6.0
+    container_name: my-mongo
+    restart: always
+    ports:
+      - "27017:27017"
+    volumes:
+      - mongo-data:/data/db
+    command: --replSet rs0 --bind_ip_all --noauth
+
+  mongodb-init:
+    image: mongo:6.0
+    depends_on:
+      - mongodb
+    command: >
+      bash -c "
+        echo 'Waiting for MongoDB to start...' &&
+        sleep 15 &&
+        mongosh mongodb://mongodb:27017/admin --eval \"
+          rs.initiate({
+            _id: 'rs0',
+            members: [{
+              _id: 0,
+              host: 'localhost:27017'
+            }]
+          })
+        \"
+      "
+
+volumes:
+  mongo-data:
