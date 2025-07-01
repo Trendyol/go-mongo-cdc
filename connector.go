@@ -42,7 +42,11 @@ type connector struct {
 	once sync.Once
 }
 
-func NewConnectorWithConfigFile(ctx context.Context, configFilePath string, listenerFunc changestream.ListenerFunc) (Connector, error) {
+func NewConnectorWithConfigFile(
+	ctx context.Context,
+	configFilePath string,
+	listenerFunc changestream.ListenerFunc,
+) (Connector, error) {
 	var cfg config.Config
 	var err error
 
@@ -140,8 +144,12 @@ func (c *connector) Close() {
 		close(c.readyCh)
 	}
 
-	c.stream.Close(context.TODO())
-	c.mongoClient.Close(context.TODO())
+	if err := c.stream.Close(context.TODO()); err != nil {
+		c.logger.Error("Failed to close stream", zap.Error(err))
+	}
+	if err := c.mongoClient.Close(context.TODO()); err != nil {
+		c.logger.Error("Failed to close mongo client", zap.Error(err))
+	}
 	c.server.Shutdown()
 }
 

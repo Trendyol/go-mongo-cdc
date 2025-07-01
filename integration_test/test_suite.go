@@ -367,8 +367,12 @@ func (c *testConnector) Close() {
 		close(c.readyCh)
 	}
 
-	c.stream.Close(context.TODO())
-	c.mongoClient.Close(context.TODO())
+	if err := c.stream.Close(context.TODO()); err != nil {
+		c.logger.Error("Failed to close stream", zap.Error(err))
+	}
+	if err := c.mongoClient.Close(context.TODO()); err != nil {
+		c.logger.Error("Failed to close mongo client", zap.Error(err))
+	}
 	c.server.Shutdown()
 }
 

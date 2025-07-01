@@ -34,7 +34,9 @@ func NewServer(cfg config.Config, registry Registry) Server {
 
 	mux.HandleFunc("/status", func(w http.ResponseWriter, r *http.Request) {
 		w.WriteHeader(http.StatusOK)
-		w.Write([]byte("OK"))
+		if _, err := w.Write([]byte("OK")); err != nil {
+			http.Error(w, "Failed to write response", http.StatusInternalServerError)
+		}
 	})
 
 	mux.Handle("/metrics", promhttp.HandlerFor(registry.GetRegistry(), promhttp.HandlerOpts{}))

@@ -6,6 +6,7 @@ import (
 	"io"
 	"log/slog"
 	"os"
+	"path/filepath"
 	"time"
 
 	"go.uber.org/zap"
@@ -115,10 +116,15 @@ func ReadConfigYAML(filename string) (Config, error) {
 }
 
 func readFile(filename string) ([]byte, error) {
-	file, err := os.Open(filename)
+	cleanPath := filepath.Clean(filename)
+	file, err := os.Open(cleanPath)
 	if err != nil {
 		return nil, err
 	}
-	defer file.Close()
+	defer func() {
+		if closeErr := file.Close(); closeErr != nil {
+			return
+		}
+	}()
 	return io.ReadAll(file)
 }
