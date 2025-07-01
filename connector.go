@@ -3,7 +3,6 @@ package cdc
 import (
 	"context"
 	goerrors "errors"
-	"github.com/Trendyol/go-mongo-cdc/mongo/connection"
 	"os"
 	"os/signal"
 	"strings"
@@ -16,6 +15,7 @@ import (
 	"github.com/Trendyol/go-mongo-cdc/internal/metric"
 	"github.com/Trendyol/go-mongo-cdc/logger"
 	"github.com/Trendyol/go-mongo-cdc/mongo/changestream"
+	"github.com/Trendyol/go-mongo-cdc/mongo/connection"
 	"github.com/go-playground/errors"
 	"github.com/prometheus/client_golang/prometheus"
 	"go.uber.org/zap"
