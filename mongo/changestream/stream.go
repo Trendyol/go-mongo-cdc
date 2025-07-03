@@ -42,7 +42,13 @@ type stream struct {
 	isActive   bool
 }
 
-func NewStream(client connection.Client, cfg config.Config, metric metric.Metric, listener ListenerFunc, logger *zap.Logger) Streamer {
+func NewStream(
+	client connection.Client,
+	cfg config.Config,
+	metric metric.Metric,
+	listener ListenerFunc,
+	logger *zap.Logger,
+) Streamer {
 	database := client.Database(cfg.Database)
 	collection := database.Collection(cfg.Collection)
 	checkpoint := database.Collection(cfg.Checkpoint.Collection)
@@ -60,6 +66,7 @@ func NewStream(client connection.Client, cfg config.Config, metric metric.Metric
 	}
 }
 
+//nolint:funlen
 func (s *stream) Open(ctx context.Context) error {
 	if s.isActive {
 		return ErrorStreamInUse
@@ -96,7 +103,11 @@ func (s *stream) Open(ctx context.Context) error {
 	}
 
 	changeStream := s.collection.Watch(ctx, pipeline, opts)
-	defer changeStream.Close(ctx)
+	defer func() {
+		if err := changeStream.Close(ctx); err != nil {
+			s.logger.Error("Failed to close change stream", zap.Error(err))
+		}
+	}()
 
 	s.logger.Info("MongoDB Change Stream started successfully")
 
@@ -191,10 +202,14 @@ func (s *stream) checkReplicaSetStatus(ctx context.Context) error {
 		return nil
 	}
 
-	return errors.New("MongoDB is not running as a replica set or sharded cluster. Change streams require replica set or sharded cluster")
+	return errors.New(
+		"MongoDB is not running as a replica set or sharded cluster. " +
+			"Change streams require replica set or sharded cluster",
+	)
 }
 
-func (s *stream) processEvent(ctx context.Context, event message.ChangeEvent) error {
+//nolint:funlen
+func (s *stream) processEvent(_ context.Context, event message.ChangeEvent) error {
 	startTime := time.Now()
 
 	msg, err := message.NewMessage(event)
@@ -225,11 +240,13 @@ func (s *stream) updateMetrics(opType message.OperationType) {
 		s.metric.IncUpdateTotal()
 	case message.OperationDelete:
 		s.metric.IncDeleteTotal()
+	case message.OperationReplace:
+		s.metric.IncInsertTotal()
 	}
 }
 
 func (s *stream) saveResumeToken(ctx context.Context, token []byte) error {
-	if token == nil || len(token) == 0 {
+	if len(token) == 0 {
 		s.logger.Debug("Resume token is empty, skipping save")
 		return nil
 	}
@@ -294,6 +311,7 @@ func (s *stream) loadResumeToken(ctx context.Context) ([]byte, error) {
 	return checkpoint.ResumeToken, nil
 }
 
+//nolint:funlen
 func (s *stream) processAllDocuments(ctx context.Context) error {
 	s.logger.Info("Starting to process all existing documents as insert events")
 
@@ -301,7 +319,11 @@ func (s *stream) processAllDocuments(ctx context.Context) error {
 	if err != nil {
 		return err
 	}
-	defer cursor.Close(ctx)
+	defer func() {
+		if err := cursor.Close(ctx); err != nil {
+			s.logger.Error("Failed to close cursor", zap.Error(err))
+		}
+	}()
 
 	processedCount := 0
 	for cursor.Next(ctx) {
@@ -321,7 +343,7 @@ func (s *stream) processAllDocuments(ctx context.Context) error {
 				Database:   s.cfg.Database,
 				Collection: s.cfg.Collection,
 			},
-			ClusterTime: primitive.Timestamp{T: uint32(time.Now().Unix()), I: 1},
+			ClusterTime: primitive.Timestamp{T: uint32(time.Now().Unix()), I: 1}, // #nosec G115
 		}
 
 		if err := s.processEvent(ctx, syntheticEvent); err != nil {

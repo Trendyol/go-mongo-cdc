@@ -25,7 +25,12 @@ type Collection interface {
 	Watch(ctx context.Context, pipeline interface{}, opts ...*options.ChangeStreamOptions) ChangeStream
 	FindOne(ctx context.Context, filter interface{}, opts ...*options.FindOneOptions) SingleResult
 	Find(ctx context.Context, filter interface{}, opts ...*options.FindOptions) (Cursor, error)
-	UpdateOne(ctx context.Context, filter interface{}, update interface{}, opts ...*options.UpdateOptions) (UpdateResult, error)
+	UpdateOne(
+		ctx context.Context,
+		filter interface{},
+		update interface{},
+		opts ...*options.UpdateOptions,
+	) (UpdateResult, error)
 }
 
 type ChangeStream interface {
@@ -120,7 +125,11 @@ func (d *mongoDatabaseImpl) RunCommand(ctx context.Context, runCommand interface
 	return &mongoSingleResultImpl{sr: d.db.RunCommand(ctx, runCommand)}
 }
 
-func (c *mongoCollectionImpl) Watch(ctx context.Context, pipeline interface{}, opts ...*options.ChangeStreamOptions) ChangeStream {
+func (c *mongoCollectionImpl) Watch(
+	ctx context.Context,
+	pipeline interface{},
+	opts ...*options.ChangeStreamOptions,
+) ChangeStream {
 	cs, err := c.coll.Watch(ctx, pipeline, opts...)
 	if err != nil {
 		panic(err) // TODO For now, we'll panic, but this should be handled better
@@ -128,11 +137,19 @@ func (c *mongoCollectionImpl) Watch(ctx context.Context, pipeline interface{}, o
 	return &mongoChangeStreamImpl{cs: cs}
 }
 
-func (c *mongoCollectionImpl) FindOne(ctx context.Context, filter interface{}, opts ...*options.FindOneOptions) SingleResult {
+func (c *mongoCollectionImpl) FindOne(
+	ctx context.Context,
+	filter interface{},
+	opts ...*options.FindOneOptions,
+) SingleResult {
 	return &mongoSingleResultImpl{sr: c.coll.FindOne(ctx, filter, opts...)}
 }
 
-func (c *mongoCollectionImpl) Find(ctx context.Context, filter interface{}, opts ...*options.FindOptions) (Cursor, error) {
+func (c *mongoCollectionImpl) Find(
+	ctx context.Context,
+	filter interface{},
+	opts ...*options.FindOptions,
+) (Cursor, error) {
 	cursor, err := c.coll.Find(ctx, filter, opts...)
 	if err != nil {
 		return nil, err
@@ -140,7 +157,12 @@ func (c *mongoCollectionImpl) Find(ctx context.Context, filter interface{}, opts
 	return &mongoCursorImpl{cursor: cursor}, nil
 }
 
-func (c *mongoCollectionImpl) UpdateOne(ctx context.Context, filter interface{}, update interface{}, opts ...*options.UpdateOptions) (UpdateResult, error) {
+func (c *mongoCollectionImpl) UpdateOne(
+	ctx context.Context,
+	filter interface{},
+	update interface{},
+	opts ...*options.UpdateOptions,
+) (UpdateResult, error) {
 	result, err := c.coll.UpdateOne(ctx, filter, update, opts...)
 	if err != nil {
 		return nil, err

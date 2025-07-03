@@ -8,6 +8,7 @@ import (
 	cdc "github.com/Trendyol/go-mongo-cdc"
 	"github.com/Trendyol/go-mongo-cdc/config"
 	"github.com/Trendyol/go-mongo-cdc/mongo/changestream"
+	"github.com/Trendyol/go-mongo-cdc/mongo/message"
 	"go.uber.org/zap"
 )
 
@@ -38,7 +39,8 @@ func main() {
 	go connector.Start(ctx)
 
 	if err := connector.WaitUntilReady(ctx); err != nil {
-		log.Fatal("connector failed to start:", err)
+		log.Println("connector failed to start:", err)
+		return
 	}
 
 	log.Println("MongoDB CDC is running. Press Ctrl+C to stop.")
@@ -48,7 +50,11 @@ func main() {
 
 func listenerFunc(lc *changestream.ListenerContext) {
 	logger := zap.NewExample()
-	defer logger.Sync()
+	defer func() {
+		if err := logger.Sync(); err != nil {
+			log.Printf("Failed to sync logger: %v", err)
+		}
+	}()
 
 	logger.Info("Change event received",
 		zap.String("operation", string(lc.Message.OperationType)),
@@ -59,7 +65,7 @@ func listenerFunc(lc *changestream.ListenerContext) {
 	)
 
 	switch lc.Message.OperationType {
-	case "insert", "update", "replace":
+	case message.OperationInsert, message.OperationUpdate, message.OperationReplace:
 		if lc.Message.FullDocument != nil {
 			logger.Info("Document changed",
 				zap.String("operation", string(lc.Message.OperationType)),
@@ -67,14 +73,11 @@ func listenerFunc(lc *changestream.ListenerContext) {
 			)
 
 			logger.Info("Would convert to Elastic DTO here")
-
 		}
-
-	case "delete":
+	case message.OperationDelete:
 		logger.Info("Document deleted",
 			zap.Any("documentId", lc.Message.DocumentID),
 		)
-
 	}
 
 	if err := lc.Ack(); err != nil {
