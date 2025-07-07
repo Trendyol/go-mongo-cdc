@@ -3,8 +3,10 @@ package changestream
 import (
 	"context"
 	"errors"
+	"fmt"
 	"time"
 
+	"github.com/Trendyol/go-mongo-cdc/membership"
 	"github.com/Trendyol/go-mongo-cdc/mongo/connection"
 
 	"github.com/Trendyol/go-mongo-cdc/config"
@@ -40,6 +42,10 @@ type stream struct {
 	database   connection.Database
 	checkpoint connection.Collection
 	isActive   bool
+
+	membership      membership.Membership
+	partitionIndex  int
+	totalPartitions int
 }
 
 func NewStream(
@@ -53,17 +59,47 @@ func NewStream(
 	collection := database.Collection(cfg.Collection)
 	checkpoint := database.Collection(cfg.Checkpoint.Collection)
 
-	return &stream{
-		client:     client,
-		cfg:        cfg,
-		metric:     metric,
-		listener:   listener,
-		logger:     logger,
-		collection: collection,
-		database:   database,
-		checkpoint: checkpoint,
-		isActive:   false,
+	s := &stream{
+		client:          client,
+		cfg:             cfg,
+		metric:          metric,
+		listener:        listener,
+		logger:          logger,
+		collection:      collection,
+		database:        database,
+		checkpoint:      checkpoint,
+		isActive:        false,
+		partitionIndex:  0,
+		totalPartitions: 1,
 	}
+
+	logger.Info("Checking membership configuration",
+		zap.Bool("enabled", cfg.Membership.Enabled),
+		zap.String("type", cfg.Membership.Type),
+		zap.Int("member_number", cfg.Membership.MemberNumber),
+		zap.Int("total_members", cfg.Membership.TotalMembers))
+
+	if cfg.Membership.Enabled {
+		membershipConfig := membership.MembershipConfig{
+			Type:               membership.MembershipType(cfg.Membership.Type),
+			MemberID:           cfg.Membership.MemberID,
+			MemberNumber:       cfg.Membership.MemberNumber,
+			TotalMembers:       cfg.Membership.TotalMembers,
+			HeartbeatInterval:  cfg.Membership.HeartbeatInterval,
+			HealthCheckTimeout: cfg.Membership.HealthCheckTimeout,
+			Config:             cfg.Membership.Config,
+		}
+
+		membershipInstance, err := membership.NewMembership(membershipConfig, client, logger)
+		if err != nil {
+			logger.Error("Failed to create membership instance", zap.Error(err))
+			return s
+		}
+
+		s.membership = membershipInstance
+	}
+
+	return s
 }
 
 //nolint:funlen
@@ -78,6 +114,39 @@ func (s *stream) Open(ctx context.Context) error {
 	s.logger.Info("Starting MongoDB Change Stream",
 		zap.String("database", s.cfg.Database),
 		zap.String("collection", s.cfg.Collection))
+
+	if s.membership != nil {
+		if err := s.membership.Initialize(ctx); err != nil {
+			s.logger.Error("Failed to initialize membership", zap.Error(err))
+			return err
+		}
+
+		if err := s.membership.Start(ctx); err != nil {
+			s.logger.Error("Failed to start membership", zap.Error(err))
+			return err
+		}
+
+		s.membership.SetChangeCallback(s.onMembershipChange)
+		s.logger.Info("Membership change callback registered")
+
+		s.logger.Info("waiting for membership discovery to complete")
+		time.Sleep(3 * time.Second) // TODO: How to wait them?
+
+		membershipInfo := s.membership.GetMembershipInfo()
+		activeMembers := s.getActiveMembers(membershipInfo.Members)
+		s.totalPartitions = len(activeMembers)
+
+		for i, member := range activeMembers {
+			if member.ID == s.cfg.Membership.MemberID {
+				s.partitionIndex = i
+				break
+			}
+		}
+		s.logger.Info("membership initialized",
+			zap.Int("partition_index", s.partitionIndex),
+			zap.Int("total_partitions", s.totalPartitions),
+		)
+	}
 
 	if err := s.checkReplicaSetStatus(ctx); err != nil {
 		return err
@@ -168,11 +237,22 @@ func (s *stream) Open(ctx context.Context) error {
 
 func (s *stream) Close(ctx context.Context) error {
 	s.isActive = false
+
+	if s.membership != nil {
+		if err := s.membership.Stop(ctx); err != nil {
+			s.logger.Error("Failed to stop membership", zap.Error(err))
+		}
+	}
+
 	s.logger.Info("MongoDB Change Stream closed")
 	return nil
 }
 
 func (s *stream) createPipeline() []bson.D {
+	if s.membership != nil && s.totalPartitions > 1 {
+		return s.createSimplePartitionPipeline()
+	}
+
 	return []bson.D{
 		{
 			{Key: "$match", Value: bson.D{
@@ -315,7 +395,14 @@ func (s *stream) loadResumeToken(ctx context.Context) ([]byte, error) {
 func (s *stream) processAllDocuments(ctx context.Context) error {
 	s.logger.Info("Starting to process all existing documents as insert events")
 
-	cursor, err := s.collection.Find(ctx, bson.D{})
+	var filter bson.D
+	if s.membership != nil && s.totalPartitions > 1 {
+		filter = s.createChunkBasedFilter()
+	} else {
+		filter = bson.D{}
+	}
+
+	cursor, err := s.collection.Find(ctx, filter)
 	if err != nil {
 		return err
 	}
@@ -374,4 +461,256 @@ func (s *stream) processAllDocuments(ctx context.Context) error {
 		zap.Int("totalProcessed", processedCount))
 
 	return nil
+}
+
+func (s *stream) createChunkBasedFilter() bson.D {
+	if !s.cfg.Membership.ChunkBased {
+		return bson.D{}
+	}
+
+	shardKey := s.cfg.Membership.Config["shardKey"]
+	if shardKey == "" {
+		return bson.D{}
+	}
+
+	chunkRanges := s.getChunkRanges()
+	if len(chunkRanges) == 0 {
+		return bson.D{}
+	}
+
+	var orConditions []bson.D
+	for _, chunkRange := range chunkRanges {
+		condition := bson.D{
+			{Key: "$and", Value: bson.A{
+				bson.D{{Key: shardKey, Value: bson.D{{Key: "$gte", Value: chunkRange.Min}}}},
+				bson.D{{Key: shardKey, Value: bson.D{{Key: "$lt", Value: chunkRange.Max}}}},
+			}},
+		}
+		orConditions = append(orConditions, condition)
+	}
+
+	if len(orConditions) > 0 {
+		return bson.D{
+			{Key: "$or", Value: orConditions},
+		}
+	}
+
+	return bson.D{}
+}
+
+func (s *stream) onMembershipChange(oldInfo, newInfo membership.MembershipInfo) {
+	activeMembers := s.getActiveMembers(newInfo.Members)
+
+	s.logger.Info("membership change detected",
+		zap.Any("membership_info", newInfo),
+		zap.Int("new_total_members", len(activeMembers)),
+	)
+
+	oldPartitionIndex := s.partitionIndex
+	oldTotalPartitions := s.totalPartitions
+
+	s.totalPartitions = len(activeMembers)
+
+	for i, member := range activeMembers {
+		if member.ID == s.cfg.Membership.MemberID {
+			s.partitionIndex = i
+			break
+		}
+	}
+	if s.isActive && (oldPartitionIndex != s.partitionIndex || oldTotalPartitions != s.totalPartitions) {
+		s.logger.Info("partition assignment changed, restarting stream",
+			zap.Int("old_partition", oldPartitionIndex),
+			zap.Int("new_partition", s.partitionIndex),
+			zap.Int("old_total", oldTotalPartitions),
+			zap.Int("new_total", s.totalPartitions),
+		)
+
+		// TODO: Implement graceful stream restart
+		// This could involve stopping current stream and starting new one
+		// with updated partition filter
+	}
+}
+
+func (s *stream) getActiveMembers(members []membership.MemberInfo) []membership.MemberInfo {
+	var activeMembers []membership.MemberInfo
+	s.logger.Debug("filtering active members",
+		zap.Int("total_members", len(members)),
+	)
+
+	for _, member := range members {
+		s.logger.Debug("checking member",
+			zap.String("member_id", member.ID),
+			zap.String("status", string(member.Status)),
+		)
+
+		if member.Status == membership.MemberStatusActive || member.Status == membership.MemberStatusLeader {
+			activeMembers = append(activeMembers, member)
+			s.logger.Debug("member is active",
+				zap.String("member_id", member.ID),
+			)
+		}
+	}
+
+	s.logger.Debug("active members filtered",
+		zap.Int("active_count", len(activeMembers)),
+	)
+
+	return activeMembers
+}
+
+func (s *stream) createSimplePartitionPipeline() []bson.D {
+	basePipeline := []bson.D{
+		{
+			{Key: "$match", Value: bson.D{
+				{Key: "operationType", Value: bson.D{
+					{Key: "$in", Value: bson.A{"insert", "update", "delete", "replace"}},
+				}},
+			}},
+		},
+	}
+
+	if s.membership == nil || s.totalPartitions <= 1 {
+		return basePipeline
+	}
+
+	if !s.cfg.Membership.ChunkBased {
+		s.logger.Info("chunk-based partitioning is disabled, using basic partitioning")
+		return basePipeline
+	}
+
+	shardKey := s.cfg.Membership.Config["shardKey"]
+	if shardKey == "" {
+		s.logger.Warn("shard key not configured for chunk-based partitioning")
+		return basePipeline
+	}
+
+	chunkRanges := s.getChunkRanges()
+	if len(chunkRanges) == 0 {
+		s.logger.Warn("no chunk ranges found for this partition")
+		return basePipeline
+	}
+
+	var orConditions []bson.D
+	for _, chunkRange := range chunkRanges {
+		var minVal, maxVal interface{}
+
+		if minDoc, ok := chunkRange.Min.(bson.M); ok {
+			minVal = minDoc[shardKey]
+		} else {
+			if primitiveMin, ok := chunkRange.Min.(primitive.M); ok {
+				minVal = primitiveMin[shardKey]
+			} else {
+				s.logger.Error("unsupported chunk range min type",
+					zap.Any("min", chunkRange.Min),
+					zap.String("type", fmt.Sprintf("%T", chunkRange.Min)))
+				continue
+			}
+		}
+
+		if maxDoc, ok := chunkRange.Max.(bson.M); ok {
+			maxVal = maxDoc[shardKey]
+		} else {
+			if primitiveMax, ok := chunkRange.Max.(primitive.M); ok {
+				maxVal = primitiveMax[shardKey]
+			} else {
+				s.logger.Error("unsupported chunk range max type",
+					zap.Any("max", chunkRange.Max),
+					zap.String("type", fmt.Sprintf("%T", chunkRange.Max)))
+				continue
+			}
+		}
+
+		condition := bson.D{
+			{Key: "$and", Value: bson.A{
+				bson.D{{Key: "fullDocument." + shardKey, Value: bson.D{{Key: "$gte", Value: minVal}}}},
+				bson.D{{Key: "fullDocument." + shardKey, Value: bson.D{{Key: "$lt", Value: maxVal}}}},
+			}},
+		}
+		orConditions = append(orConditions, condition)
+	}
+
+	if len(orConditions) > 0 {
+		chunkFilter := bson.D{
+			{Key: "$match", Value: bson.D{
+				{Key: "$or", Value: orConditions},
+			}},
+		}
+		basePipeline = append(basePipeline, chunkFilter)
+	}
+
+	s.logger.Info("chunk-based partitioning enabled",
+		zap.String("shard_key", shardKey),
+		zap.Int("partition_index", s.partitionIndex),
+		zap.Int("total_partitions", s.totalPartitions),
+		zap.Int("chunk_ranges", len(chunkRanges)),
+		zap.Any("generated_pipeline", basePipeline),
+		zap.Any("chunk_ranges_detail", chunkRanges),
+	)
+
+	return basePipeline
+}
+
+type ChunkRange struct {
+	Min interface{} `bson:"min"`
+	Max interface{} `bson:"max"`
+}
+
+func (s *stream) getChunkRanges() []ChunkRange {
+	shardKey := s.cfg.Membership.Config["shardKey"]
+	if shardKey == "" {
+		return nil
+	}
+
+	chunks, err := s.getAllChunks()
+	if err != nil {
+		s.logger.Error("failed to get chunks", zap.Error(err))
+		return nil
+	}
+
+	var assignedChunks []ChunkRange
+	for i, chunk := range chunks {
+		if i%s.totalPartitions == s.partitionIndex {
+			assignedChunks = append(assignedChunks, chunk)
+		}
+	}
+
+	return assignedChunks
+}
+
+func (s *stream) getAllChunks() ([]ChunkRange, error) {
+	configDB := s.client.Database("config")
+	chunksCollection := configDB.Collection("chunks")
+
+	filter := bson.D{
+		{Key: "ns", Value: s.cfg.Database + "." + s.cfg.Collection},
+	}
+
+	cursor, err := chunksCollection.Find(context.Background(), filter)
+	if err != nil {
+		return nil, err
+	}
+	defer cursor.Close(context.Background())
+
+	var chunks []ChunkRange
+	for cursor.Next(context.Background()) {
+		var chunkDoc bson.M
+		if err := cursor.Decode(&chunkDoc); err != nil {
+			continue
+		}
+
+		if minVal, ok := chunkDoc["min"]; ok {
+			if maxVal, ok := chunkDoc["max"]; ok {
+				chunks = append(chunks, ChunkRange{
+					Min: minVal,
+					Max: maxVal,
+				})
+			}
+		}
+	}
+
+	return chunks, nil
+}
+
+func (s *stream) GetMembership() membership.Membership {
+	return s.membership
 }

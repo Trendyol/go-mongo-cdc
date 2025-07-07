@@ -14,6 +14,7 @@ import (
 	"github.com/Trendyol/go-mongo-cdc/internal/http"
 	"github.com/Trendyol/go-mongo-cdc/internal/metric"
 	"github.com/Trendyol/go-mongo-cdc/logger"
+	"github.com/Trendyol/go-mongo-cdc/membership"
 	"github.com/Trendyol/go-mongo-cdc/mongo/changestream"
 	"github.com/Trendyol/go-mongo-cdc/mongo/connection"
 	"github.com/go-playground/errors"
@@ -85,12 +86,17 @@ func NewConnector(ctx context.Context, cfg config.Config, listenerFunc changestr
 
 	prometheusRegistry := metric.NewRegistry(m)
 
+	var membershipInstance membership.Membership
+	if streamWithMembership, ok := stream.(interface{ GetMembership() membership.Membership }); ok {
+		membershipInstance = streamWithMembership.GetMembership()
+	}
+
 	return &connector{
 		cfg:                &cfg,
 		mongoClient:        mongoClient,
 		stream:             stream,
 		prometheusRegistry: prometheusRegistry,
-		server:             http.NewServer(cfg, prometheusRegistry),
+		server:             http.NewServer(cfg, prometheusRegistry, zapLogger, mongoClient, membershipInstance),
 		logger:             zapLogger,
 
 		cancelCh: make(chan os.Signal, 1),

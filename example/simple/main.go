@@ -12,6 +12,7 @@ import (
 	"go.uber.org/zap"
 )
 
+// TODO: Update example with membership & chunk configs
 func main() {
 	cfg := config.Config{
 		Host:       "localhost",
