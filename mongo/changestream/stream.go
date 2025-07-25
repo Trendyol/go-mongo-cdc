@@ -4,6 +4,7 @@ import (
 	"context"
 	"errors"
 	"fmt"
+	"sort"
 	"time"
 
 	"github.com/Trendyol/go-mongo-cdc/membership"
@@ -46,6 +47,10 @@ type stream struct {
 	membership      membership.Membership
 	partitionIndex  int
 	totalPartitions int
+
+	// Stream restart için gerekli
+	restartChan      chan struct{}
+	restartRequested bool
 }
 
 func NewStream(
@@ -60,17 +65,19 @@ func NewStream(
 	checkpoint := database.Collection(cfg.Checkpoint.Collection)
 
 	s := &stream{
-		client:          client,
-		cfg:             cfg,
-		metric:          metric,
-		listener:        listener,
-		logger:          logger,
-		collection:      collection,
-		database:        database,
-		checkpoint:      checkpoint,
-		isActive:        false,
-		partitionIndex:  0,
-		totalPartitions: 1,
+		client:           client,
+		cfg:              cfg,
+		metric:           metric,
+		listener:         listener,
+		logger:           logger,
+		collection:       collection,
+		database:         database,
+		checkpoint:       checkpoint,
+		isActive:         false,
+		partitionIndex:   0,
+		totalPartitions:  1,
+		restartChan:      make(chan struct{}, 1),
+		restartRequested: false,
 	}
 
 	logger.Info("Checking membership configuration",
@@ -129,22 +136,35 @@ func (s *stream) Open(ctx context.Context) error {
 		s.membership.SetChangeCallback(s.onMembershipChange)
 		s.logger.Info("Membership change callback registered")
 
-		s.logger.Info("waiting for membership discovery to complete")
-		time.Sleep(3 * time.Second) // TODO: How to wait them?
-
 		membershipInfo := s.membership.GetMembershipInfo()
 		activeMembers := s.getActiveMembers(membershipInfo.Members)
 		s.totalPartitions = len(activeMembers)
 
+		// Actual member ID'yi membership'ten al
+		actualMemberID := s.membership.GetMemberInfo().ID
+
+		// Kendimizi active members içinde bul
+		found := false
 		for i, member := range activeMembers {
-			if member.ID == s.cfg.Membership.MemberID {
+			if member.ID == actualMemberID {
 				s.partitionIndex = i
+				found = true
 				break
 			}
 		}
+
+		if !found {
+			s.logger.Warn("could not find myself in initial active members, defaulting to partition 0",
+				zap.String("actual_member_id", actualMemberID),
+				zap.Any("active_members", activeMembers),
+			)
+			s.partitionIndex = 0
+		}
+
 		s.logger.Info("membership initialized",
 			zap.Int("partition_index", s.partitionIndex),
 			zap.Int("total_partitions", s.totalPartitions),
+			zap.String("actual_member_id", actualMemberID),
 		)
 	}
 
@@ -199,6 +219,12 @@ func (s *stream) Open(ctx context.Context) error {
 		select {
 		case <-ctx.Done():
 			return ctx.Err()
+		case <-s.restartChan:
+			if s.restartRequested {
+				s.logger.Info("stream restart requested, closing current stream")
+				s.restartRequested = false
+				return errors.New("stream restart requested")
+			}
 		case <-saveTokenChan:
 			if changeStream.ResumeToken() != nil {
 				if err := s.saveResumeToken(ctx, changeStream.ResumeToken()); err != nil {
@@ -397,7 +423,7 @@ func (s *stream) processAllDocuments(ctx context.Context) error {
 
 	var filter bson.D
 	if s.membership != nil && s.totalPartitions > 1 {
-		filter = s.createChunkBasedFilter()
+		filter = s.createDocumentFilter()
 	} else {
 		filter = bson.D{}
 	}
@@ -463,27 +489,74 @@ func (s *stream) processAllDocuments(ctx context.Context) error {
 	return nil
 }
 
-func (s *stream) createChunkBasedFilter() bson.D {
-	if !s.cfg.Membership.ChunkBased {
-		return bson.D{}
+func (s *stream) createDocumentFilter() bson.D {
+	if s.cfg.Membership.ChunkBased {
+		shardKey := s.cfg.Membership.Config["shardKey"]
+		if shardKey == "" {
+			return s.createHashBasedDocumentFilter()
+		}
+
+		chunkRanges := s.getChunkRanges()
+		if len(chunkRanges) == 0 {
+			return s.createHashBasedDocumentFilter()
+		}
+
+		return s.createChunkBasedDocumentFilter(shardKey, chunkRanges)
 	}
 
-	shardKey := s.cfg.Membership.Config["shardKey"]
-	if shardKey == "" {
-		return bson.D{}
-	}
+	return s.createHashBasedDocumentFilter()
+}
 
-	chunkRanges := s.getChunkRanges()
-	if len(chunkRanges) == 0 {
-		return bson.D{}
+func (s *stream) createHashBasedDocumentFilter() bson.D {
+	// Document query için hash-based filtering
+	// ObjectID'nin son karakterlerini kullanarak document'ları partition'lara dağıtıyoruz
+	return bson.D{
+		{Key: "$expr", Value: bson.D{
+			{Key: "$eq", Value: bson.A{
+				bson.D{{Key: "$mod", Value: bson.A{
+					bson.D{{Key: "$toInt", Value: bson.D{
+						{Key: "$substr", Value: bson.A{
+							bson.D{{Key: "$toString", Value: "$_id"}},
+							bson.D{{Key: "$subtract", Value: bson.A{
+								bson.D{{Key: "$strLenCP", Value: bson.D{{Key: "$toString", Value: "$_id"}}}},
+								2,
+							}}},
+							2,
+						}},
+					}}},
+					s.totalPartitions,
+				}}},
+				s.partitionIndex,
+			}},
+		}},
 	}
+}
 
+func (s *stream) createChunkBasedDocumentFilter(shardKey string, chunkRanges []ChunkRange) bson.D {
 	var orConditions []bson.D
 	for _, chunkRange := range chunkRanges {
+		var minVal, maxVal interface{}
+
+		if minDoc, ok := chunkRange.Min.(bson.M); ok {
+			minVal = minDoc[shardKey]
+		} else if primitiveMin, ok := chunkRange.Min.(primitive.M); ok {
+			minVal = primitiveMin[shardKey]
+		} else {
+			continue
+		}
+
+		if maxDoc, ok := chunkRange.Max.(bson.M); ok {
+			maxVal = maxDoc[shardKey]
+		} else if primitiveMax, ok := chunkRange.Max.(primitive.M); ok {
+			maxVal = primitiveMax[shardKey]
+		} else {
+			continue
+		}
+
 		condition := bson.D{
 			{Key: "$and", Value: bson.A{
-				bson.D{{Key: shardKey, Value: bson.D{{Key: "$gte", Value: chunkRange.Min}}}},
-				bson.D{{Key: shardKey, Value: bson.D{{Key: "$lt", Value: chunkRange.Max}}}},
+				bson.D{{Key: shardKey, Value: bson.D{{Key: "$gte", Value: minVal}}}},
+				bson.D{{Key: shardKey, Value: bson.D{{Key: "$lt", Value: maxVal}}}},
 			}},
 		}
 		orConditions = append(orConditions, condition)
@@ -501,9 +574,14 @@ func (s *stream) createChunkBasedFilter() bson.D {
 func (s *stream) onMembershipChange(oldInfo, newInfo membership.MembershipInfo) {
 	activeMembers := s.getActiveMembers(newInfo.Members)
 
+	// Actual member ID'yi membership'ten al
+	actualMemberID := s.membership.GetMemberInfo().ID
+
 	s.logger.Info("membership change detected",
 		zap.Any("membership_info", newInfo),
 		zap.Int("new_total_members", len(activeMembers)),
+		zap.Any("active_members", activeMembers),
+		zap.String("actual_member_id", actualMemberID),
 	)
 
 	oldPartitionIndex := s.partitionIndex
@@ -511,12 +589,28 @@ func (s *stream) onMembershipChange(oldInfo, newInfo membership.MembershipInfo) 
 
 	s.totalPartitions = len(activeMembers)
 
+	// Kendimizi bul ve partition index'i ayarla
+	found := false
 	for i, member := range activeMembers {
-		if member.ID == s.cfg.Membership.MemberID {
+		if member.ID == actualMemberID {
 			s.partitionIndex = i
+			found = true
+			s.logger.Info("found myself in active members",
+				zap.Int("partition_index", i),
+				zap.String("member_id", member.ID),
+			)
 			break
 		}
 	}
+
+	if !found {
+		s.logger.Error("could not find myself in active members",
+			zap.String("actual_member_id", actualMemberID),
+			zap.Any("active_members", activeMembers),
+		)
+		return
+	}
+
 	if s.isActive && (oldPartitionIndex != s.partitionIndex || oldTotalPartitions != s.totalPartitions) {
 		s.logger.Info("partition assignment changed, restarting stream",
 			zap.Int("old_partition", oldPartitionIndex),
@@ -525,9 +619,14 @@ func (s *stream) onMembershipChange(oldInfo, newInfo membership.MembershipInfo) 
 			zap.Int("new_total", s.totalPartitions),
 		)
 
-		// TODO: Implement graceful stream restart
-		// This could involve stopping current stream and starting new one
-		// with updated partition filter
+		// Stream restart signal gönder
+		s.restartRequested = true
+		select {
+		case s.restartChan <- struct{}{}:
+			s.logger.Info("stream restart signal sent")
+		default:
+			s.logger.Info("stream restart signal already pending")
+		}
 	}
 }
 
@@ -537,22 +636,17 @@ func (s *stream) getActiveMembers(members []membership.MemberInfo) []membership.
 		zap.Int("total_members", len(members)),
 	)
 
-	for _, member := range members {
-		s.logger.Debug("checking member",
-			zap.String("member_id", member.ID),
-			zap.String("status", string(member.Status)),
-		)
+	// Tüm member'ları al ve ID'ye göre sırala
+	activeMembers = append(activeMembers, members...)
 
-		if member.Status == membership.MemberStatusActive || member.Status == membership.MemberStatusLeader {
-			activeMembers = append(activeMembers, member)
-			s.logger.Debug("member is active",
-				zap.String("member_id", member.ID),
-			)
-		}
-	}
+	// Member'ları ID'ye göre sırala - tutarlı sıralama için
+	sort.Slice(activeMembers, func(i, j int) bool {
+		return activeMembers[i].ID < activeMembers[j].ID
+	})
 
-	s.logger.Debug("active members filtered",
+	s.logger.Debug("active members sorted",
 		zap.Int("active_count", len(activeMembers)),
+		zap.Any("members", activeMembers),
 	)
 
 	return activeMembers
@@ -573,23 +667,65 @@ func (s *stream) createSimplePartitionPipeline() []bson.D {
 		return basePipeline
 	}
 
-	if !s.cfg.Membership.ChunkBased {
-		s.logger.Info("chunk-based partitioning is disabled, using basic partitioning")
-		return basePipeline
+	if s.cfg.Membership.ChunkBased {
+		shardKey := s.cfg.Membership.Config["shardKey"]
+		if shardKey == "" {
+			s.logger.Warn("shard key not configured for chunk-based partitioning")
+			return s.createHashBasedPartitionPipeline(basePipeline)
+		}
+
+		chunkRanges := s.getChunkRanges()
+		if len(chunkRanges) == 0 {
+			s.logger.Warn("no chunk ranges found for this partition, falling back to hash-based partitioning")
+			return s.createHashBasedPartitionPipeline(basePipeline)
+		}
+
+		return s.createChunkBasedPartitionPipeline(basePipeline, shardKey, chunkRanges)
 	}
 
-	shardKey := s.cfg.Membership.Config["shardKey"]
-	if shardKey == "" {
-		s.logger.Warn("shard key not configured for chunk-based partitioning")
-		return basePipeline
+	s.logger.Info("using hash-based partitioning")
+	return s.createHashBasedPartitionPipeline(basePipeline)
+}
+
+func (s *stream) createHashBasedPartitionPipeline(basePipeline []bson.D) []bson.D {
+	// Document ID'sine göre hash-based partitioning
+	// ObjectID string'inin uzunluğunu hesaplayıp son 2 karakteri alıyoruz
+	hashBasedFilter := bson.D{
+		{Key: "$match", Value: bson.D{
+			{Key: "$expr", Value: bson.D{
+				{Key: "$eq", Value: bson.A{
+					bson.D{{Key: "$mod", Value: bson.A{
+						bson.D{{Key: "$toInt", Value: bson.D{
+							{Key: "$substr", Value: bson.A{
+								bson.D{{Key: "$toString", Value: "$documentKey._id"}},
+								bson.D{{Key: "$subtract", Value: bson.A{
+									bson.D{{Key: "$strLenCP", Value: bson.D{{Key: "$toString", Value: "$documentKey._id"}}}},
+									2,
+								}}},
+								2,
+							}},
+						}}},
+						s.totalPartitions,
+					}}},
+					s.partitionIndex,
+				}},
+			}},
+		}},
 	}
 
-	chunkRanges := s.getChunkRanges()
-	if len(chunkRanges) == 0 {
-		s.logger.Warn("no chunk ranges found for this partition")
-		return basePipeline
-	}
+	result := append(basePipeline, hashBasedFilter)
 
+	s.logger.Info("hash-based partitioning enabled",
+		zap.Int("partition_index", s.partitionIndex),
+		zap.Int("total_partitions", s.totalPartitions),
+		zap.Any("generated_pipeline", result),
+		zap.String("filter_explanation", "Documents will be filtered by: (_id.toString().substr(-2, 2).toInt() % totalPartitions) == partitionIndex"),
+	)
+
+	return result
+}
+
+func (s *stream) createChunkBasedPartitionPipeline(basePipeline []bson.D, shardKey string, chunkRanges []ChunkRange) []bson.D {
 	var orConditions []bson.D
 	for _, chunkRange := range chunkRanges {
 		var minVal, maxVal interface{}
