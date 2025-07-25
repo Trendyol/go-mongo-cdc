@@ -24,7 +24,6 @@ import (
 
 type Connector interface {
 	Start(ctx context.Context)
-	WaitUntilReady(ctx context.Context) error
 	Close()
 	GetConfig() *config.Config
 	SetMetricCollectors(collectors ...prometheus.Collector)
@@ -40,7 +39,9 @@ type connector struct {
 	mongoClient        connection.Client
 	logger             *zap.Logger
 
-	once sync.Once
+	once   sync.Once
+	closed bool
+	mu     sync.Mutex
 }
 
 func NewConnectorWithConfigFile(
@@ -111,52 +112,67 @@ func (c *connector) Start(ctx context.Context) {
 
 	c.logger.Info("Starting MongoDB Change Stream watcher...")
 
-	err := c.stream.Open(ctx)
-	if err != nil {
-		if goerrors.Is(err, changestream.ErrorStreamInUse) {
-			c.logger.Info("Stream capture failed, retrying...")
-			time.Sleep(5 * time.Second)
-			c.Start(ctx)
+	go func() {
+		err := c.stream.Open(ctx)
+		if err != nil {
+			if goerrors.Is(err, changestream.ErrorStreamInUse) {
+				c.logger.Info("Stream capture failed, retrying...")
+				time.Sleep(5 * time.Second)
+				c.Start(ctx)
+				return
+			}
+			c.logger.Error("MongoDB stream open error", zap.Error(err))
 			return
 		}
-		c.logger.Error("MongoDB stream open error", zap.Error(err))
-		return
-	}
+	}()
 
 	c.logger.Info("MongoDB Change Stream started successfully")
 
-	signal.Notify(c.cancelCh, syscall.SIGTERM, syscall.SIGINT, syscall.SIGABRT, syscall.SIGQUIT)
-
 	c.readyCh <- struct{}{}
 
-	<-c.cancelCh
-	c.logger.Debug("Cancel channel triggered")
-}
+	signal.Notify(c.cancelCh, syscall.SIGTERM, syscall.SIGINT, syscall.SIGABRT, syscall.SIGQUIT)
 
-func (c *connector) WaitUntilReady(ctx context.Context) error {
-	select {
-	case <-c.readyCh:
-		return nil
-	case <-ctx.Done():
-		return ctx.Err()
-	}
+	<-c.cancelCh
+	c.logger.Info("Shutdown signal received")
 }
 
 func (c *connector) Close() {
+	c.mu.Lock()
+	defer c.mu.Unlock()
+
+	c.logger.Info("Closing connections")
+
+	if c.closed {
+		c.logger.Info("Already closed, skipping cleanup")
+		return
+	}
+
+	c.closed = true
+
 	if !isClosed(c.cancelCh) {
 		close(c.cancelCh)
 	}
+
 	if !isClosed(c.readyCh) {
 		close(c.readyCh)
 	}
 
-	if err := c.stream.Close(context.TODO()); err != nil {
+	closeCtx, cancel := context.WithTimeout(context.Background(), 10*time.Second)
+	defer cancel()
+
+	c.logger.Info("Closing stream...")
+	if err := c.stream.Close(closeCtx); err != nil {
 		c.logger.Error("Failed to close stream", zap.Error(err))
 	}
-	if err := c.mongoClient.Close(context.TODO()); err != nil {
+
+	c.logger.Info("Closing mongo client...")
+	if err := c.mongoClient.Close(closeCtx); err != nil {
 		c.logger.Error("Failed to close mongo client", zap.Error(err))
 	}
+
 	c.server.Shutdown()
+
+	c.logger.Info("Closed connections")
 }
 
 func (c *connector) GetConfig() *config.Config {

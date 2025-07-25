@@ -17,8 +17,8 @@ func main() {
 	cfg := config.Config{
 		Host:       "localhost",
 		Port:       27017,
-		Database:   "seller_contents_db",
-		Collection: "seller_contents",
+		Database:   "exampleDB",
+		Collection: "exampleCollection",
 		DebugMode:  true,
 		Metric: config.MetricConfig{
 			Port: 8080,
@@ -26,6 +26,15 @@ func main() {
 		Checkpoint: config.CheckpointConfig{
 			Collection:   "checkpoint-SellerContents",
 			SaveInterval: 30 * time.Second,
+		},
+		Membership: config.MembershipConfig{
+			HeartbeatInterval:  2 * time.Second,
+			HealthCheckTimeout: 6 * time.Second,
+			Enabled:            true,
+			Type:               "dynamic",
+			Config: map[string]string{
+				"shardKey": "sellerId",
+			},
 		},
 	}
 
@@ -37,16 +46,7 @@ func main() {
 	defer connector.Close()
 
 	ctx := context.Background()
-	go connector.Start(ctx)
-
-	if err := connector.WaitUntilReady(ctx); err != nil {
-		log.Println("connector failed to start:", err)
-		return
-	}
-
-	log.Println("MongoDB CDC is running. Press Ctrl+C to stop.")
-
-	select {}
+	connector.Start(ctx)
 }
 
 func listenerFunc(lc *changestream.ListenerContext) {

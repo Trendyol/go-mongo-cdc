@@ -128,7 +128,7 @@ func (d *DynamicMembership) Stop(ctx context.Context) error {
 	d.wg.Wait()
 
 	if err := d.unregisterMember(ctx); err != nil {
-		d.logger.Error("Failed to unregister member", zap.Error(err))
+		d.logger.Error("Failed to unregister member", zap.String("memberId", d.memberInfo.ID), zap.Error(err))
 	}
 
 	d.logger.Info("Dynamic membership stopped")
@@ -251,7 +251,20 @@ func (d *DynamicMembership) sendHeartbeat(ctx context.Context) error {
 	}
 
 	d.logger.Debug("Heartbeat sent successfully", zap.String("memberId", d.memberInfo.ID))
+
+	d.cleanupExpiredMembers(ctx)
+
 	return nil
+}
+
+func (d *DynamicMembership) cleanupExpiredMembers(ctx context.Context) {
+	cutoff := time.Now().Add(-d.config.HealthCheckTimeout)
+	filter := bson.M{"lastSeen": bson.M{"$lt": cutoff}}
+	_, err := d.collection.DeleteMany(ctx, filter)
+	if err != nil {
+		d.logger.Error("Failed to cleanup expired members", zap.Error(err))
+		return
+	}
 }
 
 func (d *DynamicMembership) performRebalance(ctx context.Context) error {
