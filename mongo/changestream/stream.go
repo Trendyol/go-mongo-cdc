@@ -4,7 +4,6 @@ import (
 	"context"
 	"errors"
 	"fmt"
-	"sort"
 	"sync"
 	"time"
 
@@ -25,7 +24,7 @@ var ErrorStreamInUse = errors.New("change stream is already in use")
 type Streamer interface {
 	Open(ctx context.Context) error
 	Close(ctx context.Context) error
-	Rebalance(ctx context.Context) error
+	Rebalance() error
 }
 
 type ListenerFunc func(ctx *ListenerContext)
@@ -149,31 +148,17 @@ func (s *stream) Open(ctx context.Context) error {
 		}
 
 		s.membership.SetChangeCallback(s.onMembershipChange)
-		s.logger.Info("Membership change callback registered")
 
-		membershipInfo := s.membership.GetMembershipInfo()
-		activeMembers := s.getActiveMembers(membershipInfo.Members)
+		activeMembers := s.membership.GetMembershipInfo().Members
 		s.totalPartitions = len(activeMembers)
 
-		// Actual member ID'yi membership'ten al
 		actualMemberID := s.membership.GetMemberInfo().ID
 
-		// Kendimizi active members içinde bul
-		found := false
 		for i, member := range activeMembers {
 			if member.ID == actualMemberID {
 				s.partitionIndex = i
-				found = true
 				break
 			}
-		}
-
-		if !found {
-			s.logger.Warn("could not find myself in initial active members, defaulting to partition 0",
-				zap.String("actual_member_id", actualMemberID),
-				zap.Any("active_members", activeMembers),
-			)
-			s.partitionIndex = 0
 		}
 
 		s.logger.Info("membership initialized",
@@ -236,7 +221,6 @@ func (s *stream) Open(ctx context.Context) error {
 		case <-ctx.Done():
 			return ctx.Err()
 		case <-s.streamContext.Done():
-			s.logger.Info("stream context cancelled for rebalance")
 			return context.Canceled
 		case <-saveTokenChan:
 			if changeStream.ResumeToken() != nil {
@@ -298,10 +282,16 @@ func (s *stream) Close(ctx context.Context) error {
 }
 
 func (s *stream) createPipeline() []bson.D {
+	basePipeline := s.createBasePipeline()
+
 	if s.membership != nil && s.totalPartitions > 1 {
-		return s.createSimplePartitionPipeline()
+		return s.createSimplePartitionPipeline(basePipeline)
 	}
 
+	return basePipeline
+}
+
+func (s *stream) createBasePipeline() []bson.D {
 	return []bson.D{
 		{
 			{Key: "$match", Value: bson.D{
@@ -595,43 +585,25 @@ func (s *stream) createChunkBasedDocumentFilter(shardKey string, chunkRanges []C
 }
 
 func (s *stream) onMembershipChange(oldInfo, newInfo membership.MembershipInfo) {
-	activeMembers := s.getActiveMembers(newInfo.Members)
-
 	// Actual member ID'yi membership'ten al
 	actualMemberID := s.membership.GetMemberInfo().ID
 
 	s.logger.Info("membership change detected",
-		zap.Any("membership_info", newInfo),
-		zap.Int("new_total_members", len(activeMembers)),
-		zap.Any("active_members", activeMembers),
+		zap.Any("active_members", newInfo.Members),
 		zap.String("actual_member_id", actualMemberID),
 	)
 
 	oldPartitionIndex := s.partitionIndex
 	oldTotalPartitions := s.totalPartitions
 
-	s.totalPartitions = len(activeMembers)
+	s.totalPartitions = len(newInfo.Members)
 
 	// Kendimizi bul ve partition index'i ayarla
-	found := false
-	for i, member := range activeMembers {
+	for i, member := range newInfo.Members {
 		if member.ID == actualMemberID {
 			s.partitionIndex = i
-			found = true
-			s.logger.Info("found myself in active members",
-				zap.Int("partition_index", i),
-				zap.String("member_id", member.ID),
-			)
 			break
 		}
-	}
-
-	if !found {
-		s.logger.Error("could not find myself in active members",
-			zap.String("actual_member_id", actualMemberID),
-			zap.Any("active_members", activeMembers),
-		)
-		return
 	}
 
 	if s.isActive && (oldPartitionIndex != s.partitionIndex || oldTotalPartitions != s.totalPartitions) {
@@ -644,46 +616,14 @@ func (s *stream) onMembershipChange(oldInfo, newInfo membership.MembershipInfo) 
 
 		// Rebalance trigger - context olarak arka planda çalışan context'i kullan
 		go func() {
-			if err := s.Rebalance(context.Background()); err != nil {
+			if err := s.Rebalance(); err != nil {
 				s.logger.Error("Failed to trigger rebalance", zap.Error(err))
 			}
 		}()
 	}
 }
 
-func (s *stream) getActiveMembers(members []membership.MemberInfo) []membership.MemberInfo {
-	var activeMembers []membership.MemberInfo
-	s.logger.Debug("filtering active members",
-		zap.Int("total_members", len(members)),
-	)
-
-	// Tüm member'ları al ve ID'ye göre sırala
-	activeMembers = append(activeMembers, members...)
-
-	// Member'ları ID'ye göre sırala - tutarlı sıralama için
-	sort.Slice(activeMembers, func(i, j int) bool {
-		return activeMembers[i].ID < activeMembers[j].ID
-	})
-
-	s.logger.Debug("active members sorted",
-		zap.Int("active_count", len(activeMembers)),
-		zap.Any("members", activeMembers),
-	)
-
-	return activeMembers
-}
-
-func (s *stream) createSimplePartitionPipeline() []bson.D {
-	basePipeline := []bson.D{
-		{
-			{Key: "$match", Value: bson.D{
-				{Key: "operationType", Value: bson.D{
-					{Key: "$in", Value: bson.A{"insert", "update", "delete", "replace"}},
-				}},
-			}},
-		},
-	}
-
+func (s *stream) createSimplePartitionPipeline(basePipeline []bson.D) []bson.D {
 	if s.membership == nil || s.totalPartitions <= 1 {
 		return basePipeline
 	}
@@ -735,13 +675,6 @@ func (s *stream) createHashBasedPartitionPipeline(basePipeline []bson.D) []bson.
 	}
 
 	result := append(basePipeline, hashBasedFilter)
-
-	s.logger.Info("hash-based partitioning enabled",
-		zap.Int("partition_index", s.partitionIndex),
-		zap.Int("total_partitions", s.totalPartitions),
-		zap.Any("generated_pipeline", result),
-		zap.String("filter_explanation", "Documents will be filtered by: (_id.toString().substr(-2, 2).toInt() % totalPartitions) == partitionIndex"),
-	)
 
 	return result
 }
@@ -873,7 +806,7 @@ func (s *stream) GetMembership() membership.Membership {
 }
 
 // Rebalance performs a smooth rebalancing operation
-func (s *stream) Rebalance(ctx context.Context) error {
+func (s *stream) Rebalance() error {
 	s.rebalanceMutex.Lock()
 	defer s.rebalanceMutex.Unlock()
 
@@ -884,7 +817,7 @@ func (s *stream) Rebalance(ctx context.Context) error {
 			s.logger.Info("rebalance timer reset due to another rebalance request")
 		} else {
 			s.rebalanceTimer = time.AfterFunc(s.rebalanceDelay, func() {
-				s.performRebalance(ctx)
+				s.performRebalance()
 			})
 			s.logger.Info("new rebalance timer scheduled")
 		}
@@ -902,7 +835,7 @@ func (s *stream) Rebalance(ctx context.Context) error {
 	}
 
 	s.rebalanceTimer = time.AfterFunc(delay, func() {
-		s.performRebalance(ctx)
+		s.performRebalance()
 	})
 
 	if delay > 0 {
@@ -913,7 +846,7 @@ func (s *stream) Rebalance(ctx context.Context) error {
 }
 
 // performRebalance does the actual rebalancing work
-func (s *stream) performRebalance(ctx context.Context) {
+func (s *stream) performRebalance() {
 	s.logger.Info("performing rebalance operation",
 		zap.Int("old_partition_index", s.partitionIndex),
 		zap.Int("new_total_partitions", s.totalPartitions))

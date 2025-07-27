@@ -2,10 +2,10 @@ package main
 
 import (
 	"context"
+	cdc "github.com/Trendyol/go-mongo-cdc"
 	"log"
 	"time"
 
-	cdc "github.com/Trendyol/go-mongo-cdc"
 	"github.com/Trendyol/go-mongo-cdc/config"
 	"github.com/Trendyol/go-mongo-cdc/mongo/changestream"
 	"github.com/Trendyol/go-mongo-cdc/mongo/message"
@@ -14,6 +14,12 @@ import (
 
 // TODO: Update example with membership & chunk configs
 func main() {
+	// Debug level logger
+	/*	loggerConfig := zap.NewDevelopmentConfig()
+		loggerConfig.Level = zap.NewAtomicLevelAt(zapcore.DebugLevel)
+		logger, _ := loggerConfig.Build()
+		defer logger.Sync()*/
+
 	cfg := config.Config{
 		Host:       "localhost",
 		Port:       27017,
@@ -28,14 +34,18 @@ func main() {
 			SaveInterval: 30 * time.Second,
 		},
 		Membership: config.MembershipConfig{
-			HeartbeatInterval:  2 * time.Second,
-			HealthCheckTimeout: 6 * time.Second,
+			HeartbeatInterval:  30 * time.Second,
+			HealthCheckTimeout: 60 * time.Second,
 			Enabled:            true,
 			Type:               "dynamic",
+			ChunkBased:         false, // Hash-based partitioning kullan
 			Config: map[string]string{
-				"shardKey": "sellerId",
+				"shardKey": "sellerId", // Sadece ChunkBased: true olduğunda kullanılır
 			},
 		},
+		/*		Logger: config.LoggerConfig{
+				Logger: logger,
+			},*/
 	}
 
 	connector, err := cdc.NewConnector(context.Background(), cfg, listenerFunc)

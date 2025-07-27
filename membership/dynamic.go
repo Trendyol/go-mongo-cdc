@@ -3,6 +3,7 @@ package membership
 import (
 	"context"
 	"fmt"
+	"sort"
 	"sync"
 	"time"
 
@@ -310,6 +311,11 @@ func (d *DynamicMembership) getActiveMembers(ctx context.Context) ([]MemberInfo,
 }
 
 func (d *DynamicMembership) updateMembershipInfoInternal(ctx context.Context, members []MemberInfo) error {
+	// Members'ı ID'ye göre sırala - consistent ordering için
+	sort.Slice(members, func(i, j int) bool {
+		return members[i].ID < members[j].ID
+	})
+
 	d.mu.Lock()
 	oldInfo := d.membershipInfo
 
@@ -332,11 +338,6 @@ func (d *DynamicMembership) updateMembershipInfoInternal(ctx context.Context, me
 
 	// Sadece gerçek değişiklik olduğunda callback çağır
 	if callback != nil && (oldInfo.TotalMembers != newInfo.TotalMembers || d.memberListChanged(oldInfo.Members, newInfo.Members)) {
-		d.logger.Info("Membership change detected, calling callback",
-			zap.Int("old_total_members", oldInfo.TotalMembers),
-			zap.Int("new_total_members", newInfo.TotalMembers),
-			zap.Any("old_members", d.getMemberIDs(oldInfo.Members)),
-			zap.Any("new_members", d.getMemberIDs(newInfo.Members)))
 		callback(oldInfo, newInfo)
 	}
 
@@ -396,7 +397,7 @@ func (d *DynamicMembership) getMemberIDs(members []MemberInfo) []string {
 func (d *DynamicMembership) membershipChangeStreamLoop(ctx context.Context) {
 	defer d.wg.Done()
 
-	d.logger.Info("Starting optimized membership change stream monitoring")
+	d.logger.Info("Starting membership change stream monitoring")
 
 	// Change stream için pipeline - sadece critical değişiklikleri dinle
 	pipeline := []bson.D{
