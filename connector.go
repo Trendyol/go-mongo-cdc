@@ -113,16 +113,32 @@ func (c *connector) Start(ctx context.Context) {
 	c.logger.Info("Starting MongoDB Change Stream watcher...")
 
 	go func() {
-		err := c.stream.Open(ctx)
-		if err != nil {
+		for {
+			err := c.stream.Open(ctx)
+			if err == nil {
+				c.logger.Info("MongoDB stream completed normally")
+				return
+			}
+
 			if goerrors.Is(err, changestream.ErrorStreamInUse) {
 				c.logger.Info("Stream capture failed, retrying...")
 				time.Sleep(5 * time.Second)
-				c.Start(ctx)
+				continue
+			}
+
+			if goerrors.Is(err, context.Canceled) {
+				c.logger.Info("Stream restarting due to rebalance...")
+				time.Sleep(1 * time.Second) // Kısa bekle
+				continue
+			}
+
+			if ctx.Err() != nil {
+				c.logger.Info("Stream stopping due to context cancellation")
 				return
 			}
+
 			c.logger.Error("MongoDB stream open error", zap.Error(err))
-			return
+			time.Sleep(5 * time.Second) // Hata durumunda bekle
 		}
 	}()
 

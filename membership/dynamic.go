@@ -270,8 +270,6 @@ func (d *DynamicMembership) sendHeartbeat(ctx context.Context) error {
 		return err
 	}
 
-	//d.logger.Debug("Heartbeat sent successfully", zap.String("memberId", d.memberInfo.ID))
-
 	return nil
 }
 
@@ -468,18 +466,21 @@ func (d *DynamicMembership) getMemberIDs(members []MemberInfo) []string {
 func (d *DynamicMembership) membershipChangeStreamLoop(ctx context.Context) {
 	defer d.wg.Done()
 
-	d.logger.Info("Starting membership change stream monitoring")
+	d.logger.Info("Starting optimized membership change stream monitoring")
 
-	// Change stream için pipeline - tüm değişiklikleri dinle, filtreleme shouldTriggerRebalance'da yapılacak
+	// Change stream için pipeline - sadece critical değişiklikleri dinle
 	pipeline := []bson.D{
 		{
 			{Key: "$match", Value: bson.D{
 				{Key: "operationType", Value: bson.D{
-					{Key: "$in", Value: []string{"insert", "delete", "update"}},
+					{Key: "$in", Value: []string{"insert", "delete"}}, // Sadece insert/delete dinle
 				}},
 			}},
 		},
 	}
+
+	var retryCount int
+	maxRetries := 3
 
 	for {
 		select {
@@ -491,9 +492,18 @@ func (d *DynamicMembership) membershipChangeStreamLoop(ctx context.Context) {
 			changeStream := d.collection.Watch(ctx, pipeline)
 			if changeStream == nil {
 				d.logger.Error("Failed to create membership change stream")
-				time.Sleep(5 * time.Second) // 5 saniye bekle ve tekrar dene
+				retryCount++
+				if retryCount >= maxRetries {
+					d.logger.Error("Max retries reached for change stream, falling back to polling")
+					// Polling fallback başlat
+					d.startPollingFallback(ctx)
+					return
+				}
+				time.Sleep(time.Duration(retryCount) * 5 * time.Second)
 				continue
 			}
+
+			retryCount = 0 // Reset retry counter on successful connection
 
 			// Change stream'i dinle
 			for changeStream.Next(ctx) {
@@ -503,22 +513,14 @@ func (d *DynamicMembership) membershipChangeStreamLoop(ctx context.Context) {
 					continue
 				}
 
-				/*				operationType := changeDoc["operationType"].(string)
-								documentKey := changeDoc["documentKey"]
+				operationType := changeDoc["operationType"].(string)
+				d.logger.Debug("Membership change detected",
+					zap.String("operation", operationType))
 
-								d.logger.Info("Significant membership change detected",
-									zap.String("operation", operationType),
-									zap.Any("documentKey", documentKey))*/
-
-				// Kendi member'ımızın değişikliği değilse veya kritik bir değişiklikse rebalance yap
-				if d.shouldTriggerRebalance(changeDoc) {
-					//d.logger.Info("Triggering membership rebalance")
-					if err := d.updateMembershipInfo(ctx); err != nil {
-						d.logger.Error("Failed to update membership info after change", zap.Error(err))
-					}
-				} /*else {
-					d.logger.Debug("Change ignored, no rebalance needed")
-				}*/
+				// Insert/Delete her zaman önemli, hemen güncelle
+				if err := d.updateMembershipInfo(ctx); err != nil {
+					d.logger.Error("Failed to update membership info after change", zap.Error(err))
+				}
 			}
 
 			// Change stream kapandı, hata kontrolü
@@ -527,82 +529,41 @@ func (d *DynamicMembership) membershipChangeStreamLoop(ctx context.Context) {
 			}
 
 			changeStream.Close(ctx)
-			d.logger.Warn("Membership change stream closed, will retry")
+			d.logger.Debug("Membership change stream closed, will retry")
 
-			// 5 saniye bekle ve tekrar dene
+			// Exponential backoff
+			retryCount++
+			backoffDuration := time.Duration(retryCount) * 2 * time.Second
+			if backoffDuration > 30*time.Second {
+				backoffDuration = 30 * time.Second
+			}
+
 			select {
 			case <-ctx.Done():
 				return
-			case <-time.After(5 * time.Second):
+			case <-time.After(backoffDuration):
 				continue
 			}
 		}
 	}
 }
 
-// shouldTriggerRebalance change event'inin rebalance tetikleyip tetiklemeyeceğini belirler
-func (d *DynamicMembership) shouldTriggerRebalance(changeDoc bson.M) bool {
-	operationType := changeDoc["operationType"].(string)
+// startPollingFallback change stream başarısız olduğunda polling fallback başlatır
+func (d *DynamicMembership) startPollingFallback(ctx context.Context) {
+	d.logger.Info("Starting polling fallback for membership monitoring")
 
-	// Document key'den member ID'yi al
-	documentKey, exists := changeDoc["documentKey"]
-	if exists {
-		if docKeyMap, ok := documentKey.(bson.M); ok {
-			if memberID, ok := docKeyMap["_id"].(string); ok {
-				// Kendi member'ımızın heartbeat'ini dikkate alma
-				if memberID == d.memberInfo.ID && operationType == "update" {
-					// Kendi member'ımızın update'i ise sadece status değişikliğinde rebalance et
-					updateDesc, exists := changeDoc["updateDescription"]
-					if !exists {
-						return false
-					}
+	ticker := time.NewTicker(10 * time.Second)
+	defer ticker.Stop()
 
-					updateMap, ok := updateDesc.(bson.M)
-					if !ok {
-						return false
-					}
-
-					updatedFields, exists := updateMap["updatedFields"]
-					if !exists {
-						return false
-					}
-
-					fieldsMap, ok := updatedFields.(bson.M)
-					if !ok {
-						return false
-					}
-
-					// Kendi member'ımızda sadece lastSeen değişmişse rebalance etme
-					_, statusChanged := fieldsMap["status"]
-					_, lastSeenChanged := fieldsMap["lastSeen"]
-					_, updatedAtChanged := fieldsMap["updatedAt"]
-
-					// Sadece lastSeen/updatedAt değişmişse (heartbeat) rebalance etme
-					if !statusChanged && (lastSeenChanged || updatedAtChanged) {
-						//d.logger.Debug("Ignoring own heartbeat update")
-						return false
-					}
-
-					return statusChanged
-				}
+	for {
+		select {
+		case <-ctx.Done():
+			d.logger.Info("Polling fallback stopped")
+			return
+		case <-ticker.C:
+			if err := d.updateMembershipInfo(ctx); err != nil {
+				d.logger.Error("Failed to update membership info in polling fallback", zap.Error(err))
 			}
 		}
-	}
-
-	switch operationType {
-	case "insert":
-		// Yeni member eklendi - her zaman rebalance
-		return true
-
-	case "delete":
-		// Member silindi - her zaman rebalance
-		return true
-
-	case "update":
-		// Başka member'ın update'i - her zaman rebalance et (güvenlik için)
-		return true
-
-	default:
-		return false
 	}
 }

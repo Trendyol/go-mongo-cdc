@@ -5,6 +5,7 @@ import (
 	"errors"
 	"fmt"
 	"sort"
+	"sync"
 	"time"
 
 	"github.com/Trendyol/go-mongo-cdc/membership"
@@ -24,6 +25,7 @@ var ErrorStreamInUse = errors.New("change stream is already in use")
 type Streamer interface {
 	Open(ctx context.Context) error
 	Close(ctx context.Context) error
+	Rebalance(ctx context.Context) error
 }
 
 type ListenerFunc func(ctx *ListenerContext)
@@ -48,9 +50,16 @@ type stream struct {
 	partitionIndex  int
 	totalPartitions int
 
-	// Stream restart için gerekli
-	restartChan      chan struct{}
-	restartRequested bool
+	// Rebalance için gerekli
+	rebalanceMutex sync.Mutex
+	rebalanceTimer *time.Timer
+	rebalanceDelay time.Duration
+	isRebalancing  bool
+
+	// Change stream management
+	currentChangeStream interface{}
+	streamContext       context.Context
+	streamCancel        context.CancelFunc
 }
 
 func NewStream(
@@ -65,19 +74,19 @@ func NewStream(
 	checkpoint := database.Collection(cfg.Checkpoint.Collection)
 
 	s := &stream{
-		client:           client,
-		cfg:              cfg,
-		metric:           metric,
-		listener:         listener,
-		logger:           logger,
-		collection:       collection,
-		database:         database,
-		checkpoint:       checkpoint,
-		isActive:         false,
-		partitionIndex:   0,
-		totalPartitions:  1,
-		restartChan:      make(chan struct{}, 1),
-		restartRequested: false,
+		client:          client,
+		cfg:             cfg,
+		metric:          metric,
+		listener:        listener,
+		logger:          logger,
+		collection:      collection,
+		database:        database,
+		checkpoint:      checkpoint,
+		isActive:        false,
+		partitionIndex:  0,
+		totalPartitions: 1,
+		rebalanceDelay:  5 * time.Second, // Configurable yapılabilir
+		isRebalancing:   false,
 	}
 
 	logger.Info("Checking membership configuration",
@@ -116,7 +125,13 @@ func (s *stream) Open(ctx context.Context) error {
 	}
 
 	s.isActive = true
-	defer func() { s.isActive = false }()
+	defer func() {
+		s.isActive = false
+		s.stopRebalanceTimer()
+	}()
+
+	// Stream context'ini ayarla
+	s.streamContext, s.streamCancel = context.WithCancel(ctx)
 
 	s.logger.Info("Starting MongoDB Change Stream",
 		zap.String("database", s.cfg.Database),
@@ -191,7 +206,8 @@ func (s *stream) Open(ctx context.Context) error {
 		s.logger.Info("Resuming change stream from stored token")
 	}
 
-	changeStream := s.collection.Watch(ctx, pipeline, opts)
+	changeStream := s.collection.Watch(s.streamContext, pipeline, opts)
+	s.currentChangeStream = changeStream
 	defer func() {
 		if err := changeStream.Close(ctx); err != nil {
 			s.logger.Error("Failed to close change stream", zap.Error(err))
@@ -219,12 +235,9 @@ func (s *stream) Open(ctx context.Context) error {
 		select {
 		case <-ctx.Done():
 			return ctx.Err()
-		case <-s.restartChan:
-			if s.restartRequested {
-				s.logger.Info("stream restart requested, closing current stream")
-				s.restartRequested = false
-				return errors.New("stream restart requested")
-			}
+		case <-s.streamContext.Done():
+			s.logger.Info("stream context cancelled for rebalance")
+			return context.Canceled
 		case <-saveTokenChan:
 			if changeStream.ResumeToken() != nil {
 				if err := s.saveResumeToken(ctx, changeStream.ResumeToken()); err != nil {
@@ -232,7 +245,7 @@ func (s *stream) Open(ctx context.Context) error {
 				}
 			}
 		default:
-			if !changeStream.Next(ctx) {
+			if !changeStream.Next(s.streamContext) {
 				if err := changeStream.Err(); err != nil {
 					s.logger.Error("Change stream error", zap.Error(err))
 					return err
@@ -262,6 +275,16 @@ func (s *stream) Open(ctx context.Context) error {
 }
 
 func (s *stream) Close(ctx context.Context) error {
+	s.logger.Info("Closing MongoDB Change Stream")
+
+	// Rebalance timer'ını durdur
+	s.stopRebalanceTimer()
+
+	// Stream context'ini iptal et
+	if s.streamCancel != nil {
+		s.streamCancel()
+	}
+
 	s.isActive = false
 
 	if s.membership != nil {
@@ -612,21 +635,19 @@ func (s *stream) onMembershipChange(oldInfo, newInfo membership.MembershipInfo) 
 	}
 
 	if s.isActive && (oldPartitionIndex != s.partitionIndex || oldTotalPartitions != s.totalPartitions) {
-		s.logger.Info("partition assignment changed, restarting stream",
+		s.logger.Info("partition assignment changed, triggering rebalance",
 			zap.Int("old_partition", oldPartitionIndex),
 			zap.Int("new_partition", s.partitionIndex),
 			zap.Int("old_total", oldTotalPartitions),
 			zap.Int("new_total", s.totalPartitions),
 		)
 
-		// Stream restart signal gönder
-		s.restartRequested = true
-		select {
-		case s.restartChan <- struct{}{}:
-			s.logger.Info("stream restart signal sent")
-		default:
-			s.logger.Info("stream restart signal already pending")
-		}
+		// Rebalance trigger - context olarak arka planda çalışan context'i kullan
+		go func() {
+			if err := s.Rebalance(context.Background()); err != nil {
+				s.logger.Error("Failed to trigger rebalance", zap.Error(err))
+			}
+		}()
 	}
 }
 
@@ -849,4 +870,77 @@ func (s *stream) getAllChunks() ([]ChunkRange, error) {
 
 func (s *stream) GetMembership() membership.Membership {
 	return s.membership
+}
+
+// Rebalance performs a smooth rebalancing operation
+func (s *stream) Rebalance(ctx context.Context) error {
+	s.rebalanceMutex.Lock()
+	defer s.rebalanceMutex.Unlock()
+
+	// Eğer zaten rebalancing yapılıyorsa, timer'ı reset et
+	if s.isRebalancing && s.rebalanceTimer != nil {
+		if s.rebalanceTimer.Stop() {
+			s.rebalanceTimer.Reset(s.rebalanceDelay)
+			s.logger.Info("rebalance timer reset due to another rebalance request")
+		} else {
+			s.rebalanceTimer = time.AfterFunc(s.rebalanceDelay, func() {
+				s.performRebalance(ctx)
+			})
+			s.logger.Info("new rebalance timer scheduled")
+		}
+		return nil
+	}
+
+	s.logger.Info("starting rebalance operation")
+	s.isRebalancing = true
+
+	// Dynamic membership için delay yok, diğerleri için delay var
+	delay := s.rebalanceDelay
+	if s.membership != nil && s.cfg.Membership.Type == "dynamic" {
+		delay = 0
+		s.logger.Info("dynamic membership detected, skipping rebalance delay")
+	}
+
+	s.rebalanceTimer = time.AfterFunc(delay, func() {
+		s.performRebalance(ctx)
+	})
+
+	if delay > 0 {
+		s.logger.Info("rebalance will start after delay", zap.Duration("delay", delay))
+	}
+
+	return nil
+}
+
+// performRebalance does the actual rebalancing work
+func (s *stream) performRebalance(ctx context.Context) {
+	s.logger.Info("performing rebalance operation",
+		zap.Int("old_partition_index", s.partitionIndex),
+		zap.Int("new_total_partitions", s.totalPartitions))
+
+	// Önce mevcut stream'i gracefully kapat
+	if s.streamCancel != nil {
+		s.logger.Info("closing current change stream for rebalance")
+		s.streamCancel()
+
+		// Biraz bekle ki stream düzgün kapansın
+		time.Sleep(100 * time.Millisecond)
+	}
+
+	s.isRebalancing = false
+
+	// Pipeline yeniden oluşturulacak, stream restart gerekiyor
+	// Bu sadece change stream'in sonlanmasına neden olur
+	// Open() loop'unda context.Canceled dönünce stream yeniden başlatılır
+	s.logger.Info("rebalance completed, change stream will restart with new pipeline",
+		zap.Int("partition_index", s.partitionIndex),
+		zap.Int("total_partitions", s.totalPartitions))
+}
+
+// stopRebalanceTimer rebalance timer'ını durdurur
+func (s *stream) stopRebalanceTimer() {
+	if s.rebalanceTimer != nil {
+		s.rebalanceTimer.Stop()
+		s.rebalanceTimer = nil
+	}
 }

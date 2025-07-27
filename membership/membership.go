@@ -2,7 +2,6 @@ package membership
 
 import (
 	"context"
-	"fmt"
 	"time"
 
 	"github.com/Trendyol/go-mongo-cdc/mongo/connection"
@@ -64,24 +63,13 @@ type MembershipConfig struct {
 	Config             map[string]string `json:"config" yaml:"config"`
 }
 
-func NewMembership(config MembershipConfig, client interface{}, logger interface{}) (Membership, error) {
+func NewMembership(config MembershipConfig, client connection.Client, logger *zap.Logger) (Membership, error) {
 	switch config.Type {
-	case MembershipTypeDynamic:
-		if mongoClient, ok := client.(connection.Client); ok {
-			if zapLogger, ok := logger.(*zap.Logger); ok {
-				return NewDynamicMembership(config, mongoClient, zapLogger), nil
-			}
-		}
-		return nil, fmt.Errorf("invalid client or logger type for dynamic membership")
 	case MembershipTypeStatic:
-		if zapLogger, ok := logger.(*zap.Logger); ok {
-			return NewStaticMembership(config, zapLogger), nil
-		}
-		return nil, fmt.Errorf("invalid logger type for static membership")
+		return NewStaticMembership(config, logger), nil
+	case MembershipTypeDynamic:
+		return NewDynamicMembership(config, client, logger), nil
 	default:
-		if zapLogger, ok := logger.(*zap.Logger); ok {
-			return NewStaticMembership(config, zapLogger), nil
-		}
-		return nil, fmt.Errorf("invalid logger type for default membership")
+		return NewStaticMembership(config, logger), nil
 	}
 }

@@ -2,19 +2,16 @@ package membership
 
 import (
 	"context"
-	"fmt"
-	"sync"
 	"time"
 
 	"go.uber.org/zap"
 )
 
 type StaticMembership struct {
-	config     MembershipConfig
-	logger     *zap.Logger
-	memberInfo MemberInfo
-	mu         sync.RWMutex
-
+	config         MembershipConfig
+	logger         *zap.Logger
+	membershipInfo MembershipInfo
+	memberInfo     MemberInfo
 	changeCallback MembershipChangeCallback
 }
 
@@ -24,32 +21,41 @@ func NewStaticMembership(config MembershipConfig, logger *zap.Logger) *StaticMem
 		memberID = generateMemberID()
 	}
 
+	memberInfo := MemberInfo{
+		ID:           memberID,
+		MemberNumber: config.MemberNumber,
+		Status:       MemberStatusActive,
+		LastSeen:     time.Now(),
+		Metadata:     make(map[string]string),
+	}
+
+	// Static membership'te sadece kendi member bilgimiz var
+	members := []MemberInfo{memberInfo}
+
 	return &StaticMembership{
-		config: config,
-		logger: logger,
-		memberInfo: MemberInfo{
-			ID:           memberID,
+		config:     config,
+		logger:     logger,
+		memberInfo: memberInfo,
+		membershipInfo: MembershipInfo{
 			MemberNumber: config.MemberNumber,
-			Status:       MemberStatusActive,
-			LastSeen:     time.Now(),
-			Metadata:     make(map[string]string),
+			TotalMembers: config.TotalMembers,
+			Members:      members,
+			Leader:       &memberInfo, // Static'te hep kendimiz leader
+			LastUpdated:  time.Now(),
 		},
 	}
 }
 
 func (s *StaticMembership) Initialize(ctx context.Context) error {
 	s.logger.Info("Static membership initialized",
-		zap.String("member_id", s.memberInfo.ID),
-		zap.Int("member_number", s.memberInfo.MemberNumber),
-		zap.Int("total_members", s.config.TotalMembers))
+		zap.Int("member_number", s.membershipInfo.MemberNumber),
+		zap.Int("total_members", s.membershipInfo.TotalMembers),
+		zap.String("member_id", s.memberInfo.ID))
 	return nil
 }
 
 func (s *StaticMembership) Start(ctx context.Context) error {
-	s.logger.Info("Static membership started",
-		zap.String("member_id", s.memberInfo.ID),
-		zap.Int("member_number", s.memberInfo.MemberNumber),
-		zap.Int("total_members", s.config.TotalMembers))
+	s.logger.Info("Static membership started")
 	return nil
 }
 
@@ -59,56 +65,35 @@ func (s *StaticMembership) Stop(ctx context.Context) error {
 }
 
 func (s *StaticMembership) GetMembershipInfo() MembershipInfo {
-	s.mu.RLock()
-	defer s.mu.RUnlock()
-
-	var allMembers []MemberInfo
-	for i := 1; i <= s.config.TotalMembers; i++ {
-		memberID := s.memberInfo.ID
-		if i != s.memberInfo.MemberNumber {
-			memberID = fmt.Sprintf("static-member-%d", i)
-		}
-
-		allMembers = append(allMembers, MemberInfo{
-			ID:           memberID,
-			MemberNumber: i,
-			Status:       MemberStatusActive,
-			LastSeen:     time.Now(),
-			Metadata:     make(map[string]string),
-		})
-	}
-
-	return MembershipInfo{
-		MemberNumber: s.memberInfo.MemberNumber,
-		TotalMembers: s.config.TotalMembers,
-		Members:      allMembers,
-		LastUpdated:  time.Now(),
-	}
+	return s.membershipInfo
 }
 
 func (s *StaticMembership) GetMemberInfo() MemberInfo {
-	s.mu.RLock()
-	defer s.mu.RUnlock()
 	return s.memberInfo
 }
 
 func (s *StaticMembership) IsLeader() bool {
-	return s.memberInfo.MemberNumber == 1 // TODO: First member is leader in static. Update this
+	return true // Static membership'te her zaman leader'ız
 }
 
 func (s *StaticMembership) TriggerRebalance(ctx context.Context) error {
-	s.logger.Info("Rebalance triggered for static membership",
-		zap.String("member_id", s.memberInfo.ID))
+	// Static membership'te rebalance gerekmez
+	s.logger.Debug("Rebalance triggered but ignored in static membership")
 	return nil
 }
 
 func (s *StaticMembership) UpdateMembershipInfo(ctx context.Context, memberNumber, totalMembers int) error {
-	s.mu.Lock()
-	defer s.mu.Unlock()
+	oldInfo := s.membershipInfo
 
 	s.memberInfo.MemberNumber = memberNumber
-	s.config.TotalMembers = totalMembers
-	s.memberInfo.LastSeen = time.Now()
+	s.membershipInfo.MemberNumber = memberNumber
+	s.membershipInfo.TotalMembers = totalMembers
+	s.membershipInfo.LastUpdated = time.Now()
+
+	// Callback varsa çağır
+	if s.changeCallback != nil && (oldInfo.MemberNumber != memberNumber || oldInfo.TotalMembers != totalMembers) {
+		s.changeCallback(oldInfo, s.membershipInfo)
+	}
 
 	s.logger.Info("Static membership info updated",
 		zap.Int("member_number", memberNumber),
@@ -118,7 +103,5 @@ func (s *StaticMembership) UpdateMembershipInfo(ctx context.Context, memberNumbe
 }
 
 func (s *StaticMembership) SetChangeCallback(callback MembershipChangeCallback) {
-	s.mu.Lock()
 	s.changeCallback = callback
-	s.mu.Unlock()
 }
