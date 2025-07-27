@@ -70,6 +70,6 @@ func NewMembership(config MembershipConfig, client connection.Client, logger *za
 	case MembershipTypeDynamic:
 		return NewDynamicMembership(config, client, logger), nil
 	default:
-		return NewStaticMembership(config, logger), nil
+		return NewDynamicMembership(config, client, logger), nil
 	}
 }
