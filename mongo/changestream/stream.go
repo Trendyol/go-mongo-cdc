@@ -172,6 +172,7 @@ func (s *stream) Open(ctx context.Context) error {
 		return err
 	}
 
+	//TODO: bazen podu indirip tekrar kalktıgında token'i bulamıyor ve bozuluyor bakalım
 	resumeToken, err := s.loadResumeToken(ctx)
 	if err != nil || resumeToken == nil {
 		s.logger.Warn("Resume token not found or failed to load, processing all existing documents", zap.Error(err))
@@ -521,22 +522,13 @@ func (s *stream) createDocumentFilter() bson.D {
 }
 
 func (s *stream) createHashBasedDocumentFilter() bson.D {
-	// Document query için hash-based filtering
-	// ObjectID'nin son karakterlerini kullanarak document'ları partition'lara dağıtıyoruz
+	// Document query'si için optimize edilmiş hash-based filtering
+	// ID'nin tamamını kullanarak document'ları partition'lara dağıtıyoruz
 	return bson.D{
 		{Key: "$expr", Value: bson.D{
 			{Key: "$eq", Value: bson.A{
 				bson.D{{Key: "$mod", Value: bson.A{
-					bson.D{{Key: "$toInt", Value: bson.D{
-						{Key: "$substr", Value: bson.A{
-							bson.D{{Key: "$toString", Value: "$_id"}},
-							bson.D{{Key: "$subtract", Value: bson.A{
-								bson.D{{Key: "$strLenCP", Value: bson.D{{Key: "$toString", Value: "$_id"}}}},
-								2,
-							}}},
-							2,
-						}},
-					}}},
+					bson.D{{Key: "$toHashedIndexKey", Value: "$_id"}},
 					s.totalPartitions,
 				}}},
 				s.partitionIndex,
@@ -648,24 +640,36 @@ func (s *stream) createSimplePartitionPipeline(basePipeline []bson.D) []bson.D {
 	return s.createHashBasedPartitionPipeline(basePipeline)
 }
 
+/*
+	func (s *stream) createHashBasedPartitionPipeline(basePipeline []bson.D) []bson.D {
+		// Document ID'sine göre hash-based partitioning
+		// ObjectID string'inin uzunluğunu hesaplayıp son 2 karakteri alıyoruz
+		hashBasedFilter := bson.D{
+			{Key: "$match", Value: bson.D{
+				{Key: "$expr", Value: bson.D{
+					{Key: "$eq", Value: bson.A{
+						bson.D{{Key: "$mod", Value: bson.A{
+							s.createHexToIntExpression("$documentKey._id"),
+							s.totalPartitions,
+						}}},
+						s.partitionIndex,
+					}},
+				}},
+			}},
+		}
+
+		result := append(basePipeline, hashBasedFilter)
+
+		return result
+	}
+*/
 func (s *stream) createHashBasedPartitionPipeline(basePipeline []bson.D) []bson.D {
-	// Document ID'sine göre hash-based partitioning
-	// ObjectID string'inin uzunluğunu hesaplayıp son 2 karakteri alıyoruz
 	hashBasedFilter := bson.D{
 		{Key: "$match", Value: bson.D{
 			{Key: "$expr", Value: bson.D{
 				{Key: "$eq", Value: bson.A{
 					bson.D{{Key: "$mod", Value: bson.A{
-						bson.D{{Key: "$toInt", Value: bson.D{
-							{Key: "$substr", Value: bson.A{
-								bson.D{{Key: "$toString", Value: "$documentKey._id"}},
-								bson.D{{Key: "$subtract", Value: bson.A{
-									bson.D{{Key: "$strLenCP", Value: bson.D{{Key: "$toString", Value: "$documentKey._id"}}}},
-									2,
-								}}},
-								2,
-							}},
-						}}},
+						bson.D{{Key: "$toHashedIndexKey", Value: "$documentKey._id"}},
 						s.totalPartitions,
 					}}},
 					s.partitionIndex,
@@ -678,6 +682,93 @@ func (s *stream) createHashBasedPartitionPipeline(basePipeline []bson.D) []bson.
 
 	return result
 }
+
+/*// objectId, uuid ve sayılar icin calisiyor bu kod _id random string ise duzgun calismaz
+func (s *stream) createHexToIntExpression(idField string) bson.D {
+	// ObjectID'nin son 2 karakterini hexadecimal'den integer'a çevir
+	// Hex karakterler: 0-9, a-f, A-F
+	// Her karakteri ayrı ayrı değerlendirip 16 tabanında hesaplama yap
+
+	// örnek: objectId'sinin son 2 karakteri c7 olan bir id icin 16lik tabana ceviriyor (12 * 16) + 7 = 199
+	// sonrasında toplam pod sayısıyla modluyor ornegin 10 pod olsun 199 % 10 = 9 bu index degerine sahip pod işleyecek sadece
+
+	//Örnek bir ID'nin sonu ...c7 olsun:
+	//$toString -> ID'yi "....c7" string'ine çevirir.
+	//$strLenCP -> String'in uzunluğunu bulur (diyelim ki 24).
+	//$subtract -> 24 - 2 = 22 sonucunu bulur.
+	//$max -> max(0, 22) işlemini yapar, sonuç 22 olur.
+	//$substr -> String'in 22. indeksinden başlayarak 1 karakter alır. Bu karakter c'dir.
+	//createSingleHexCharToInt -> Aldığı "c" karakterini sayısal değeri olan 12'ye çevirir.
+	//$multiply -> Sonuç olarak 12 sayısını 16 ile çarpar ve 192 değerini üretir.
+	return bson.D{
+		{Key: "$add", Value: bson.A{
+			// İlk karakter * 16
+			bson.D{{Key: "$multiply", Value: bson.A{
+				s.createSingleHexCharToInt(bson.D{
+					{Key: "$substr", Value: bson.A{
+						bson.D{{Key: "$toString", Value: idField}},
+						bson.D{{Key: "$max", Value: bson.A{
+							0,
+							bson.D{{Key: "$subtract", Value: bson.A{
+								bson.D{{Key: "$strLenCP", Value: bson.D{{Key: "$toString", Value: idField}}}},
+								2,
+							}}},
+						}}},
+						1,
+					}},
+				}),
+				16,
+			}}},
+			// İkinci karakter
+			s.createSingleHexCharToInt(bson.D{
+				{Key: "$substr", Value: bson.A{
+					bson.D{{Key: "$toString", Value: idField}},
+					bson.D{{Key: "$max", Value: bson.A{
+						0,
+						bson.D{{Key: "$subtract", Value: bson.A{
+							bson.D{{Key: "$strLenCP", Value: bson.D{{Key: "$toString", Value: idField}}}},
+							1,
+						}}},
+					}}},
+					1,
+				}},
+			}),
+		}},
+	}
+}*/
+
+/*func (s *stream) createSingleHexCharToInt(charExpr bson.D) bson.D {
+	// Tek hex karakteri integer'a çevir
+	return bson.D{
+		{Key: "$switch", Value: bson.D{
+			{Key: "branches", Value: bson.A{
+				bson.D{{Key: "case", Value: bson.D{{Key: "$eq", Value: bson.A{charExpr, "0"}}}}, {Key: "then", Value: 0}},
+				bson.D{{Key: "case", Value: bson.D{{Key: "$eq", Value: bson.A{charExpr, "1"}}}}, {Key: "then", Value: 1}},
+				bson.D{{Key: "case", Value: bson.D{{Key: "$eq", Value: bson.A{charExpr, "2"}}}}, {Key: "then", Value: 2}},
+				bson.D{{Key: "case", Value: bson.D{{Key: "$eq", Value: bson.A{charExpr, "3"}}}}, {Key: "then", Value: 3}},
+				bson.D{{Key: "case", Value: bson.D{{Key: "$eq", Value: bson.A{charExpr, "4"}}}}, {Key: "then", Value: 4}},
+				bson.D{{Key: "case", Value: bson.D{{Key: "$eq", Value: bson.A{charExpr, "5"}}}}, {Key: "then", Value: 5}},
+				bson.D{{Key: "case", Value: bson.D{{Key: "$eq", Value: bson.A{charExpr, "6"}}}}, {Key: "then", Value: 6}},
+				bson.D{{Key: "case", Value: bson.D{{Key: "$eq", Value: bson.A{charExpr, "7"}}}}, {Key: "then", Value: 7}},
+				bson.D{{Key: "case", Value: bson.D{{Key: "$eq", Value: bson.A{charExpr, "8"}}}}, {Key: "then", Value: 8}},
+				bson.D{{Key: "case", Value: bson.D{{Key: "$eq", Value: bson.A{charExpr, "9"}}}}, {Key: "then", Value: 9}},
+				bson.D{{Key: "case", Value: bson.D{{Key: "$eq", Value: bson.A{charExpr, "a"}}}}, {Key: "then", Value: 10}},
+				bson.D{{Key: "case", Value: bson.D{{Key: "$eq", Value: bson.A{charExpr, "b"}}}}, {Key: "then", Value: 11}},
+				bson.D{{Key: "case", Value: bson.D{{Key: "$eq", Value: bson.A{charExpr, "c"}}}}, {Key: "then", Value: 12}},
+				bson.D{{Key: "case", Value: bson.D{{Key: "$eq", Value: bson.A{charExpr, "d"}}}}, {Key: "then", Value: 13}},
+				bson.D{{Key: "case", Value: bson.D{{Key: "$eq", Value: bson.A{charExpr, "e"}}}}, {Key: "then", Value: 14}},
+				bson.D{{Key: "case", Value: bson.D{{Key: "$eq", Value: bson.A{charExpr, "f"}}}}, {Key: "then", Value: 15}},
+				bson.D{{Key: "case", Value: bson.D{{Key: "$eq", Value: bson.A{charExpr, "A"}}}}, {Key: "then", Value: 10}},
+				bson.D{{Key: "case", Value: bson.D{{Key: "$eq", Value: bson.A{charExpr, "B"}}}}, {Key: "then", Value: 11}},
+				bson.D{{Key: "case", Value: bson.D{{Key: "$eq", Value: bson.A{charExpr, "C"}}}}, {Key: "then", Value: 12}},
+				bson.D{{Key: "case", Value: bson.D{{Key: "$eq", Value: bson.A{charExpr, "D"}}}}, {Key: "then", Value: 13}},
+				bson.D{{Key: "case", Value: bson.D{{Key: "$eq", Value: bson.A{charExpr, "E"}}}}, {Key: "then", Value: 14}},
+				bson.D{{Key: "case", Value: bson.D{{Key: "$eq", Value: bson.A{charExpr, "F"}}}}, {Key: "then", Value: 15}},
+			}},
+			{Key: "default", Value: 0},
+		}},
+	}
+}*/
 
 func (s *stream) createChunkBasedPartitionPipeline(basePipeline []bson.D, shardKey string, chunkRanges []ChunkRange) []bson.D {
 	var orConditions []bson.D
@@ -746,11 +837,6 @@ type ChunkRange struct {
 }
 
 func (s *stream) getChunkRanges() []ChunkRange {
-	shardKey := s.cfg.Membership.Config["shardKey"]
-	if shardKey == "" {
-		return nil
-	}
-
 	chunks, err := s.getAllChunks()
 	if err != nil {
 		s.logger.Error("failed to get chunks", zap.Error(err))
@@ -764,6 +850,17 @@ func (s *stream) getChunkRanges() []ChunkRange {
 		}
 	}
 
+	// Final summary with chunk ranges
+	var rangeSummary []string
+	for _, chunk := range assignedChunks {
+		if minDoc, ok := chunk.Min.(bson.M); ok {
+			if maxDoc, ok := chunk.Max.(bson.M); ok {
+				rangeSummary = append(rangeSummary, fmt.Sprintf("sellerId: %v → %v",
+					minDoc["sellerId"], maxDoc["sellerId"]))
+			}
+		}
+	}
+
 	return assignedChunks
 }
 
@@ -771,12 +868,32 @@ func (s *stream) getAllChunks() ([]ChunkRange, error) {
 	configDB := s.client.Database("config")
 	chunksCollection := configDB.Collection("chunks")
 
-	filter := bson.D{
-		{Key: "ns", Value: s.cfg.Database + "." + s.cfg.Collection},
+	// Önce collection UUID'sini bul ( 779 - 798 localde chunklarda namespace eklemistim sonra silindi falan chunk içerisinde nm olmadan bu kodla calisabiliyordu gerekli mi diye tekrar bakmak lazım)
+	collectionUUID, err := s.getCollectionUUID()
+	if err != nil {
+		s.logger.Warn("failed to get collection UUID, trying ns filter", zap.Error(err))
+	}
+
+	var filter bson.D
+	if collectionUUID != nil {
+		filter = bson.D{
+			{Key: "uuid", Value: collectionUUID},
+		}
+		s.logger.Info("querying chunks collection with UUID",
+			zap.String("namespace", s.cfg.Database+"."+s.cfg.Collection),
+			zap.Any("uuid", collectionUUID))
+	} else {
+		filter = bson.D{
+			{Key: "ns", Value: s.cfg.Database + "." + s.cfg.Collection},
+		}
+		s.logger.Info("querying chunks collection with namespace",
+			zap.String("namespace", s.cfg.Database+"."+s.cfg.Collection),
+			zap.Any("filter", filter))
 	}
 
 	cursor, err := chunksCollection.Find(context.Background(), filter)
 	if err != nil {
+		s.logger.Error("failed to query chunks collection", zap.Error(err))
 		return nil, err
 	}
 	defer cursor.Close(context.Background())
@@ -876,4 +993,30 @@ func (s *stream) stopRebalanceTimer() {
 		s.rebalanceTimer.Stop()
 		s.rebalanceTimer = nil
 	}
+}
+
+func (s *stream) getCollectionUUID() (interface{}, error) {
+	configDB := s.client.Database("config")
+	collectionsCol := configDB.Collection("collections")
+
+	filter := bson.D{
+		{Key: "_id", Value: s.cfg.Database + "." + s.cfg.Collection},
+	}
+
+	var result bson.M
+	err := collectionsCol.FindOne(context.Background(), filter).Decode(&result)
+	if err != nil {
+		return nil, err
+	}
+
+	uuid, exists := result["uuid"]
+	if !exists {
+		return nil, fmt.Errorf("uuid field not found in collection metadata")
+	}
+
+	s.logger.Info("found collection UUID",
+		zap.String("namespace", s.cfg.Database+"."+s.cfg.Collection),
+		zap.Any("uuid", uuid))
+
+	return uuid, nil
 }

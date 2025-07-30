@@ -350,6 +350,7 @@ func (d *DynamicMembership) updateMembershipInfo(ctx context.Context) error {
 		return err
 	}
 
+	//TODO: kendini oldurse daha iyi olur gibi konusalım (hepsi aynı seyi yapsın kendini de gormuyorsa bende yokum deyip panic yapabilir)
 	if len(members) == 0 {
 		d.logger.Warn("No active members found, treating self as only member")
 		// Hiç member bulunamazsa kendini tek member olarak kabul et

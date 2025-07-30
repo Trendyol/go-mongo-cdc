@@ -80,7 +80,7 @@ func (c *Config) SetDefault() {
 	}
 
 	if c.Membership.Type == "" {
-		c.Membership.Type = "static"
+		c.Membership.Type = "dynamic"
 	}
 	if c.Membership.HeartbeatInterval == 0 {
 		c.Membership.HeartbeatInterval = 10 * time.Second

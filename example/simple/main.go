@@ -2,9 +2,11 @@ package main
 
 import (
 	"context"
-	cdc "github.com/Trendyol/go-mongo-cdc"
+	"go.uber.org/zap/zapcore"
 	"log"
 	"time"
+
+	cdc "github.com/Trendyol/go-mongo-cdc"
 
 	"github.com/Trendyol/go-mongo-cdc/config"
 	"github.com/Trendyol/go-mongo-cdc/mongo/changestream"
@@ -12,13 +14,12 @@ import (
 	"go.uber.org/zap"
 )
 
-// TODO: Update example with membership & chunk configs
 func main() {
 	// Debug level logger
-	/*	loggerConfig := zap.NewDevelopmentConfig()
-		loggerConfig.Level = zap.NewAtomicLevelAt(zapcore.DebugLevel)
-		logger, _ := loggerConfig.Build()
-		defer logger.Sync()*/
+	loggerConfig := zap.NewDevelopmentConfig()
+	loggerConfig.Level = zap.NewAtomicLevelAt(zapcore.DebugLevel)
+	logger, _ := loggerConfig.Build()
+	defer logger.Sync()
 
 	cfg := config.Config{
 		Host:       "localhost",
@@ -38,14 +39,14 @@ func main() {
 			HealthCheckTimeout: 60 * time.Second,
 			Enabled:            true,
 			Type:               "dynamic",
-			ChunkBased:         false, // Hash-based partitioning kullan
+			ChunkBased:         false,
 			Config: map[string]string{
-				"shardKey": "sellerId", // Sadece ChunkBased: true olduğunda kullanılır
+				"shardKey": "sellerId",
 			},
 		},
-		/*		Logger: config.LoggerConfig{
-				Logger: logger,
-			},*/
+		Logger: config.LoggerConfig{
+			Logger: logger,
+		},
 	}
 
 	connector, err := cdc.NewConnector(context.Background(), cfg, listenerFunc)
