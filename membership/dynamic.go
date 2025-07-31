@@ -28,12 +28,6 @@ type DynamicMembership struct {
 	heartbeatTicker *time.Ticker
 	stopChan        chan struct{}
 	wg              sync.WaitGroup
-
-	changeCallback MembershipChangeCallback
-
-	// Change stream için
-	membershipStreamCtx    context.Context
-	membershipStreamCancel context.CancelFunc
 }
 
 type MemberDocument struct {
@@ -108,14 +102,10 @@ func (d *DynamicMembership) Start(ctx context.Context) error {
 
 	d.heartbeatTicker = time.NewTicker(d.config.HeartbeatInterval)
 
-	// Change stream için context oluştur
-	d.membershipStreamCtx, d.membershipStreamCancel = context.WithCancel(ctx)
-
-	d.wg.Add(2)
+	d.wg.Add(1)
 	go d.heartbeatLoop(ctx)
-	go d.membershipChangeStreamLoop(d.membershipStreamCtx)
 
-	d.logger.Info("Dynamic membership started with change stream monitoring")
+	d.logger.Info("Dynamic membership started (change stream monitoring moved to stream level)")
 	return nil
 }
 
@@ -132,11 +122,6 @@ func (d *DynamicMembership) Stop(ctx context.Context) error {
 
 	if d.heartbeatTicker != nil {
 		d.heartbeatTicker.Stop()
-	}
-
-	// Change stream'i durdur
-	if d.membershipStreamCancel != nil {
-		d.membershipStreamCancel()
 	}
 
 	d.wg.Wait()
@@ -175,12 +160,6 @@ func (d *DynamicMembership) UpdateMembershipInfo(ctx context.Context, memberNumb
 	d.logger.Info("Dynamic membership info updated")
 
 	return nil
-}
-
-func (d *DynamicMembership) SetChangeCallback(callback MembershipChangeCallback) {
-	d.mu.Lock()
-	d.changeCallback = callback
-	d.mu.Unlock()
 }
 
 func (d *DynamicMembership) createIndexes(ctx context.Context) error {
@@ -293,10 +272,6 @@ func (d *DynamicMembership) getActiveMembers(ctx context.Context) ([]MemberInfo,
 			continue
 		}
 
-		d.logger.Debug("Found active member",
-			zap.String("id", doc.ID),
-			zap.Time("lastSeen", doc.LastSeen))
-
 		members = append(members, MemberInfo{
 			ID:       doc.ID,
 			LastSeen: doc.LastSeen,
@@ -310,13 +285,11 @@ func (d *DynamicMembership) getActiveMembers(ctx context.Context) ([]MemberInfo,
 }
 
 func (d *DynamicMembership) updateMembershipInfoInternal(members []MemberInfo) error {
-	// Members'ı ID'ye göre sırala - consistent ordering için
 	sort.Slice(members, func(i, j int) bool {
 		return members[i].ID < members[j].ID
 	})
 
 	d.mu.Lock()
-	oldInfo := d.membershipInfo
 
 	d.membershipInfo = MembershipInfo{
 		TotalMembers: len(members),
@@ -331,14 +304,7 @@ func (d *DynamicMembership) updateMembershipInfoInternal(members []MemberInfo) e
 		}
 	}
 
-	newInfo := d.membershipInfo
-	callback := d.changeCallback
 	d.mu.Unlock()
-
-	// Sadece gerçek değişiklik olduğunda callback çağır
-	if callback != nil && (oldInfo.TotalMembers != newInfo.TotalMembers || d.memberListChanged(oldInfo.Members, newInfo.Members)) {
-		callback(newInfo)
-	}
 
 	return nil
 }
@@ -364,137 +330,6 @@ func (d *DynamicMembership) updateMembershipInfo(ctx context.Context) error {
 	return d.updateMembershipInfoInternal(members)
 }
 
-// memberListChanged member listesinin değişip değişmediğini kontrol eder
-func (d *DynamicMembership) memberListChanged(oldMembers, newMembers []MemberInfo) bool {
-	if len(oldMembers) != len(newMembers) {
-		return true
-	}
-
-	oldIDs := make(map[string]bool)
-	for _, member := range oldMembers {
-		oldIDs[member.ID] = true
-	}
-
-	for _, member := range newMembers {
-		if !oldIDs[member.ID] {
-			return true
-		}
-	}
-
-	return false
-}
-
-// getMemberIDs member ID listesini döndürür
-func (d *DynamicMembership) getMemberIDs(members []MemberInfo) []string {
-	var ids []string
-	for _, member := range members {
-		ids = append(ids, member.ID)
-	}
-	return ids
-}
-
-// membershipChangeStreamLoop membership collection'ındaki değişiklikleri dinler
-func (d *DynamicMembership) membershipChangeStreamLoop(ctx context.Context) {
-	defer d.wg.Done()
-
-	d.logger.Info("Starting membership change stream monitoring")
-
-	// Change stream için pipeline - sadece critical değişiklikleri dinle
-	pipeline := []bson.D{
-		{
-			{Key: "$match", Value: bson.D{
-				{Key: "operationType", Value: bson.D{
-					{Key: "$in", Value: []string{"insert", "delete"}}, // Sadece insert/delete dinle
-				}},
-			}},
-		},
-	}
-
-	var retryCount int
-	maxRetries := 3
-
-	for {
-		select {
-		case <-ctx.Done():
-			d.logger.Info("Membership change stream context cancelled")
-			return
-		default:
-			// Change stream oluştur
-			changeStream := d.collection.Watch(ctx, pipeline)
-			if changeStream == nil {
-				d.logger.Error("Failed to create membership change stream")
-				retryCount++
-				if retryCount >= maxRetries {
-					d.logger.Error("Max retries reached for change stream, falling back to polling")
-					// Polling fallback başlat
-					d.startPollingFallback(ctx)
-					return
-				}
-				time.Sleep(time.Duration(retryCount) * 5 * time.Second)
-				continue
-			}
-
-			retryCount = 0 // Reset retry counter on successful connection
-
-			// Change stream'i dinle
-			for changeStream.Next(ctx) {
-				var changeDoc bson.M
-				if err := changeStream.Decode(&changeDoc); err != nil {
-					d.logger.Error("Failed to decode change stream document", zap.Error(err))
-					continue
-				}
-
-				operationType := changeDoc["operationType"].(string)
-				d.logger.Debug("Membership change detected",
-					zap.String("operation", operationType))
-
-				// Insert/Delete her zaman önemli, hemen güncelle
-				if err := d.updateMembershipInfo(ctx); err != nil {
-					d.logger.Error("Failed to update membership info after change", zap.Error(err))
-				}
-			}
-
-			// Change stream kapandı, hata kontrolü
-			if err := changeStream.Err(); err != nil {
-				d.logger.Error("Membership change stream error", zap.Error(err))
-			}
-
-			changeStream.Close(ctx)
-			d.logger.Debug("Membership change stream closed, will retry")
-
-			// Exponential backoff
-			retryCount++
-			backoffDuration := time.Duration(retryCount) * 2 * time.Second
-			if backoffDuration > 30*time.Second {
-				backoffDuration = 30 * time.Second
-			}
-
-			select {
-			case <-ctx.Done():
-				return
-			case <-time.After(backoffDuration):
-				continue
-			}
-		}
-	}
-}
-
-// startPollingFallback change stream başarısız olduğunda polling fallback başlatır
-func (d *DynamicMembership) startPollingFallback(ctx context.Context) {
-	d.logger.Info("Starting polling fallback for membership monitoring")
-
-	ticker := time.NewTicker(10 * time.Second)
-	defer ticker.Stop()
-
-	for {
-		select {
-		case <-ctx.Done():
-			d.logger.Info("Polling fallback stopped")
-			return
-		case <-ticker.C:
-			if err := d.updateMembershipInfo(ctx); err != nil {
-				d.logger.Error("Failed to update membership info in polling fallback", zap.Error(err))
-			}
-		}
-	}
+func (d *DynamicMembership) UpdateMembershipInfoFromDatabase(ctx context.Context) error {
+	return d.updateMembershipInfo(ctx)
 }

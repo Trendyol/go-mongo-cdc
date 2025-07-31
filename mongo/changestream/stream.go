@@ -24,7 +24,6 @@ var ErrorStreamInUse = errors.New("change stream is already in use")
 type Streamer interface {
 	Open(ctx context.Context) error
 	Close(ctx context.Context) error
-	Rebalance() error
 }
 
 type ListenerFunc func(ctx *ListenerContext)
@@ -49,16 +48,18 @@ type stream struct {
 	partitionIndex  int
 	totalPartitions int
 
-	// Rebalance için gerekli
-	rebalanceMutex sync.Mutex
-	rebalanceTimer *time.Timer
-	rebalanceDelay time.Duration
-	isRebalancing  bool
-
 	// Change stream management
-	currentChangeStream interface{}
-	streamContext       context.Context
-	streamCancel        context.CancelFunc
+	streamContext context.Context
+	streamCancel  context.CancelFunc
+
+	// Membership monitoring için ayrı change stream
+	membershipCollection   connection.Collection
+	membershipChangeStream interface{}
+	membershipContext      context.Context
+	membershipCancel       context.CancelFunc
+
+	// Pipeline güncelleme için
+	partitionMutex sync.RWMutex
 }
 
 func NewStream(
@@ -72,20 +73,33 @@ func NewStream(
 	collection := database.Collection(cfg.Collection)
 	checkpoint := database.Collection(cfg.Checkpoint.Collection)
 
+	// Membership collection için dynamic membership config'den alınacak
+	var membershipCollection connection.Collection
+	if cfg.Membership.Enabled && cfg.Membership.Type == "dynamic" {
+		membershipDatabaseName := cfg.Membership.Config["database"]
+		membershipCollectionName := cfg.Membership.Config["collection"]
+		if !(membershipDatabaseName != "" && membershipCollectionName != "") {
+			membershipCollectionName = "cdc_membership"
+			membershipDatabaseName = "cdc_cluster"
+		}
+
+		membershipDatabase := client.Database(membershipDatabaseName)
+		membershipCollection = membershipDatabase.Collection(membershipCollectionName)
+	}
+
 	s := &stream{
-		client:          client,
-		cfg:             cfg,
-		metric:          metric,
-		listener:        listener,
-		logger:          logger,
-		collection:      collection,
-		database:        database,
-		checkpoint:      checkpoint,
-		isActive:        false,
-		partitionIndex:  0,
-		totalPartitions: 1,
-		rebalanceDelay:  5 * time.Second, // Configurable yapılabilir
-		isRebalancing:   false,
+		client:               client,
+		cfg:                  cfg,
+		metric:               metric,
+		listener:             listener,
+		logger:               logger,
+		collection:           collection,
+		database:             database,
+		checkpoint:           checkpoint,
+		membershipCollection: membershipCollection,
+		isActive:             false,
+		partitionIndex:       0,
+		totalPartitions:      1,
 	}
 
 	logger.Info("Checking membership configuration",
@@ -126,7 +140,6 @@ func (s *stream) Open(ctx context.Context) error {
 	s.isActive = true
 	defer func() {
 		s.isActive = false
-		s.stopRebalanceTimer()
 	}()
 
 	// Stream context'ini ayarla
@@ -147,8 +160,6 @@ func (s *stream) Open(ctx context.Context) error {
 			return err
 		}
 
-		s.membership.SetChangeCallback(s.onMembershipChange)
-
 		activeMembers := s.membership.GetMembershipInfo().Members
 		s.totalPartitions = len(activeMembers)
 
@@ -160,6 +171,8 @@ func (s *stream) Open(ctx context.Context) error {
 				break
 			}
 		}
+
+		s.startMembershipMonitoring(ctx)
 
 		s.logger.Info("membership initialized",
 			zap.Int("partition_index", s.partitionIndex),
@@ -193,7 +206,6 @@ func (s *stream) Open(ctx context.Context) error {
 	}
 
 	changeStream := s.collection.Watch(s.streamContext, pipeline, opts)
-	s.currentChangeStream = changeStream
 	defer func() {
 		if err := changeStream.Close(ctx); err != nil {
 			s.logger.Error("Failed to close change stream", zap.Error(err))
@@ -259,49 +271,158 @@ func (s *stream) Open(ctx context.Context) error {
 	}
 }
 
-func (s *stream) Close(ctx context.Context) error {
-	s.logger.Info("Closing MongoDB Change Stream")
-
-	// Rebalance timer'ını durdur
-	s.stopRebalanceTimer()
-
-	// Stream context'ini iptal et
-	if s.streamCancel != nil {
-		s.streamCancel()
+func (s *stream) startMembershipMonitoring(ctx context.Context) {
+	if s.membershipCollection == nil {
+		s.logger.Debug("Membership collection not configured, skipping membership monitoring")
+		return
 	}
 
-	s.isActive = false
+	s.membershipContext, s.membershipCancel = context.WithCancel(ctx)
 
-	if s.membership != nil {
-		if err := s.membership.Stop(ctx); err != nil {
-			s.logger.Error("Failed to stop membership", zap.Error(err))
+	go func() {
+		s.logger.Info("Starting membership change stream monitoring")
+
+		// Change stream için pipeline - sadece critical değişiklikleri dinle
+		pipeline := []bson.D{
+			{
+				{Key: "$match", Value: bson.D{
+					{Key: "operationType", Value: bson.D{
+						{Key: "$in", Value: []string{"insert", "delete"}}, // Sadece insert/delete dinle
+					}},
+				}},
+			},
+		}
+
+		var retryCount int
+		maxRetries := 3
+
+		for {
+			select {
+			case <-s.membershipContext.Done():
+				s.logger.Info("Membership change stream context cancelled")
+				return
+			default:
+				// Change stream oluştur
+				changeStream := s.membershipCollection.Watch(s.membershipContext, pipeline)
+				if changeStream == nil {
+					s.logger.Error("Failed to create membership change stream")
+					retryCount++
+					if retryCount >= maxRetries {
+						s.logger.Error("Max retries reached for membership change stream")
+						return
+					}
+					time.Sleep(time.Duration(retryCount) * 5 * time.Second)
+					continue
+				}
+
+				s.membershipChangeStream = changeStream
+				retryCount = 0 // Reset retry counter on successful connection
+
+				// Change stream'i dinle
+				for changeStream.Next(s.membershipContext) {
+					var changeDoc bson.M
+					if err := changeStream.Decode(&changeDoc); err != nil {
+						s.logger.Error("Failed to decode membership change stream document", zap.Error(err))
+						continue
+					}
+
+					operationType := changeDoc["operationType"].(string)
+					s.logger.Debug("Membership change detected",
+						zap.String("operation", operationType))
+
+					// Insert/Delete her zaman önemli, önce membership bilgilerini güncelle
+					if dynamicMembership, ok := s.membership.(*membership.DynamicMembership); ok {
+						// Dynamic membership'in private updateMembershipInfo metodunu çağırabilmek için
+						// bu bilgiyi manuel olarak güncelleyelim
+						if err := dynamicMembership.UpdateMembershipInfoFromDatabase(s.membershipContext); err != nil {
+							s.logger.Error("Failed to update membership info from database", zap.Error(err))
+							continue
+						}
+					}
+
+					// Sonra partition bilgilerini güncelle
+					partitionChanged, err := s.updatePartitionInfo()
+					if err != nil {
+						s.logger.Error("Failed to update partition info after membership change", zap.Error(err))
+						continue
+					}
+
+					// Sadece partition bilgileri değiştiyse stream'i restart et
+					if partitionChanged {
+						s.logger.Info("Partition changed after membership update, restarting stream")
+						if s.streamCancel != nil {
+							s.streamCancel()
+						}
+					}
+				}
+
+				// Change stream kapandı, hata kontrolü
+				if err := changeStream.Err(); err != nil {
+					s.logger.Error("Membership change stream error", zap.Error(err))
+				}
+
+				changeStream.Close(s.membershipContext)
+				s.logger.Debug("Membership change stream closed, will retry")
+
+				// Exponential backoff
+				retryCount++
+				backoffDuration := time.Duration(retryCount) * 2 * time.Second
+				if backoffDuration > 30*time.Second {
+					backoffDuration = 30 * time.Second
+				}
+
+				select {
+				case <-s.membershipContext.Done():
+					return
+				case <-time.After(backoffDuration):
+					continue
+				}
+			}
+		}
+	}()
+}
+
+func (s *stream) updatePartitionInfo() (bool, error) {
+	if s.membership == nil {
+		return false, nil
+	}
+
+	// Yeni membership bilgisini al
+	newMembershipInfo := s.membership.GetMembershipInfo()
+	actualMemberID := s.membership.GetMemberInfo().ID
+
+	s.partitionMutex.Lock()
+	defer s.partitionMutex.Unlock()
+
+	oldIndex := s.partitionIndex
+	oldTotal := s.totalPartitions
+
+	// Yeni partition bilgilerini hesapla
+	s.totalPartitions = len(newMembershipInfo.Members)
+
+	// Kendimizi bul ve partition index'i ayarla
+	for i, member := range newMembershipInfo.Members {
+		if member.ID == actualMemberID {
+			s.partitionIndex = i
+			break
 		}
 	}
 
-	s.logger.Info("MongoDB Change Stream closed")
-	return nil
-}
-
-func (s *stream) createPipeline() []bson.D {
-	basePipeline := s.createBasePipeline()
-
-	if s.membership != nil && s.totalPartitions > 1 {
-		return s.createSimplePartitionPipeline(basePipeline)
+	// Sadece gerçek değişiklik varsa log yaz ve true döndür
+	if oldIndex != s.partitionIndex || oldTotal != s.totalPartitions {
+		s.logger.Info("partition info updated",
+			zap.Int("old_index", oldIndex),
+			zap.Int("new_index", s.partitionIndex),
+			zap.Int("old_total", oldTotal),
+			zap.Int("new_total", s.totalPartitions))
+		return true, nil
 	}
 
-	return basePipeline
-}
+	s.logger.Debug("partition info checked, no changes needed",
+		zap.Int("partition_index", s.partitionIndex),
+		zap.Int("total_partitions", s.totalPartitions))
 
-func (s *stream) createBasePipeline() []bson.D {
-	return []bson.D{
-		{
-			{Key: "$match", Value: bson.D{
-				{Key: "operationType", Value: bson.D{
-					{Key: "$in", Value: bson.A{"insert", "update", "delete", "replace"}},
-				}},
-			}},
-		},
-	}
+	return false, nil
 }
 
 func (s *stream) checkReplicaSetStatus(ctx context.Context) error {
@@ -326,78 +447,6 @@ func (s *stream) checkReplicaSetStatus(ctx context.Context) error {
 		"MongoDB is not running as a replica set or sharded cluster. " +
 			"Change streams require replica set or sharded cluster",
 	)
-}
-
-//nolint:funlen
-func (s *stream) processEvent(_ context.Context, event message.ChangeEvent) error {
-	startTime := time.Now()
-
-	msg, err := message.NewMessage(event)
-	if err != nil {
-		return err
-	}
-
-	s.updateMetrics(msg.OperationType)
-
-	listenerCtx := &ListenerContext{
-		Message: msg,
-		Ack: func() error {
-			processingLatency := time.Since(startTime)
-			s.metric.SetProcessLatency(processingLatency.Nanoseconds())
-			return nil
-		},
-	}
-
-	s.listener(listenerCtx)
-	return nil
-}
-
-func (s *stream) updateMetrics(opType message.OperationType) {
-	switch opType {
-	case message.OperationInsert:
-		s.metric.IncInsertTotal()
-	case message.OperationUpdate:
-		s.metric.IncUpdateTotal()
-	case message.OperationDelete:
-		s.metric.IncDeleteTotal()
-	case message.OperationReplace:
-		s.metric.IncInsertTotal()
-	}
-}
-
-func (s *stream) saveResumeToken(ctx context.Context, token []byte) error {
-	if len(token) == 0 {
-		s.logger.Debug("Resume token is empty, skipping save")
-		return nil
-	}
-
-	checkpointID := s.cfg.Database + "_" + s.cfg.Collection + "_checkpoint"
-
-	filter := bson.M{"_id": checkpointID}
-	update := bson.M{
-		"$set": bson.M{
-			"resumeToken": token,
-			"lastRun":     time.Now(),
-			"updatedAt":   time.Now(),
-			"database":    s.cfg.Database,
-			"collection":  s.cfg.Collection,
-		},
-	}
-
-	opts := options.Update().SetUpsert(true)
-	_, err := s.checkpoint.UpdateOne(ctx, filter, update, opts)
-
-	if err != nil {
-		s.logger.Error("Failed to save resume token",
-			zap.String("checkpoint_id", checkpointID),
-			zap.Error(err))
-		return err
-	}
-
-	s.logger.Debug("Resume token saved successfully",
-		zap.String("checkpoint_id", checkpointID))
-
-	return nil
 }
 
 func (s *stream) loadResumeToken(ctx context.Context) ([]byte, error) {
@@ -503,115 +552,25 @@ func (s *stream) processAllDocuments(ctx context.Context) error {
 	return nil
 }
 
-func (s *stream) createDocumentFilter() bson.D {
-	if s.cfg.Membership.ChunkBased {
-		shardKey := s.cfg.Membership.Config["shardKey"]
-		if shardKey == "" {
-			return s.createHashBasedDocumentFilter()
-		}
+func (s *stream) createPipeline() []bson.D {
+	basePipeline := s.createBasePipeline()
 
-		chunkRanges := s.getChunkRanges()
-		if len(chunkRanges) == 0 {
-			return s.createHashBasedDocumentFilter()
-		}
-
-		return s.createChunkBasedDocumentFilter(shardKey, chunkRanges)
+	if s.membership != nil && s.totalPartitions > 1 {
+		return s.createSimplePartitionPipeline(basePipeline)
 	}
 
-	return s.createHashBasedDocumentFilter()
+	return basePipeline
 }
 
-func (s *stream) createHashBasedDocumentFilter() bson.D {
-	// Document query'si için optimize edilmiş hash-based filtering
-	// ID'nin tamamını kullanarak document'ları partition'lara dağıtıyoruz
-	return bson.D{
-		{Key: "$expr", Value: bson.D{
-			{Key: "$eq", Value: bson.A{
-				bson.D{{Key: "$mod", Value: bson.A{
-					bson.D{{Key: "$toHashedIndexKey", Value: "$_id"}},
-					s.totalPartitions,
-				}}},
-				s.partitionIndex,
+func (s *stream) createBasePipeline() []bson.D {
+	return []bson.D{
+		{
+			{Key: "$match", Value: bson.D{
+				{Key: "operationType", Value: bson.D{
+					{Key: "$in", Value: bson.A{"insert", "update", "delete", "replace"}},
+				}},
 			}},
-		}},
-	}
-}
-
-func (s *stream) createChunkBasedDocumentFilter(shardKey string, chunkRanges []ChunkRange) bson.D {
-	var orConditions []bson.D
-	for _, chunkRange := range chunkRanges {
-		var minVal, maxVal interface{}
-
-		if minDoc, ok := chunkRange.Min.(bson.M); ok {
-			minVal = minDoc[shardKey]
-		} else if primitiveMin, ok := chunkRange.Min.(primitive.M); ok {
-			minVal = primitiveMin[shardKey]
-		} else {
-			continue
-		}
-
-		if maxDoc, ok := chunkRange.Max.(bson.M); ok {
-			maxVal = maxDoc[shardKey]
-		} else if primitiveMax, ok := chunkRange.Max.(primitive.M); ok {
-			maxVal = primitiveMax[shardKey]
-		} else {
-			continue
-		}
-
-		condition := bson.D{
-			{Key: "$and", Value: bson.A{
-				bson.D{{Key: shardKey, Value: bson.D{{Key: "$gte", Value: minVal}}}},
-				bson.D{{Key: shardKey, Value: bson.D{{Key: "$lt", Value: maxVal}}}},
-			}},
-		}
-		orConditions = append(orConditions, condition)
-	}
-
-	if len(orConditions) > 0 {
-		return bson.D{
-			{Key: "$or", Value: orConditions},
-		}
-	}
-
-	return bson.D{}
-}
-
-func (s *stream) onMembershipChange(newInfo membership.MembershipInfo) {
-	// Actual member ID'yi membership'ten al
-	actualMemberID := s.membership.GetMemberInfo().ID
-
-	s.logger.Info("membership change detected",
-		zap.Any("active_members", newInfo.Members),
-		zap.String("actual_member_id", actualMemberID),
-	)
-
-	oldPartitionIndex := s.partitionIndex
-	oldTotalPartitions := s.totalPartitions
-
-	s.totalPartitions = len(newInfo.Members)
-
-	// Kendimizi bul ve partition index'i ayarla
-	for i, member := range newInfo.Members {
-		if member.ID == actualMemberID {
-			s.partitionIndex = i
-			break
-		}
-	}
-
-	if s.isActive && (oldPartitionIndex != s.partitionIndex || oldTotalPartitions != s.totalPartitions) {
-		s.logger.Info("partition assignment changed, triggering rebalance",
-			zap.Int("old_partition", oldPartitionIndex),
-			zap.Int("new_partition", s.partitionIndex),
-			zap.Int("old_total", oldTotalPartitions),
-			zap.Int("new_total", s.totalPartitions),
-		)
-
-		// Rebalance trigger - context olarak arka planda çalışan context'i kullan
-		go func() {
-			if err := s.Rebalance(); err != nil {
-				s.logger.Error("Failed to trigger rebalance", zap.Error(err))
-			}
-		}()
+		},
 	}
 }
 
@@ -640,30 +599,7 @@ func (s *stream) createSimplePartitionPipeline(basePipeline []bson.D) []bson.D {
 	return s.createHashBasedPartitionPipeline(basePipeline)
 }
 
-/*
-	func (s *stream) createHashBasedPartitionPipeline(basePipeline []bson.D) []bson.D {
-		// Document ID'sine göre hash-based partitioning
-		// ObjectID string'inin uzunluğunu hesaplayıp son 2 karakteri alıyoruz
-		hashBasedFilter := bson.D{
-			{Key: "$match", Value: bson.D{
-				{Key: "$expr", Value: bson.D{
-					{Key: "$eq", Value: bson.A{
-						bson.D{{Key: "$mod", Value: bson.A{
-							s.createHexToIntExpression("$documentKey._id"),
-							s.totalPartitions,
-						}}},
-						s.partitionIndex,
-					}},
-				}},
-			}},
-		}
-
-		result := append(basePipeline, hashBasedFilter)
-
-		return result
-	}
-*/
-func (s *stream) createHashBasedPartitionPipeline(basePipeline []bson.D) []bson.D {
+/*func (s *stream) createHashBasedPartitionPipeline(basePipeline []bson.D) []bson.D {
 	hashBasedFilter := bson.D{
 		{Key: "$match", Value: bson.D{
 			{Key: "$expr", Value: bson.D{
@@ -681,9 +617,31 @@ func (s *stream) createHashBasedPartitionPipeline(basePipeline []bson.D) []bson.
 	result := append(basePipeline, hashBasedFilter)
 
 	return result
+}*/
+
+func (s *stream) createHashBasedPartitionPipeline(basePipeline []bson.D) []bson.D {
+	// Document ID'sine göre hash-based partitioning
+	// ObjectID string'inin uzunluğunu hesaplayıp son 2 karakteri alıyoruz
+	hashBasedFilter := bson.D{
+		{Key: "$match", Value: bson.D{
+			{Key: "$expr", Value: bson.D{
+				{Key: "$eq", Value: bson.A{
+					bson.D{{Key: "$mod", Value: bson.A{
+						s.createHexToIntExpression("$documentKey._id"),
+						s.totalPartitions,
+					}}},
+					s.partitionIndex,
+				}},
+			}},
+		}},
+	}
+
+	result := append(basePipeline, hashBasedFilter)
+
+	return result
 }
 
-/*// objectId, uuid ve sayılar icin calisiyor bu kod _id random string ise duzgun calismaz
+// objectId, uuid ve sayılar icin calisiyor bu kod _id random string ise duzgun calismaz
 func (s *stream) createHexToIntExpression(idField string) bson.D {
 	// ObjectID'nin son 2 karakterini hexadecimal'den integer'a çevir
 	// Hex karakterler: 0-9, a-f, A-F
@@ -735,9 +693,9 @@ func (s *stream) createHexToIntExpression(idField string) bson.D {
 			}),
 		}},
 	}
-}*/
+}
 
-/*func (s *stream) createSingleHexCharToInt(charExpr bson.D) bson.D {
+func (s *stream) createSingleHexCharToInt(charExpr bson.D) bson.D {
 	// Tek hex karakteri integer'a çevir
 	return bson.D{
 		{Key: "$switch", Value: bson.D{
@@ -768,7 +726,7 @@ func (s *stream) createHexToIntExpression(idField string) bson.D {
 			{Key: "default", Value: 0},
 		}},
 	}
-}*/
+}
 
 func (s *stream) createChunkBasedPartitionPipeline(basePipeline []bson.D, shardKey string, chunkRanges []ChunkRange) []bson.D {
 	var orConditions []bson.D
@@ -831,9 +789,170 @@ func (s *stream) createChunkBasedPartitionPipeline(basePipeline []bson.D, shardK
 	return basePipeline
 }
 
+//nolint:funlen
+func (s *stream) processEvent(_ context.Context, event message.ChangeEvent) error {
+	startTime := time.Now()
+
+	msg, err := message.NewMessage(event)
+	if err != nil {
+		return err
+	}
+
+	s.updateMetrics(msg.OperationType)
+
+	listenerCtx := &ListenerContext{
+		Message: msg,
+		Ack: func() error {
+			processingLatency := time.Since(startTime)
+			s.metric.SetProcessLatency(processingLatency.Nanoseconds())
+			return nil
+		},
+	}
+
+	s.listener(listenerCtx)
+	return nil
+}
+
+func (s *stream) updateMetrics(opType message.OperationType) {
+	switch opType {
+	case message.OperationInsert:
+		s.metric.IncInsertTotal()
+	case message.OperationUpdate:
+		s.metric.IncUpdateTotal()
+	case message.OperationDelete:
+		s.metric.IncDeleteTotal()
+	case message.OperationReplace:
+		s.metric.IncInsertTotal()
+	}
+}
+
+func (s *stream) saveResumeToken(ctx context.Context, token []byte) error {
+	if len(token) == 0 {
+		s.logger.Debug("Resume token is empty, skipping save")
+		return nil
+	}
+
+	checkpointID := s.cfg.Database + "_" + s.cfg.Collection + "_checkpoint"
+
+	filter := bson.M{"_id": checkpointID}
+	update := bson.M{
+		"$set": bson.M{
+			"resumeToken": token,
+			"lastRun":     time.Now(),
+			"updatedAt":   time.Now(),
+			"database":    s.cfg.Database,
+			"collection":  s.cfg.Collection,
+		},
+	}
+
+	opts := options.Update().SetUpsert(true)
+	_, err := s.checkpoint.UpdateOne(ctx, filter, update, opts)
+
+	if err != nil {
+		s.logger.Error("Failed to save resume token",
+			zap.String("checkpoint_id", checkpointID),
+			zap.Error(err))
+		return err
+	}
+
+	s.logger.Debug("Resume token saved successfully",
+		zap.String("checkpoint_id", checkpointID))
+
+	return nil
+}
+
+func (s *stream) createDocumentFilter() bson.D {
+	if s.cfg.Membership.ChunkBased {
+		shardKey := s.cfg.Membership.Config["shardKey"]
+		if shardKey == "" {
+			return s.createHashBasedDocumentFilter()
+		}
+
+		chunkRanges := s.getChunkRanges()
+		if len(chunkRanges) == 0 {
+			return s.createHashBasedDocumentFilter()
+		}
+
+		return s.createChunkBasedDocumentFilter(shardKey, chunkRanges)
+	}
+
+	return s.createHashBasedDocumentFilter()
+}
+
+/*func (s *stream) createHashBasedDocumentFilter() bson.D {
+	// Document query'si için optimize edilmiş hash-based filtering
+	// ID'nin tamamını kullanarak document'ları partition'lara dağıtıyoruz
+	return bson.D{
+		{Key: "$expr", Value: bson.D{
+			{Key: "$eq", Value: bson.A{
+				bson.D{{Key: "$mod", Value: bson.A{
+					bson.D{{Key: "$toHashedIndexKey", Value: "$_id"}},
+					s.totalPartitions,
+				}}},
+				s.partitionIndex,
+			}},
+		}},
+	}
+}*/
+
+func (s *stream) createHashBasedDocumentFilter() bson.D {
+	// Document query'si için optimize edilmiş hash-based filtering
+	// ID'nin son 2 karakterini hex'den int'e çevirerek partition'lara dağıtıyoruz
+	return bson.D{
+		{Key: "$expr", Value: bson.D{
+			{Key: "$eq", Value: bson.A{
+				bson.D{{Key: "$mod", Value: bson.A{
+					s.createHexToIntExpression("$_id"),
+					s.totalPartitions,
+				}}},
+				s.partitionIndex,
+			}},
+		}},
+	}
+}
+
 type ChunkRange struct {
 	Min interface{} `bson:"min"`
 	Max interface{} `bson:"max"`
+}
+
+func (s *stream) createChunkBasedDocumentFilter(shardKey string, chunkRanges []ChunkRange) bson.D {
+	var orConditions []bson.D
+	for _, chunkRange := range chunkRanges {
+		var minVal, maxVal interface{}
+
+		if minDoc, ok := chunkRange.Min.(bson.M); ok {
+			minVal = minDoc[shardKey]
+		} else if primitiveMin, ok := chunkRange.Min.(primitive.M); ok {
+			minVal = primitiveMin[shardKey]
+		} else {
+			continue
+		}
+
+		if maxDoc, ok := chunkRange.Max.(bson.M); ok {
+			maxVal = maxDoc[shardKey]
+		} else if primitiveMax, ok := chunkRange.Max.(primitive.M); ok {
+			maxVal = primitiveMax[shardKey]
+		} else {
+			continue
+		}
+
+		condition := bson.D{
+			{Key: "$and", Value: bson.A{
+				bson.D{{Key: shardKey, Value: bson.D{{Key: "$gte", Value: minVal}}}},
+				bson.D{{Key: shardKey, Value: bson.D{{Key: "$lt", Value: maxVal}}}},
+			}},
+		}
+		orConditions = append(orConditions, condition)
+	}
+
+	if len(orConditions) > 0 {
+		return bson.D{
+			{Key: "$or", Value: orConditions},
+		}
+	}
+
+	return bson.D{}
 }
 
 func (s *stream) getChunkRanges() []ChunkRange {
@@ -918,83 +1037,6 @@ func (s *stream) getAllChunks() ([]ChunkRange, error) {
 	return chunks, nil
 }
 
-func (s *stream) GetMembership() membership.Membership {
-	return s.membership
-}
-
-// Rebalance performs a smooth rebalancing operation
-func (s *stream) Rebalance() error {
-	s.rebalanceMutex.Lock()
-	defer s.rebalanceMutex.Unlock()
-
-	// Eğer zaten rebalancing yapılıyorsa, timer'ı reset et
-	if s.isRebalancing && s.rebalanceTimer != nil {
-		if s.rebalanceTimer.Stop() {
-			s.rebalanceTimer.Reset(s.rebalanceDelay)
-			s.logger.Info("rebalance timer reset due to another rebalance request")
-		} else {
-			s.rebalanceTimer = time.AfterFunc(s.rebalanceDelay, func() {
-				s.performRebalance()
-			})
-			s.logger.Info("new rebalance timer scheduled")
-		}
-		return nil
-	}
-
-	s.logger.Info("starting rebalance operation")
-	s.isRebalancing = true
-
-	// Dynamic membership için delay yok, diğerleri için delay var
-	delay := s.rebalanceDelay
-	if s.membership != nil && s.cfg.Membership.Type == "dynamic" {
-		delay = 0
-		s.logger.Info("dynamic membership detected, skipping rebalance delay")
-	}
-
-	s.rebalanceTimer = time.AfterFunc(delay, func() {
-		s.performRebalance()
-	})
-
-	if delay > 0 {
-		s.logger.Info("rebalance will start after delay", zap.Duration("delay", delay))
-	}
-
-	return nil
-}
-
-// performRebalance does the actual rebalancing work
-func (s *stream) performRebalance() {
-	s.logger.Info("performing rebalance operation",
-		zap.Int("old_partition_index", s.partitionIndex),
-		zap.Int("new_total_partitions", s.totalPartitions))
-
-	// Önce mevcut stream'i gracefully kapat
-	if s.streamCancel != nil {
-		s.logger.Info("closing current change stream for rebalance")
-		s.streamCancel()
-
-		// Biraz bekle ki stream düzgün kapansın
-		time.Sleep(100 * time.Millisecond)
-	}
-
-	s.isRebalancing = false
-
-	// Pipeline yeniden oluşturulacak, stream restart gerekiyor
-	// Bu sadece change stream'in sonlanmasına neden olur
-	// Open() loop'unda context.Canceled dönünce stream yeniden başlatılır
-	s.logger.Info("rebalance completed, change stream will restart with new pipeline",
-		zap.Int("partition_index", s.partitionIndex),
-		zap.Int("total_partitions", s.totalPartitions))
-}
-
-// stopRebalanceTimer rebalance timer'ını durdurur
-func (s *stream) stopRebalanceTimer() {
-	if s.rebalanceTimer != nil {
-		s.rebalanceTimer.Stop()
-		s.rebalanceTimer = nil
-	}
-}
-
 func (s *stream) getCollectionUUID() (interface{}, error) {
 	configDB := s.client.Database("config")
 	collectionsCol := configDB.Collection("collections")
@@ -1019,4 +1061,41 @@ func (s *stream) getCollectionUUID() (interface{}, error) {
 		zap.Any("uuid", uuid))
 
 	return uuid, nil
+}
+
+func (s *stream) Close(ctx context.Context) error {
+	s.logger.Info("Closing MongoDB Change Stream")
+
+	if s.streamCancel != nil {
+		s.streamCancel()
+	}
+
+	s.stopMembershipMonitoring()
+
+	s.isActive = false
+
+	if s.membership != nil {
+		if err := s.membership.Stop(ctx); err != nil {
+			s.logger.Error("Failed to stop membership", zap.Error(err))
+		}
+	}
+
+	s.logger.Info("MongoDB Change Stream closed")
+	return nil
+}
+
+func (s *stream) stopMembershipMonitoring() {
+	if s.membershipCancel != nil {
+		s.membershipCancel()
+	}
+
+	if s.membershipChangeStream != nil {
+		// MongoDB change stream'i close etmeye çalış
+		if closeableStream, ok := s.membershipChangeStream.(interface{ Close(context.Context) error }); ok {
+			if err := closeableStream.Close(context.Background()); err != nil {
+				s.logger.Error("Failed to close membership change stream", zap.Error(err))
+			}
+		}
+		s.membershipChangeStream = nil
+	}
 }

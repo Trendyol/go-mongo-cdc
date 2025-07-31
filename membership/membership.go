@@ -29,8 +29,6 @@ type MembershipInfo struct {
 	LastUpdated  time.Time    `json:"lastUpdated"`
 }
 
-type MembershipChangeCallback func(newInfo MembershipInfo)
-
 type Membership interface {
 	Initialize(ctx context.Context) error
 	Start(ctx context.Context) error
@@ -39,7 +37,6 @@ type Membership interface {
 	GetMemberInfo() MemberInfo
 	TriggerRebalance(ctx context.Context) error
 	UpdateMembershipInfo(ctx context.Context, memberNumber, totalMembers int) error
-	SetChangeCallback(callback MembershipChangeCallback)
 }
 
 type MembershipConfig struct {

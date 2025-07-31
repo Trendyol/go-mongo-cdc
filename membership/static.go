@@ -12,7 +12,6 @@ type StaticMembership struct {
 	logger         *zap.Logger
 	membershipInfo MembershipInfo
 	memberInfo     MemberInfo
-	changeCallback MembershipChangeCallback
 }
 
 func NewStaticMembership(config MembershipConfig, logger *zap.Logger) *StaticMembership {
@@ -77,17 +76,11 @@ func (s *StaticMembership) TriggerRebalance(ctx context.Context) error {
 }
 
 func (s *StaticMembership) UpdateMembershipInfo(ctx context.Context, memberNumber, totalMembers int) error {
-	oldInfo := s.membershipInfo
 
 	s.memberInfo.MemberNumber = memberNumber
 	s.membershipInfo.MemberNumber = memberNumber
 	s.membershipInfo.TotalMembers = totalMembers
 	s.membershipInfo.LastUpdated = time.Now()
-
-	// Callback varsa çağır
-	if s.changeCallback != nil && (oldInfo.MemberNumber != memberNumber || oldInfo.TotalMembers != totalMembers) {
-		s.changeCallback(s.membershipInfo)
-	}
 
 	s.logger.Info("Static membership info updated",
 		zap.Int("member_number", memberNumber),
@@ -96,6 +89,8 @@ func (s *StaticMembership) UpdateMembershipInfo(ctx context.Context, memberNumbe
 	return nil
 }
 
-func (s *StaticMembership) SetChangeCallback(callback MembershipChangeCallback) {
-	s.changeCallback = callback
+// UpdateMembershipInfoFromDatabase static membership için no-op
+func (s *StaticMembership) UpdateMembershipInfoFromDatabase(ctx context.Context) error {
+	// Static membership'te database'den güncelleme gerekmez
+	return nil
 }
