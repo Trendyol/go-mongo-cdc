@@ -18,28 +18,18 @@ const (
 type MemberInfo struct {
 	ID           string            `json:"id"`
 	MemberNumber int               `json:"memberNumber"`
-	Status       MemberStatus      `json:"status"`
 	LastSeen     time.Time         `json:"lastSeen"`
 	Metadata     map[string]string `json:"metadata"`
 }
-
-type MemberStatus string
-
-const (
-	MemberStatusActive   MemberStatus = "active"
-	MemberStatusInactive MemberStatus = "inactive"
-	MemberStatusLeader   MemberStatus = "leader"
-)
 
 type MembershipInfo struct {
 	MemberNumber int          `json:"memberNumber"`
 	TotalMembers int          `json:"totalMembers"`
 	Members      []MemberInfo `json:"members"`
-	Leader       *MemberInfo  `json:"leader"`
 	LastUpdated  time.Time    `json:"lastUpdated"`
 }
 
-type MembershipChangeCallback func(oldInfo, newInfo MembershipInfo)
+type MembershipChangeCallback func(newInfo MembershipInfo)
 
 type Membership interface {
 	Initialize(ctx context.Context) error
@@ -47,7 +37,6 @@ type Membership interface {
 	Stop(ctx context.Context) error
 	GetMembershipInfo() MembershipInfo
 	GetMemberInfo() MemberInfo
-	IsLeader() bool
 	TriggerRebalance(ctx context.Context) error
 	UpdateMembershipInfo(ctx context.Context, memberNumber, totalMembers int) error
 	SetChangeCallback(callback MembershipChangeCallback)

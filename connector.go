@@ -18,15 +18,12 @@ import (
 	"github.com/Trendyol/go-mongo-cdc/mongo/changestream"
 	"github.com/Trendyol/go-mongo-cdc/mongo/connection"
 	"github.com/go-playground/errors"
-	"github.com/prometheus/client_golang/prometheus"
 	"go.uber.org/zap"
 )
 
 type Connector interface {
 	Start(ctx context.Context)
 	Close()
-	GetConfig() *config.Config
-	SetMetricCollectors(collectors ...prometheus.Collector)
 }
 
 type connector struct {
@@ -34,10 +31,9 @@ type connector struct {
 	prometheusRegistry metric.Registry
 	server             http.Server
 	cfg                *config.Config
-	cancelCh           chan os.Signal
-	readyCh            chan struct{}
 	mongoClient        connection.Client
 	logger             *zap.Logger
+	cancelCh           chan os.Signal
 
 	once   sync.Once
 	closed bool
@@ -93,15 +89,12 @@ func NewConnector(ctx context.Context, cfg config.Config, listenerFunc changestr
 	}
 
 	return &connector{
-		cfg:                &cfg,
 		mongoClient:        mongoClient,
 		stream:             stream,
 		prometheusRegistry: prometheusRegistry,
 		server:             http.NewServer(cfg, prometheusRegistry, zapLogger, mongoClient, membershipInstance),
 		logger:             zapLogger,
-
-		cancelCh: make(chan os.Signal, 1),
-		readyCh:  make(chan struct{}, 1),
+		cancelCh:           make(chan os.Signal, 1),
 	}, nil
 }
 
@@ -144,8 +137,6 @@ func (c *connector) Start(ctx context.Context) {
 
 	c.logger.Info("MongoDB Change Stream started successfully")
 
-	c.readyCh <- struct{}{}
-
 	signal.Notify(c.cancelCh, syscall.SIGTERM, syscall.SIGINT, syscall.SIGABRT, syscall.SIGQUIT)
 
 	<-c.cancelCh
@@ -169,10 +160,6 @@ func (c *connector) Close() {
 		close(c.cancelCh)
 	}
 
-	if !isClosed(c.readyCh) {
-		close(c.readyCh)
-	}
-
 	closeCtx, cancel := context.WithTimeout(context.Background(), 10*time.Second)
 	defer cancel()
 
@@ -189,14 +176,6 @@ func (c *connector) Close() {
 	c.server.Shutdown()
 
 	c.logger.Info("Closed connections")
-}
-
-func (c *connector) GetConfig() *config.Config {
-	return c.cfg
-}
-
-func (c *connector) SetMetricCollectors(metricCollectors ...prometheus.Collector) {
-	c.prometheusRegistry.AddMetricCollectors(metricCollectors...)
 }
 
 func isClosed[T any](ch <-chan T) bool {

@@ -576,7 +576,7 @@ func (s *stream) createChunkBasedDocumentFilter(shardKey string, chunkRanges []C
 	return bson.D{}
 }
 
-func (s *stream) onMembershipChange(oldInfo, newInfo membership.MembershipInfo) {
+func (s *stream) onMembershipChange(newInfo membership.MembershipInfo) {
 	// Actual member ID'yi membership'ten al
 	actualMemberID := s.membership.GetMemberInfo().ID
 

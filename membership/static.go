@@ -24,7 +24,6 @@ func NewStaticMembership(config MembershipConfig, logger *zap.Logger) *StaticMem
 	memberInfo := MemberInfo{
 		ID:           memberID,
 		MemberNumber: config.MemberNumber,
-		Status:       MemberStatusActive,
 		LastSeen:     time.Now(),
 		Metadata:     make(map[string]string),
 	}
@@ -40,7 +39,6 @@ func NewStaticMembership(config MembershipConfig, logger *zap.Logger) *StaticMem
 			MemberNumber: config.MemberNumber,
 			TotalMembers: config.TotalMembers,
 			Members:      members,
-			Leader:       &memberInfo, // Static'te hep kendimiz leader
 			LastUpdated:  time.Now(),
 		},
 	}
@@ -72,10 +70,6 @@ func (s *StaticMembership) GetMemberInfo() MemberInfo {
 	return s.memberInfo
 }
 
-func (s *StaticMembership) IsLeader() bool {
-	return true // Static membership'te her zaman leader'ız
-}
-
 func (s *StaticMembership) TriggerRebalance(ctx context.Context) error {
 	// Static membership'te rebalance gerekmez
 	s.logger.Debug("Rebalance triggered but ignored in static membership")
@@ -92,7 +86,7 @@ func (s *StaticMembership) UpdateMembershipInfo(ctx context.Context, memberNumbe
 
 	// Callback varsa çağır
 	if s.changeCallback != nil && (oldInfo.MemberNumber != memberNumber || oldInfo.TotalMembers != totalMembers) {
-		s.changeCallback(oldInfo, s.membershipInfo)
+		s.changeCallback(s.membershipInfo)
 	}
 
 	s.logger.Info("Static membership info updated",

@@ -32,7 +32,6 @@ type DynamicMembership struct {
 	changeCallback MembershipChangeCallback
 
 	// Change stream için
-	membershipChangeStream interface{}
 	membershipStreamCtx    context.Context
 	membershipStreamCancel context.CancelFunc
 }
@@ -261,7 +260,7 @@ func (d *DynamicMembership) performRebalance(ctx context.Context) error {
 		return nil
 	}
 
-	return d.updateMembershipInfoInternal(ctx, members)
+	return d.updateMembershipInfoInternal(members)
 }
 
 func (d *DynamicMembership) getActiveMembers(ctx context.Context) ([]MemberInfo, error) {
@@ -310,7 +309,7 @@ func (d *DynamicMembership) getActiveMembers(ctx context.Context) ([]MemberInfo,
 	return members, nil
 }
 
-func (d *DynamicMembership) updateMembershipInfoInternal(ctx context.Context, members []MemberInfo) error {
+func (d *DynamicMembership) updateMembershipInfoInternal(members []MemberInfo) error {
 	// Members'ı ID'ye göre sırala - consistent ordering için
 	sort.Slice(members, func(i, j int) bool {
 		return members[i].ID < members[j].ID
@@ -338,7 +337,7 @@ func (d *DynamicMembership) updateMembershipInfoInternal(ctx context.Context, me
 
 	// Sadece gerçek değişiklik olduğunda callback çağır
 	if callback != nil && (oldInfo.TotalMembers != newInfo.TotalMembers || d.memberListChanged(oldInfo.Members, newInfo.Members)) {
-		callback(oldInfo, newInfo)
+		callback(newInfo)
 	}
 
 	return nil
@@ -362,7 +361,7 @@ func (d *DynamicMembership) updateMembershipInfo(ctx context.Context) error {
 		}
 	}
 
-	return d.updateMembershipInfoInternal(ctx, members)
+	return d.updateMembershipInfoInternal(members)
 }
 
 // memberListChanged member listesinin değişip değişmediğini kontrol eder
@@ -498,10 +497,4 @@ func (d *DynamicMembership) startPollingFallback(ctx context.Context) {
 			}
 		}
 	}
-}
-
-func (d *DynamicMembership) IsLeader() bool {
-	d.mu.RLock()
-	defer d.mu.RUnlock()
-	return d.memberInfo.Status == MemberStatusLeader
 }
