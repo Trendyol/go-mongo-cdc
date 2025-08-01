@@ -57,6 +57,7 @@ type Cursor interface {
 }
 
 type UpdateResult interface {
+	MatchedCount() int64
 	ModifiedCount() int64
 	UpsertedCount() int64
 	UpsertedID() interface{}
@@ -262,6 +263,10 @@ func (c *mongoCursorImpl) Close(ctx context.Context) error {
 
 func (c *mongoCursorImpl) Err() error {
 	return c.cursor.Err()
+}
+
+func (ur *mongoUpdateResultImpl) MatchedCount() int64 {
+	return ur.ur.MatchedCount
 }
 
 func (ur *mongoUpdateResultImpl) ModifiedCount() int64 {

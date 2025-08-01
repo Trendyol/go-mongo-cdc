@@ -85,83 +85,6 @@ func (d *DynamicMembership) Initialize(ctx context.Context) error {
 	return nil
 }
 
-func (d *DynamicMembership) Start(ctx context.Context) error {
-	d.mu.Lock()
-	if d.isRunning {
-		d.mu.Unlock()
-		return nil
-	}
-	d.isRunning = true
-	d.mu.Unlock()
-
-	// İlk başta membership info'yu yükle
-	if err := d.updateMembershipInfo(ctx); err != nil {
-		d.logger.Error("Failed to load initial membership info", zap.Error(err))
-		return err
-	}
-
-	d.heartbeatTicker = time.NewTicker(d.config.HeartbeatInterval)
-
-	d.wg.Add(1)
-	go d.heartbeatLoop(ctx)
-
-	d.logger.Info("Dynamic membership started (change stream monitoring moved to stream level)")
-	return nil
-}
-
-func (d *DynamicMembership) Stop(ctx context.Context) error {
-	d.mu.Lock()
-	if !d.isRunning {
-		d.mu.Unlock()
-		return nil
-	}
-	d.isRunning = false
-	d.mu.Unlock()
-
-	close(d.stopChan)
-
-	if d.heartbeatTicker != nil {
-		d.heartbeatTicker.Stop()
-	}
-
-	d.wg.Wait()
-
-	if err := d.unregisterMember(ctx); err != nil {
-		d.logger.Error("Failed to unregister member", zap.String("memberId", d.memberInfo.ID), zap.Error(err))
-	}
-
-	d.logger.Info("Dynamic membership stopped")
-	return nil
-}
-
-func (d *DynamicMembership) GetMembershipInfo() MembershipInfo {
-	d.mu.RLock()
-	defer d.mu.RUnlock()
-	return d.membershipInfo
-}
-
-func (d *DynamicMembership) GetMemberInfo() MemberInfo {
-	d.mu.RLock()
-	defer d.mu.RUnlock()
-	return d.memberInfo
-}
-
-func (d *DynamicMembership) TriggerRebalance(ctx context.Context) error {
-	d.logger.Info("Triggering rebalance operation")
-	return d.performRebalance(ctx)
-}
-
-func (d *DynamicMembership) UpdateMembershipInfo(ctx context.Context, memberNumber, totalMembers int) error {
-	d.mu.Lock()
-	defer d.mu.Unlock()
-
-	d.memberInfo.LastSeen = time.Now()
-
-	d.logger.Info("Dynamic membership info updated")
-
-	return nil
-}
-
 func (d *DynamicMembership) createIndexes(ctx context.Context) error {
 	indexes := []mongo.IndexModel{
 		{
@@ -189,54 +112,63 @@ func (d *DynamicMembership) registerMember(ctx context.Context) error {
 	return err
 }
 
-func (d *DynamicMembership) unregisterMember(ctx context.Context) error {
-	filter := bson.M{"_id": d.memberInfo.ID}
-	_, err := d.collection.DeleteOne(ctx, filter)
-	return err
-}
-
-func (d *DynamicMembership) heartbeatLoop(ctx context.Context) {
-	defer d.wg.Done()
-
-	for {
-		select {
-		case <-ctx.Done():
-			return
-		case <-d.stopChan:
-			return
-		case <-d.heartbeatTicker.C:
-			if err := d.sendHeartbeat(ctx); err != nil {
-				d.logger.Error("Failed to send heartbeat", zap.Error(err))
-			}
-		}
+func (d *DynamicMembership) Start(ctx context.Context) error {
+	d.mu.Lock()
+	if d.isRunning {
+		d.mu.Unlock()
+		return nil
 	}
-}
+	d.isRunning = true
+	d.mu.Unlock()
 
-func (d *DynamicMembership) sendHeartbeat(ctx context.Context) error {
-	filter := bson.M{"_id": d.memberInfo.ID}
-	update := bson.M{
-		"$set": bson.M{
-			"lastSeen": time.Now(),
-		},
-	}
-
-	_, err := d.collection.UpdateOne(ctx, filter, update)
-	if err != nil {
+	// İlk başta membership info'yu yükle
+	if err := d.updateMembershipInfo(ctx); err != nil {
+		d.logger.Error("Failed to load initial membership info", zap.Error(err))
 		return err
 	}
 
+	d.heartbeatTicker = time.NewTicker(d.config.HeartbeatInterval)
+
+	d.wg.Add(1)
+	go d.heartbeatLoop(ctx)
+
+	d.logger.Info("Dynamic membership started (change stream monitoring moved to stream level)")
 	return nil
 }
 
-func (d *DynamicMembership) performRebalance(ctx context.Context) error {
-
+func (d *DynamicMembership) updateMembershipInfo(ctx context.Context) error {
 	members, err := d.getActiveMembers(ctx)
 	if err != nil {
 		return err
 	}
 
+	// Hiç active member yoksa bu kritik bir durum
 	if len(members) == 0 {
-		return nil
+		d.logger.Fatal("No active members found in cluster, including self. This indicates a critical membership issue.",
+			zap.String("memberID", d.memberInfo.ID),
+			zap.Time("lastSeen", d.memberInfo.LastSeen),
+			zap.Duration("healthCheckTimeout", d.config.HealthCheckTimeout))
+
+		// Graceful panic with context
+		panic("No active members found in dynamic membership cluster")
+	}
+
+	// Kendimizi active member'lar arasında bulamazsak da problem
+	selfFound := false
+	for _, member := range members {
+		if member.ID == d.memberInfo.ID {
+			selfFound = true
+			break
+		}
+	}
+
+	if !selfFound {
+		d.logger.Fatal("Self not found in active members list",
+			zap.String("selfID", d.memberInfo.ID),
+			zap.Int("activeMembersCount", len(members)),
+			zap.Any("activeMembers", members))
+
+		panic("Self not found in dynamic membership cluster")
 	}
 
 	return d.updateMembershipInfoInternal(members)
@@ -309,27 +241,129 @@ func (d *DynamicMembership) updateMembershipInfoInternal(members []MemberInfo) e
 	return nil
 }
 
-func (d *DynamicMembership) updateMembershipInfo(ctx context.Context) error {
+func (d *DynamicMembership) heartbeatLoop(ctx context.Context) {
+	defer d.wg.Done()
+
+	for {
+		select {
+		case <-ctx.Done():
+			return
+		case <-d.stopChan:
+			return
+		case <-d.heartbeatTicker.C:
+			if err := d.sendHeartbeat(ctx); err != nil {
+				d.logger.Error("Failed to send heartbeat", zap.Error(err))
+			}
+		}
+	}
+}
+
+func (d *DynamicMembership) sendHeartbeat(ctx context.Context) error {
+	filter := bson.M{"_id": d.memberInfo.ID}
+	update := bson.M{
+		"$set": bson.M{
+			"lastSeen": time.Now(),
+		},
+	}
+
+	result, err := d.collection.UpdateOne(ctx, filter, update)
+	if err != nil {
+		return err
+	}
+
+	// Eğer kendi dökümanımızı bulamazsak da sorun var
+	if result.MatchedCount() == 0 {
+		d.logger.Error("Failed to update own heartbeat - document not found",
+			zap.String("memberID", d.memberInfo.ID))
+
+		// Bu durumda re-register dene
+		if regErr := d.registerMember(ctx); regErr != nil {
+			d.logger.Fatal("Failed to re-register member after heartbeat failure",
+				zap.String("memberID", d.memberInfo.ID),
+				zap.Error(regErr))
+			panic("Cannot maintain membership presence")
+		}
+
+		d.logger.Info("Successfully re-registered member after heartbeat failure",
+			zap.String("memberID", d.memberInfo.ID))
+	}
+
+	return nil
+}
+
+func (d *DynamicMembership) UpdateMembershipInfoFromDatabase(ctx context.Context) error {
+	return d.updateMembershipInfo(ctx)
+}
+
+func (d *DynamicMembership) Stop(ctx context.Context) error {
+	d.mu.Lock()
+	if !d.isRunning {
+		d.mu.Unlock()
+		return nil
+	}
+	d.isRunning = false
+	d.mu.Unlock()
+
+	close(d.stopChan)
+
+	if d.heartbeatTicker != nil {
+		d.heartbeatTicker.Stop()
+	}
+
+	d.wg.Wait()
+
+	if err := d.unregisterMember(ctx); err != nil {
+		d.logger.Error("Failed to unregister member", zap.String("memberId", d.memberInfo.ID), zap.Error(err))
+	}
+
+	d.logger.Info("Dynamic membership stopped")
+	return nil
+}
+
+func (d *DynamicMembership) unregisterMember(ctx context.Context) error {
+	filter := bson.M{"_id": d.memberInfo.ID}
+	_, err := d.collection.DeleteOne(ctx, filter)
+	return err
+}
+
+func (d *DynamicMembership) TriggerRebalance(ctx context.Context) error {
+	d.logger.Info("Triggering rebalance operation")
+	return d.performRebalance(ctx)
+}
+
+func (d *DynamicMembership) performRebalance(ctx context.Context) error {
+
 	members, err := d.getActiveMembers(ctx)
 	if err != nil {
 		return err
 	}
 
-	//TODO: kendini oldurse daha iyi olur gibi konusalım (hepsi aynı seyi yapsın kendini de gormuyorsa bende yokum deyip panic yapabilir)
 	if len(members) == 0 {
-		d.logger.Warn("No active members found, treating self as only member")
-		// Hiç member bulunamazsa kendini tek member olarak kabul et
-		members = []MemberInfo{
-			{
-				ID:       d.memberInfo.ID,
-				LastSeen: time.Now(),
-			},
-		}
+		return nil
 	}
 
 	return d.updateMembershipInfoInternal(members)
 }
 
-func (d *DynamicMembership) UpdateMembershipInfoFromDatabase(ctx context.Context) error {
-	return d.updateMembershipInfo(ctx)
+func (d *DynamicMembership) UpdateMembershipInfo(ctx context.Context, memberNumber, totalMembers int) error {
+	d.mu.Lock()
+	defer d.mu.Unlock()
+
+	d.memberInfo.LastSeen = time.Now()
+
+	d.logger.Info("Dynamic membership info updated")
+
+	return nil
+}
+
+func (d *DynamicMembership) GetMembershipInfo() MembershipInfo {
+	d.mu.RLock()
+	defer d.mu.RUnlock()
+	return d.membershipInfo
+}
+
+func (d *DynamicMembership) GetMemberInfo() MemberInfo {
+	d.mu.RLock()
+	defer d.mu.RUnlock()
+	return d.memberInfo
 }
