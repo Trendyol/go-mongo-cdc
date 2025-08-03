@@ -121,7 +121,7 @@ func (c *connector) Start(ctx context.Context) {
 
 			if goerrors.Is(err, context.Canceled) {
 				c.logger.Info("Stream restarting due to rebalance...")
-				time.Sleep(1 * time.Second) // Kısa bekle
+				time.Sleep(1 * time.Second)
 				continue
 			}
 
@@ -131,7 +131,7 @@ func (c *connector) Start(ctx context.Context) {
 			}
 
 			c.logger.Error("MongoDB stream open error", zap.Error(err))
-			time.Sleep(5 * time.Second) // Hata durumunda bekle
+			time.Sleep(5 * time.Second)
 		}
 	}()
 

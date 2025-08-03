@@ -48,17 +48,14 @@ type stream struct {
 	partitionIndex  int
 	totalPartitions int
 
-	// Change stream management
 	streamContext context.Context
 	streamCancel  context.CancelFunc
 
-	// Membership monitoring için ayrı change stream
 	membershipCollection   connection.Collection
 	membershipChangeStream interface{}
 	membershipContext      context.Context
 	membershipCancel       context.CancelFunc
 
-	// Pipeline güncelleme için
 	partitionMutex sync.RWMutex
 }
 
@@ -73,7 +70,6 @@ func NewStream(
 	collection := database.Collection(cfg.Collection)
 	checkpoint := database.Collection(cfg.Checkpoint.Collection)
 
-	// Membership collection için dynamic membership config'den alınacak
 	var membershipCollection connection.Collection
 	if cfg.Membership.Enabled && cfg.Membership.Type == "dynamic" {
 		membershipDatabaseName := cfg.Membership.Config["database"]
@@ -142,7 +138,6 @@ func (s *stream) Open(ctx context.Context) error {
 		s.isActive = false
 	}()
 
-	// Stream context'ini ayarla
 	s.streamContext, s.streamCancel = context.WithCancel(ctx)
 
 	s.logger.Info("Starting MongoDB Change Stream",
@@ -185,7 +180,7 @@ func (s *stream) Open(ctx context.Context) error {
 		return err
 	}
 
-	//TODO: bazen podu indirip tekrar kalktıgında token'i bulamıyor ve bozuluyor bakalım
+	//TODO: Sometimes when the pod is restarted, it can't find the token then breaks. Investigate this.
 	resumeToken, err := s.loadResumeToken(ctx)
 	if err != nil || resumeToken == nil {
 		s.logger.Warn("Resume token not found or failed to load, processing all existing documents", zap.Error(err))
@@ -282,12 +277,11 @@ func (s *stream) startMembershipMonitoring(ctx context.Context) {
 	go func() {
 		s.logger.Info("Starting membership change stream monitoring")
 
-		// Change stream için pipeline - sadece critical değişiklikleri dinle
 		pipeline := []bson.D{
 			{
 				{Key: "$match", Value: bson.D{
 					{Key: "operationType", Value: bson.D{
-						{Key: "$in", Value: []string{"insert", "delete"}}, // Sadece insert/delete dinle
+						{Key: "$in", Value: []string{"insert", "delete"}},
 					}},
 				}},
 			},
@@ -302,7 +296,6 @@ func (s *stream) startMembershipMonitoring(ctx context.Context) {
 				s.logger.Info("Membership change stream context cancelled")
 				return
 			default:
-				// Change stream oluştur
 				changeStream := s.membershipCollection.Watch(s.membershipContext, pipeline)
 				if changeStream == nil {
 					s.logger.Error("Failed to create membership change stream")
@@ -318,7 +311,6 @@ func (s *stream) startMembershipMonitoring(ctx context.Context) {
 				s.membershipChangeStream = changeStream
 				retryCount = 0 // Reset retry counter on successful connection
 
-				// Change stream'i dinle
 				for changeStream.Next(s.membershipContext) {
 					var changeDoc bson.M
 					if err := changeStream.Decode(&changeDoc); err != nil {
@@ -330,24 +322,19 @@ func (s *stream) startMembershipMonitoring(ctx context.Context) {
 					s.logger.Debug("Membership change detected",
 						zap.String("operation", operationType))
 
-					// Insert/Delete her zaman önemli, önce membership bilgilerini güncelle
 					if dynamicMembership, ok := s.membership.(*membership.DynamicMembership); ok {
-						// Dynamic membership'in private updateMembershipInfo metodunu çağırabilmek için
-						// bu bilgiyi manuel olarak güncelleyelim
 						if err := dynamicMembership.UpdateMembershipInfoFromDatabase(s.membershipContext); err != nil {
 							s.logger.Error("Failed to update membership info from database", zap.Error(err))
 							continue
 						}
 					}
 
-					// Sonra partition bilgilerini güncelle
 					partitionChanged, err := s.updatePartitionInfo()
 					if err != nil {
 						s.logger.Error("Failed to update partition info after membership change", zap.Error(err))
 						continue
 					}
 
-					// Sadece partition bilgileri değiştiyse stream'i restart et
 					if partitionChanged {
 						s.logger.Info("Partition changed after membership update, restarting stream")
 						if s.streamCancel != nil {
@@ -356,7 +343,6 @@ func (s *stream) startMembershipMonitoring(ctx context.Context) {
 					}
 				}
 
-				// Change stream kapandı, hata kontrolü
 				if err := changeStream.Err(); err != nil {
 					s.logger.Error("Membership change stream error", zap.Error(err))
 				}
@@ -364,7 +350,6 @@ func (s *stream) startMembershipMonitoring(ctx context.Context) {
 				changeStream.Close(s.membershipContext)
 				s.logger.Debug("Membership change stream closed, will retry")
 
-				// Exponential backoff
 				retryCount++
 				backoffDuration := time.Duration(retryCount) * 2 * time.Second
 				if backoffDuration > 30*time.Second {
@@ -387,7 +372,6 @@ func (s *stream) updatePartitionInfo() (bool, error) {
 		return false, nil
 	}
 
-	// Yeni membership bilgisini al
 	newMembershipInfo := s.membership.GetMembershipInfo()
 	actualMemberID := s.membership.GetMemberInfo().ID
 
@@ -397,10 +381,8 @@ func (s *stream) updatePartitionInfo() (bool, error) {
 	oldIndex := s.partitionIndex
 	oldTotal := s.totalPartitions
 
-	// Yeni partition bilgilerini hesapla
 	s.totalPartitions = len(newMembershipInfo.Members)
 
-	// Kendimizi bul ve partition index'i ayarla
 	for i, member := range newMembershipInfo.Members {
 		if member.ID == actualMemberID {
 			s.partitionIndex = i
@@ -408,7 +390,6 @@ func (s *stream) updatePartitionInfo() (bool, error) {
 		}
 	}
 
-	// Sadece gerçek değişiklik varsa log yaz ve true döndür
 	if oldIndex != s.partitionIndex || oldTotal != s.totalPartitions {
 		s.logger.Info("partition info updated",
 			zap.Int("old_index", oldIndex),
@@ -620,8 +601,8 @@ func (s *stream) createSimplePartitionPipeline(basePipeline []bson.D) []bson.D {
 }*/
 
 func (s *stream) createHashBasedPartitionPipeline(basePipeline []bson.D) []bson.D {
-	// Document ID'sine göre hash-based partitioning
-	// ObjectID string'inin uzunluğunu hesaplayıp son 2 karakteri alıyoruz
+	// Hash-based partitioning based on Document ID
+	// Calculates the length of the ObjectID string and takes the last 2 characters
 	hashBasedFilter := bson.D{
 		{Key: "$match", Value: bson.D{
 			{Key: "$expr", Value: bson.D{
@@ -641,7 +622,6 @@ func (s *stream) createHashBasedPartitionPipeline(basePipeline []bson.D) []bson.
 	return result
 }
 
-// objectId, uuid ve sayılar icin calisiyor bu kod _id random string ise duzgun calismaz
 func (s *stream) createHexToIntExpression(idField string) bson.D {
 	// ObjectID'nin son 2 karakterini hexadecimal'den integer'a çevir
 	// Hex karakterler: 0-9, a-f, A-F
@@ -660,7 +640,6 @@ func (s *stream) createHexToIntExpression(idField string) bson.D {
 	//$multiply -> Sonuç olarak 12 sayısını 16 ile çarpar ve 192 değerini üretir.
 	return bson.D{
 		{Key: "$add", Value: bson.A{
-			// İlk karakter * 16
 			bson.D{{Key: "$multiply", Value: bson.A{
 				s.createSingleHexCharToInt(bson.D{
 					{Key: "$substr", Value: bson.A{
@@ -677,7 +656,6 @@ func (s *stream) createHexToIntExpression(idField string) bson.D {
 				}),
 				16,
 			}}},
-			// İkinci karakter
 			s.createSingleHexCharToInt(bson.D{
 				{Key: "$substr", Value: bson.A{
 					bson.D{{Key: "$toString", Value: idField}},
@@ -696,7 +674,6 @@ func (s *stream) createHexToIntExpression(idField string) bson.D {
 }
 
 func (s *stream) createSingleHexCharToInt(charExpr bson.D) bson.D {
-	// Tek hex karakteri integer'a çevir
 	return bson.D{
 		{Key: "$switch", Value: bson.D{
 			{Key: "branches", Value: bson.A{
@@ -879,22 +856,6 @@ func (s *stream) createDocumentFilter() bson.D {
 	return s.createHashBasedDocumentFilter()
 }
 
-/*func (s *stream) createHashBasedDocumentFilter() bson.D {
-	// Document query'si için optimize edilmiş hash-based filtering
-	// ID'nin tamamını kullanarak document'ları partition'lara dağıtıyoruz
-	return bson.D{
-		{Key: "$expr", Value: bson.D{
-			{Key: "$eq", Value: bson.A{
-				bson.D{{Key: "$mod", Value: bson.A{
-					bson.D{{Key: "$toHashedIndexKey", Value: "$_id"}},
-					s.totalPartitions,
-				}}},
-				s.partitionIndex,
-			}},
-		}},
-	}
-}*/
-
 func (s *stream) createHashBasedDocumentFilter() bson.D {
 	// Document query'si için optimize edilmiş hash-based filtering
 	// ID'nin son 2 karakterini hex'den int'e çevirerek partition'lara dağıtıyoruz
@@ -969,7 +930,6 @@ func (s *stream) getChunkRanges() []ChunkRange {
 		}
 	}
 
-	// Final summary with chunk ranges
 	var rangeSummary []string
 	for _, chunk := range assignedChunks {
 		if minDoc, ok := chunk.Min.(bson.M); ok {
@@ -987,7 +947,6 @@ func (s *stream) getAllChunks() ([]ChunkRange, error) {
 	configDB := s.client.Database("config")
 	chunksCollection := configDB.Collection("chunks")
 
-	// Önce collection UUID'sini bul ( 779 - 798 localde chunklarda namespace eklemistim sonra silindi falan chunk içerisinde nm olmadan bu kodla calisabiliyordu gerekli mi diye tekrar bakmak lazım)
 	collectionUUID, err := s.getCollectionUUID()
 	if err != nil {
 		s.logger.Warn("failed to get collection UUID, trying ns filter", zap.Error(err))
@@ -1090,7 +1049,6 @@ func (s *stream) stopMembershipMonitoring() {
 	}
 
 	if s.membershipChangeStream != nil {
-		// MongoDB change stream'i close etmeye çalış
 		if closeableStream, ok := s.membershipChangeStream.(interface{ Close(context.Context) error }); ok {
 			if err := closeableStream.Close(context.Background()); err != nil {
 				s.logger.Error("Failed to close membership change stream", zap.Error(err))

@@ -121,7 +121,6 @@ func (d *DynamicMembership) Start(ctx context.Context) error {
 	d.isRunning = true
 	d.mu.Unlock()
 
-	// İlk başta membership info'yu yükle
 	if err := d.updateMembershipInfo(ctx); err != nil {
 		d.logger.Error("Failed to load initial membership info", zap.Error(err))
 		return err
@@ -142,18 +141,15 @@ func (d *DynamicMembership) updateMembershipInfo(ctx context.Context) error {
 		return err
 	}
 
-	// Hiç active member yoksa bu kritik bir durum
 	if len(members) == 0 {
 		d.logger.Fatal("No active members found in cluster, including self. This indicates a critical membership issue.",
 			zap.String("memberID", d.memberInfo.ID),
 			zap.Time("lastSeen", d.memberInfo.LastSeen),
 			zap.Duration("healthCheckTimeout", d.config.HealthCheckTimeout))
 
-		// Graceful panic with context
 		panic("No active members found in dynamic membership cluster")
 	}
 
-	// Kendimizi active member'lar arasında bulamazsak da problem
 	selfFound := false
 	for _, member := range members {
 		if member.ID == d.memberInfo.ID {
@@ -178,14 +174,12 @@ func (d *DynamicMembership) getActiveMembers(ctx context.Context) ([]MemberInfo,
 
 	cutoff := time.Now().Add(-d.config.HealthCheckTimeout)
 
-	// İlk önce expired member'ları temizle
 	expiredFilter := bson.M{"lastSeen": bson.M{"$lt": cutoff}}
 	_, err := d.collection.DeleteMany(ctx, expiredFilter)
 	if err != nil {
 		d.logger.Error("Failed to cleanup expired members", zap.Error(err))
 	}
 
-	// Sonra active member'ları getir (sadece lastSeen'e göre, status'e bakma)
 	activeFilter := bson.M{"lastSeen": bson.M{"$gte": cutoff}}
 	d.logger.Debug("Searching for active members", zap.Any("filter", activeFilter))
 
@@ -271,12 +265,10 @@ func (d *DynamicMembership) sendHeartbeat(ctx context.Context) error {
 		return err
 	}
 
-	// Eğer kendi dökümanımızı bulamazsak da sorun var
 	if result.MatchedCount() == 0 {
 		d.logger.Error("Failed to update own heartbeat - document not found",
 			zap.String("memberID", d.memberInfo.ID))
 
-		// Bu durumda re-register dene
 		if regErr := d.registerMember(ctx); regErr != nil {
 			d.logger.Fatal("Failed to re-register member after heartbeat failure",
 				zap.String("memberID", d.memberInfo.ID),

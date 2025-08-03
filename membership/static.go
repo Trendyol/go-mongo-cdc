@@ -27,7 +27,6 @@ func NewStaticMembership(config MembershipConfig, logger *zap.Logger) *StaticMem
 		Metadata:     make(map[string]string),
 	}
 
-	// Static membership'te sadece kendi member bilgimiz var
 	members := []MemberInfo{memberInfo}
 
 	return &StaticMembership{
@@ -70,7 +69,6 @@ func (s *StaticMembership) GetMemberInfo() MemberInfo {
 }
 
 func (s *StaticMembership) TriggerRebalance(ctx context.Context) error {
-	// Static membership'te rebalance gerekmez
 	s.logger.Debug("Rebalance triggered but ignored in static membership")
 	return nil
 }
@@ -89,8 +87,6 @@ func (s *StaticMembership) UpdateMembershipInfo(ctx context.Context, memberNumbe
 	return nil
 }
 
-// UpdateMembershipInfoFromDatabase static membership için no-op
 func (s *StaticMembership) UpdateMembershipInfoFromDatabase(ctx context.Context) error {
-	// Static membership'te database'den güncelleme gerekmez
 	return nil
 }
