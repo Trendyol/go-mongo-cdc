@@ -2,10 +2,12 @@ package main
 
 import (
 	"context"
+	"go.uber.org/zap/zapcore"
 	"log"
 	"time"
 
 	cdc "github.com/Trendyol/go-mongo-cdc"
+
 	"github.com/Trendyol/go-mongo-cdc/config"
 	"github.com/Trendyol/go-mongo-cdc/mongo/changestream"
 	"github.com/Trendyol/go-mongo-cdc/mongo/message"
@@ -13,11 +15,17 @@ import (
 )
 
 func main() {
+	// Debug level logger
+	loggerConfig := zap.NewDevelopmentConfig()
+	loggerConfig.Level = zap.NewAtomicLevelAt(zapcore.DebugLevel)
+	logger, _ := loggerConfig.Build()
+	defer logger.Sync()
+
 	cfg := config.Config{
 		Host:       "localhost",
 		Port:       27017,
-		Database:   "seller_contents_db",
-		Collection: "seller_contents",
+		Database:   "exampleDB",
+		Collection: "exampleCollection",
 		DebugMode:  true,
 		Metric: config.MetricConfig{
 			Port: 8080,
@@ -25,6 +33,19 @@ func main() {
 		Checkpoint: config.CheckpointConfig{
 			Collection:   "checkpoint-SellerContents",
 			SaveInterval: 30 * time.Second,
+		},
+		Membership: config.MembershipConfig{
+			HeartbeatInterval:  30 * time.Second,
+			HealthCheckTimeout: 60 * time.Second,
+			Enabled:            true,
+			Type:               "dynamic",
+			ChunkBased:         false,
+			Config: map[string]string{
+				"shardKey": "sellerId",
+			},
+		},
+		Logger: config.LoggerConfig{
+			Logger: logger,
 		},
 	}
 
@@ -36,16 +57,7 @@ func main() {
 	defer connector.Close()
 
 	ctx := context.Background()
-	go connector.Start(ctx)
-
-	if err := connector.WaitUntilReady(ctx); err != nil {
-		log.Println("connector failed to start:", err)
-		return
-	}
-
-	log.Println("MongoDB CDC is running. Press Ctrl+C to stop.")
-
-	select {}
+	connector.Start(ctx)
 }
 
 func listenerFunc(lc *changestream.ListenerContext) {

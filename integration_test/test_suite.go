@@ -75,9 +75,89 @@ func (suite *CDCTestSuite) SetupTest() {
 	err := suite.collection.Drop(suite.ctx)
 	suite.Require().NoError(err)
 
-	checkpointCollection := suite.database.Collection("cdc_checkpoints")
-	err = checkpointCollection.Drop(suite.ctx)
-	suite.Require().NoError(err)
+	checkpointCollections := []string{
+		"cdc_checkpoints",
+		"cdc_checkpoints_chunk_test",
+		"cdc_checkpoints_member_test",
+		"cdc_checkpoints_member_1",
+		"cdc_checkpoints_member_2",
+		"cdc_checkpoints_member_3",
+	}
+
+	allCollections, err := suite.database.ListCollectionNames(suite.ctx, bson.D{})
+	if err == nil {
+		for _, collName := range allCollections {
+			if strings.HasPrefix(collName, "cdc_checkpoints") {
+				checkpointCollection := suite.database.Collection(collName)
+				err = checkpointCollection.Drop(suite.ctx)
+				if err != nil {
+					suite.logger.Debug("Failed to drop pattern-matched checkpoint collection",
+						zap.String("collection", collName),
+						zap.Error(err))
+				} else {
+					suite.logger.Debug("Dropped pattern-matched checkpoint collection",
+						zap.String("collection", collName))
+				}
+			}
+		}
+	}
+
+	for _, collectionName := range checkpointCollections {
+		checkpointCollection := suite.database.Collection(collectionName)
+		err = checkpointCollection.Drop(suite.ctx)
+		if err != nil {
+			suite.logger.Debug("Failed to drop checkpoint collection (may not exist)",
+				zap.String("collection", collectionName),
+				zap.Error(err))
+		}
+	}
+
+	membershipCollections := []string{
+		"test_membership",
+		"cdc_membership",
+	}
+
+	for _, collectionName := range membershipCollections {
+		membershipCollection := suite.database.Collection(collectionName)
+		err = membershipCollection.Drop(suite.ctx)
+		if err != nil {
+			suite.logger.Debug("Failed to drop membership collection (may not exist)",
+				zap.String("collection", collectionName),
+				zap.Error(err))
+		}
+	}
+
+	configDB := suite.mongoClient.Database("config")
+	configCollections := []string{
+		"chunks",
+		"collections",
+		"databases",
+	}
+
+	for _, collectionName := range configCollections {
+		configCollection := configDB.Collection(collectionName)
+		err = configCollection.Drop(suite.ctx)
+		if err != nil {
+			suite.logger.Debug("Failed to drop config collection (may not exist)",
+				zap.String("collection", collectionName),
+				zap.Error(err))
+		}
+	}
+
+	clusterDB := suite.mongoClient.Database("cdc_cluster")
+	clusterCollections := []string{
+		"cdc_membership",
+	}
+
+	for _, collectionName := range clusterCollections {
+		clusterCollection := clusterDB.Collection(collectionName)
+		err = clusterCollection.Drop(suite.ctx)
+		if err != nil {
+			suite.logger.Debug("Failed to drop cluster collection (may not exist)",
+				zap.String("collection", collectionName),
+				zap.Error(err))
+		}
+	}
 }
 
 func (suite *CDCTestSuite) setupMongoContainer() {
@@ -302,7 +382,7 @@ func (suite *CDCTestSuite) createTestConnector(listenerFunc changestream.Listene
 		mongoClient:        mongoClient,
 		stream:             stream,
 		prometheusRegistry: prometheusRegistry,
-		server:             http.NewServer(cfg, prometheusRegistry),
+		server:             http.NewServer(cfg, prometheusRegistry, zapLogger, mongoClient, nil),
 		logger:             zapLogger,
 		cancelCh:           make(chan os.Signal, 1),
 		readyCh:            make(chan struct{}, 1),
@@ -430,6 +510,7 @@ func (suite *CDCTestSuite) waitForCDCReady(collector MessageCollector, timeout t
 	testDoc := bson.M{
 		"_id":       primitive.NewObjectID(),
 		"testType":  "cdc_readiness_check",
+		"sellerId":  int32(0),
 		"timestamp": time.Now(),
 	}
 
@@ -458,4 +539,9 @@ func (suite *CDCTestSuite) startConnectorWithReadinessCheck(collector MessageCol
 	suite.waitForCDCReady(collector, 15*time.Second)
 	suite.logger.Info("CDC connector ready for testing")
 	return connector, ctx, cancel
+}
+
+func (suite *CDCTestSuite) generateUniqueCheckpointName(prefix string) string {
+	timestamp := time.Now().UnixNano()
+	return fmt.Sprintf("%s_%d", prefix, timestamp)
 }

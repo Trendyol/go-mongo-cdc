@@ -14,19 +14,16 @@ import (
 	"github.com/Trendyol/go-mongo-cdc/internal/http"
 	"github.com/Trendyol/go-mongo-cdc/internal/metric"
 	"github.com/Trendyol/go-mongo-cdc/logger"
+	"github.com/Trendyol/go-mongo-cdc/membership"
 	"github.com/Trendyol/go-mongo-cdc/mongo/changestream"
 	"github.com/Trendyol/go-mongo-cdc/mongo/connection"
 	"github.com/go-playground/errors"
-	"github.com/prometheus/client_golang/prometheus"
 	"go.uber.org/zap"
 )
 
 type Connector interface {
 	Start(ctx context.Context)
-	WaitUntilReady(ctx context.Context) error
 	Close()
-	GetConfig() *config.Config
-	SetMetricCollectors(collectors ...prometheus.Collector)
 }
 
 type connector struct {
@@ -34,12 +31,13 @@ type connector struct {
 	prometheusRegistry metric.Registry
 	server             http.Server
 	cfg                *config.Config
-	cancelCh           chan os.Signal
-	readyCh            chan struct{}
 	mongoClient        connection.Client
 	logger             *zap.Logger
+	cancelCh           chan os.Signal
 
-	once sync.Once
+	once   sync.Once
+	closed bool
+	mu     sync.Mutex
 }
 
 func NewConnectorWithConfigFile(
@@ -85,16 +83,18 @@ func NewConnector(ctx context.Context, cfg config.Config, listenerFunc changestr
 
 	prometheusRegistry := metric.NewRegistry(m)
 
+	var membershipInstance membership.Membership
+	if streamWithMembership, ok := stream.(interface{ GetMembership() membership.Membership }); ok {
+		membershipInstance = streamWithMembership.GetMembership()
+	}
+
 	return &connector{
-		cfg:                &cfg,
 		mongoClient:        mongoClient,
 		stream:             stream,
 		prometheusRegistry: prometheusRegistry,
-		server:             http.NewServer(cfg, prometheusRegistry),
+		server:             http.NewServer(cfg, prometheusRegistry, zapLogger, mongoClient, membershipInstance),
 		logger:             zapLogger,
-
-		cancelCh: make(chan os.Signal, 1),
-		readyCh:  make(chan struct{}, 1),
+		cancelCh:           make(chan os.Signal, 1),
 	}, nil
 }
 
@@ -105,60 +105,77 @@ func (c *connector) Start(ctx context.Context) {
 
 	c.logger.Info("Starting MongoDB Change Stream watcher...")
 
-	err := c.stream.Open(ctx)
-	if err != nil {
-		if goerrors.Is(err, changestream.ErrorStreamInUse) {
-			c.logger.Info("Stream capture failed, retrying...")
+	go func() {
+		for {
+			err := c.stream.Open(ctx)
+			if err == nil {
+				c.logger.Info("MongoDB stream completed normally")
+				return
+			}
+
+			if goerrors.Is(err, changestream.ErrorStreamInUse) {
+				c.logger.Info("Stream capture failed, retrying...")
+				time.Sleep(5 * time.Second)
+				continue
+			}
+
+			if goerrors.Is(err, context.Canceled) {
+				c.logger.Info("Stream restarting due to rebalance...")
+				time.Sleep(1 * time.Second)
+				continue
+			}
+
+			if ctx.Err() != nil {
+				c.logger.Info("Stream stopping due to context cancellation")
+				return
+			}
+
+			c.logger.Error("MongoDB stream open error", zap.Error(err))
 			time.Sleep(5 * time.Second)
-			c.Start(ctx)
-			return
 		}
-		c.logger.Error("MongoDB stream open error", zap.Error(err))
-		return
-	}
+	}()
 
 	c.logger.Info("MongoDB Change Stream started successfully")
 
 	signal.Notify(c.cancelCh, syscall.SIGTERM, syscall.SIGINT, syscall.SIGABRT, syscall.SIGQUIT)
 
-	c.readyCh <- struct{}{}
-
 	<-c.cancelCh
-	c.logger.Debug("Cancel channel triggered")
-}
-
-func (c *connector) WaitUntilReady(ctx context.Context) error {
-	select {
-	case <-c.readyCh:
-		return nil
-	case <-ctx.Done():
-		return ctx.Err()
-	}
+	c.logger.Info("Shutdown signal received")
 }
 
 func (c *connector) Close() {
+	c.mu.Lock()
+	defer c.mu.Unlock()
+
+	c.logger.Info("Closing connections")
+
+	if c.closed {
+		c.logger.Info("Already closed, skipping cleanup")
+		return
+	}
+
+	c.closed = true
+
 	if !isClosed(c.cancelCh) {
 		close(c.cancelCh)
 	}
-	if !isClosed(c.readyCh) {
-		close(c.readyCh)
-	}
 
-	if err := c.stream.Close(context.TODO()); err != nil {
+	closeCtx, cancel := context.WithTimeout(context.Background(), 10*time.Second)
+	defer cancel()
+
+	c.logger.Info("Closing stream...")
+	if err := c.stream.Close(closeCtx); err != nil {
 		c.logger.Error("Failed to close stream", zap.Error(err))
 	}
-	if err := c.mongoClient.Close(context.TODO()); err != nil {
+
+	c.logger.Info("Closing mongo client...")
+	if err := c.mongoClient.Close(closeCtx); err != nil {
 		c.logger.Error("Failed to close mongo client", zap.Error(err))
 	}
+
 	c.server.Shutdown()
-}
 
-func (c *connector) GetConfig() *config.Config {
-	return c.cfg
-}
-
-func (c *connector) SetMetricCollectors(metricCollectors ...prometheus.Collector) {
-	c.prometheusRegistry.AddMetricCollectors(metricCollectors...)
+	c.logger.Info("Closed connections")
 }
 
 func isClosed[T any](ch <-chan T) bool {

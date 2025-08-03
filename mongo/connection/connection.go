@@ -31,6 +31,9 @@ type Collection interface {
 		update interface{},
 		opts ...*options.UpdateOptions,
 	) (UpdateResult, error)
+	DeleteOne(ctx context.Context, filter interface{}, opts ...*options.DeleteOptions) (DeleteResult, error)
+	DeleteMany(ctx context.Context, filter interface{}, opts ...*options.DeleteOptions) (DeleteResult, error)
+	Indexes() IndexView
 }
 
 type ChangeStream interface {
@@ -54,9 +57,18 @@ type Cursor interface {
 }
 
 type UpdateResult interface {
+	MatchedCount() int64
 	ModifiedCount() int64
 	UpsertedCount() int64
 	UpsertedID() interface{}
+}
+
+type DeleteResult interface {
+	DeletedCount() int64
+}
+
+type IndexView interface {
+	CreateMany(ctx context.Context, models []mongo.IndexModel, opts ...*options.CreateIndexesOptions) ([]string, error)
 }
 
 type mongoClientImpl struct {
@@ -85,6 +97,14 @@ type mongoCursorImpl struct {
 
 type mongoUpdateResultImpl struct {
 	ur *mongo.UpdateResult
+}
+
+type mongoDeleteResultImpl struct {
+	dr *mongo.DeleteResult
+}
+
+type mongoIndexViewImpl struct {
+	iv mongo.IndexView
 }
 
 func NewConnection(ctx context.Context, uri string) (Client, error) {
@@ -170,6 +190,34 @@ func (c *mongoCollectionImpl) UpdateOne(
 	return &mongoUpdateResultImpl{ur: result}, nil
 }
 
+func (c *mongoCollectionImpl) DeleteOne(
+	ctx context.Context,
+	filter interface{},
+	opts ...*options.DeleteOptions,
+) (DeleteResult, error) {
+	result, err := c.coll.DeleteOne(ctx, filter, opts...)
+	if err != nil {
+		return nil, err
+	}
+	return &mongoDeleteResultImpl{dr: result}, nil
+}
+
+func (c *mongoCollectionImpl) DeleteMany(
+	ctx context.Context,
+	filter interface{},
+	opts ...*options.DeleteOptions,
+) (DeleteResult, error) {
+	result, err := c.coll.DeleteMany(ctx, filter, opts...)
+	if err != nil {
+		return nil, err
+	}
+	return &mongoDeleteResultImpl{dr: result}, nil
+}
+
+func (c *mongoCollectionImpl) Indexes() IndexView {
+	return &mongoIndexViewImpl{iv: c.coll.Indexes()}
+}
+
 func (cs *mongoChangeStreamImpl) Next(ctx context.Context) bool {
 	return cs.cs.Next(ctx)
 }
@@ -217,6 +265,10 @@ func (c *mongoCursorImpl) Err() error {
 	return c.cursor.Err()
 }
 
+func (ur *mongoUpdateResultImpl) MatchedCount() int64 {
+	return ur.ur.MatchedCount
+}
+
 func (ur *mongoUpdateResultImpl) ModifiedCount() int64 {
 	return ur.ur.ModifiedCount
 }
@@ -227,4 +279,12 @@ func (ur *mongoUpdateResultImpl) UpsertedCount() int64 {
 
 func (ur *mongoUpdateResultImpl) UpsertedID() interface{} {
 	return ur.ur.UpsertedID
+}
+
+func (dr *mongoDeleteResultImpl) DeletedCount() int64 {
+	return dr.dr.DeletedCount
+}
+
+func (iv *mongoIndexViewImpl) CreateMany(ctx context.Context, models []mongo.IndexModel, opts ...*options.CreateIndexesOptions) ([]string, error) {
+	return iv.iv.CreateMany(ctx, models, opts...)
 }
