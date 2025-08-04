@@ -55,7 +55,7 @@ func NewDynamicMembership(config MembershipConfig, client connection.Client, log
 }
 
 func (d *DynamicMembership) Initialize(ctx context.Context) error {
-	d.logger.Info("Initializing dynamic membership")
+	d.logger.Debug("Initializing dynamic membership")
 
 	membershipCollection := d.config.Config["membershipCollection"]
 	if membershipCollection == "" {
@@ -78,7 +78,7 @@ func (d *DynamicMembership) Initialize(ctx context.Context) error {
 		return fmt.Errorf("failed to register member: %w", err)
 	}
 
-	d.logger.Info("Dynamic membership initialized successfully",
+	d.logger.Debug("Dynamic membership initialized successfully",
 		zap.String("memberId", d.memberInfo.ID),
 		zap.String("membershipCollection", membershipCollection))
 
@@ -121,6 +121,8 @@ func (d *DynamicMembership) Start(ctx context.Context) error {
 	d.isRunning = true
 	d.mu.Unlock()
 
+	d.logger.Debug("Starting Dynamic membership")
+
 	if err := d.updateMembershipInfo(ctx); err != nil {
 		d.logger.Error("Failed to load initial membership info", zap.Error(err))
 		return err
@@ -131,7 +133,7 @@ func (d *DynamicMembership) Start(ctx context.Context) error {
 	d.wg.Add(1)
 	go d.heartbeatLoop(ctx)
 
-	d.logger.Info("Dynamic membership started (change stream monitoring moved to stream level)")
+	d.logger.Debug("Dynamic membership started")
 	return nil
 }
 

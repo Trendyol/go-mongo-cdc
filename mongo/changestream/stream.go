@@ -4,6 +4,7 @@ import (
 	"context"
 	"errors"
 	"fmt"
+	"strings"
 	"sync"
 	"time"
 
@@ -169,7 +170,7 @@ func (s *stream) Open(ctx context.Context) error {
 
 		s.startMembershipMonitoring(ctx)
 
-		s.logger.Info("membership initialized",
+		s.logger.Info("Membership initialized",
 			zap.Int("partition_index", s.partitionIndex),
 			zap.Int("total_partitions", s.totalPartitions),
 			zap.String("actual_member_id", actualMemberID),
@@ -239,9 +240,13 @@ func (s *stream) Open(ctx context.Context) error {
 		default:
 			if !changeStream.Next(s.streamContext) {
 				if err := changeStream.Err(); err != nil {
-					s.logger.Error("Change stream error", zap.Error(err))
+					if !(errors.Is(err, context.Canceled) || strings.Contains(err.Error(), "context canceled")) {
+						s.logger.Error("Change stream error", zap.Error(err))
+					}
+
 					return err
 				}
+
 				s.logger.Info("Change stream ended")
 				return nil
 			}
@@ -309,7 +314,7 @@ func (s *stream) startMembershipMonitoring(ctx context.Context) {
 				}
 
 				s.membershipChangeStream = changeStream
-				retryCount = 0 // Reset retry counter on successful connection
+				retryCount = 0
 
 				for changeStream.Next(s.membershipContext) {
 					var changeDoc bson.M
@@ -343,11 +348,13 @@ func (s *stream) startMembershipMonitoring(ctx context.Context) {
 					}
 				}
 
-				if err := changeStream.Err(); err != nil {
-					s.logger.Error("Membership change stream error", zap.Error(err))
+				changeStream.Close(s.membershipContext)
+
+				if s.membershipContext.Err() != nil {
+					s.logger.Debug("Membership change stream closed due to shutdown")
+					return
 				}
 
-				changeStream.Close(s.membershipContext)
 				s.logger.Debug("Membership change stream closed, will retry")
 
 				retryCount++
@@ -420,7 +427,7 @@ func (s *stream) checkReplicaSetStatus(ctx context.Context) error {
 	}
 
 	if msg, ok := isMaster["msg"]; ok && msg == "isdbgrid" {
-		s.logger.Info("Connected to MongoDB sharded cluster")
+		s.logger.Debug("Connected to MongoDB sharded cluster")
 		return nil
 	}
 
@@ -576,7 +583,7 @@ func (s *stream) createSimplePartitionPipeline(basePipeline []bson.D) []bson.D {
 		return s.createChunkBasedPartitionPipeline(basePipeline, shardKey, chunkRanges)
 	}
 
-	s.logger.Info("using hash-based partitioning")
+	s.logger.Info("Using hash-based partitioning")
 	return s.createHashBasedPartitionPipeline(basePipeline)
 }
 
