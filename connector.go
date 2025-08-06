@@ -11,10 +11,8 @@ import (
 	"time"
 
 	"github.com/Trendyol/go-mongo-cdc/config"
-	"github.com/Trendyol/go-mongo-cdc/internal/http"
 	"github.com/Trendyol/go-mongo-cdc/internal/metric"
 	"github.com/Trendyol/go-mongo-cdc/logger"
-	"github.com/Trendyol/go-mongo-cdc/membership"
 	"github.com/Trendyol/go-mongo-cdc/mongo/changestream"
 	"github.com/Trendyol/go-mongo-cdc/mongo/connection"
 	"github.com/go-playground/errors"
@@ -29,7 +27,6 @@ type Connector interface {
 type connector struct {
 	stream             changestream.Streamer
 	prometheusRegistry metric.Registry
-	server             http.Server
 	cfg                *config.Config
 	mongoClient        connection.Client
 	logger             *zap.Logger
@@ -83,26 +80,16 @@ func NewConnector(ctx context.Context, cfg config.Config, listenerFunc changestr
 
 	prometheusRegistry := metric.NewRegistry(m)
 
-	var membershipInstance membership.Membership
-	if streamWithMembership, ok := stream.(interface{ GetMembership() membership.Membership }); ok {
-		membershipInstance = streamWithMembership.GetMembership()
-	}
-
 	return &connector{
 		mongoClient:        mongoClient,
 		stream:             stream,
 		prometheusRegistry: prometheusRegistry,
-		server:             http.NewServer(cfg, prometheusRegistry, zapLogger, mongoClient, membershipInstance),
 		logger:             zapLogger,
 		cancelCh:           make(chan os.Signal, 1),
 	}, nil
 }
 
 func (c *connector) Start(ctx context.Context) {
-	c.once.Do(func() {
-		go c.server.Listen()
-	})
-
 	go func() {
 		for {
 			err := c.stream.Open(ctx)
@@ -176,8 +163,6 @@ func (c *connector) Close() {
 	if err := c.mongoClient.Close(closeCtx); err != nil {
 		c.logger.Error("Failed to close mongo client", zap.Error(err))
 	}
-
-	c.server.Shutdown()
 
 	c.logger.Info("Closed connections")
 }
