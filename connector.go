@@ -103,8 +103,6 @@ func (c *connector) Start(ctx context.Context) {
 		go c.server.Listen()
 	})
 
-	c.logger.Info("Starting MongoDB Change Stream watcher...")
-
 	go func() {
 		for {
 			err := c.stream.Open(ctx)
@@ -114,13 +112,22 @@ func (c *connector) Start(ctx context.Context) {
 			}
 
 			if goerrors.Is(err, changestream.ErrorStreamInUse) {
-				c.logger.Info("Stream capture failed, retrying...")
+				c.logger.Info("Stream capture failed, retrying")
 				time.Sleep(5 * time.Second)
 				continue
 			}
 
 			if goerrors.Is(err, context.Canceled) {
-				c.logger.Info("Stream restarting due to rebalance...")
+				c.mu.Lock()
+				isClosed := c.closed
+				c.mu.Unlock()
+
+				if isClosed || ctx.Err() != nil {
+					c.logger.Info("Stream stopped due to shutdown")
+					return
+				}
+
+				c.logger.Info("Stream restarting due to membership change")
 				time.Sleep(1 * time.Second)
 				continue
 			}
@@ -134,8 +141,6 @@ func (c *connector) Start(ctx context.Context) {
 			time.Sleep(5 * time.Second)
 		}
 	}()
-
-	c.logger.Info("MongoDB Change Stream started successfully")
 
 	signal.Notify(c.cancelCh, syscall.SIGTERM, syscall.SIGINT, syscall.SIGABRT, syscall.SIGQUIT)
 
@@ -163,12 +168,11 @@ func (c *connector) Close() {
 	closeCtx, cancel := context.WithTimeout(context.Background(), 10*time.Second)
 	defer cancel()
 
-	c.logger.Info("Closing stream...")
 	if err := c.stream.Close(closeCtx); err != nil {
 		c.logger.Error("Failed to close stream", zap.Error(err))
 	}
 
-	c.logger.Info("Closing mongo client...")
+	c.logger.Info("Closing mongo client")
 	if err := c.mongoClient.Close(closeCtx); err != nil {
 		c.logger.Error("Failed to close mongo client", zap.Error(err))
 	}
