@@ -10,7 +10,6 @@ import (
 
 	cdc "github.com/Trendyol/go-mongo-cdc"
 	"github.com/Trendyol/go-mongo-cdc/config"
-	"github.com/Trendyol/go-mongo-cdc/internal/http"
 	"github.com/Trendyol/go-mongo-cdc/internal/metric"
 	"github.com/Trendyol/go-mongo-cdc/logger"
 	"github.com/Trendyol/go-mongo-cdc/mongo/changestream"
@@ -379,8 +378,6 @@ func (suite *E2ETestSuite) TestBasicMembershipIntegration() {
 			SaveInterval: 5 * time.Second,
 		},
 		Membership: config.MembershipConfig{
-			Enabled:            true,
-			Type:               "dynamic",
 			HeartbeatInterval:  2 * time.Second,
 			HealthCheckTimeout: 10 * time.Second,
 			ChunkBased:         false,
@@ -459,11 +456,7 @@ func (suite *E2ETestSuite) TestChunkBasedMembershipEnabled() {
 			SaveInterval: 5 * time.Second,
 		},
 		Membership: config.MembershipConfig{
-			Enabled:            true,
-			Type:               "static",
 			MemberID:           "chunk-test-member-1",
-			MemberNumber:       1,
-			TotalMembers:       2,
 			HeartbeatInterval:  2 * time.Second,
 			HealthCheckTimeout: 10 * time.Second,
 			ChunkBased:         true,
@@ -747,11 +740,7 @@ func (suite *E2ETestSuite) createMembershipConfig(memberNumber, totalMembers int
 			SaveInterval: 5 * time.Second,
 		},
 		Membership: config.MembershipConfig{
-			Enabled:            true,
-			Type:               "static",
 			MemberID:           fmt.Sprintf("member-%d", memberNumber),
-			MemberNumber:       memberNumber,
-			TotalMembers:       totalMembers,
 			HeartbeatInterval:  2 * time.Second,
 			HealthCheckTimeout: 10 * time.Second,
 			ChunkBased:         chunkBased,
@@ -791,8 +780,6 @@ func (suite *E2ETestSuite) createTestConnectorWithCustomConfig(cfg config.Config
 		zap.String("host", host),
 		zap.Int("port", port),
 		zap.String("member_id", cfg.Membership.MemberID),
-		zap.Int("member_number", cfg.Membership.MemberNumber),
-		zap.Int("total_members", cfg.Membership.TotalMembers),
 		zap.Bool("chunk_based", cfg.Membership.ChunkBased))
 
 	mongoClient, err := connection.NewConnection(suite.ctx, externalURI)
@@ -809,7 +796,6 @@ func (suite *E2ETestSuite) createTestConnectorWithCustomConfig(cfg config.Config
 		mongoClient:        mongoClient,
 		stream:             stream,
 		prometheusRegistry: prometheusRegistry,
-		server:             http.NewServer(cfg, prometheusRegistry, zapLogger, mongoClient, nil),
 		logger:             zapLogger,
 		cancelCh:           make(chan os.Signal, 1),
 		readyCh:            make(chan struct{}, 1),

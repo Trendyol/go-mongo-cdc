@@ -72,17 +72,15 @@ func NewStream(
 	checkpoint := database.Collection(cfg.Checkpoint.Collection)
 
 	var membershipCollection connection.Collection
-	if cfg.Membership.Enabled && cfg.Membership.Type == "dynamic" {
-		membershipDatabaseName := cfg.Membership.Config["database"]
-		membershipCollectionName := cfg.Membership.Config["collection"]
-		if !(membershipDatabaseName != "" && membershipCollectionName != "") {
-			membershipCollectionName = "cdc_membership"
-			membershipDatabaseName = "cdc_cluster"
-		}
-
-		membershipDatabase := client.Database(membershipDatabaseName)
-		membershipCollection = membershipDatabase.Collection(membershipCollectionName)
+	membershipDatabaseName := cfg.Membership.Config["database"]
+	membershipCollectionName := cfg.Membership.Config["collection"]
+	if !(membershipDatabaseName != "" && membershipCollectionName != "") {
+		membershipCollectionName = "cdc_membership"
+		membershipDatabaseName = "cdc_cluster"
 	}
+
+	membershipDatabase := client.Database(membershipDatabaseName)
+	membershipCollection = membershipDatabase.Collection(membershipCollectionName)
 
 	s := &stream{
 		client:               client,
@@ -99,31 +97,15 @@ func NewStream(
 		totalPartitions:      1,
 	}
 
-	logger.Info("Checking membership configuration",
-		zap.Bool("enabled", cfg.Membership.Enabled),
-		zap.String("type", cfg.Membership.Type),
-		zap.Int("member_number", cfg.Membership.MemberNumber),
-		zap.Int("total_members", cfg.Membership.TotalMembers))
-
-	if cfg.Membership.Enabled {
-		membershipConfig := membership.MembershipConfig{
-			Type:               membership.MembershipType(cfg.Membership.Type),
-			MemberID:           cfg.Membership.MemberID,
-			MemberNumber:       cfg.Membership.MemberNumber,
-			TotalMembers:       cfg.Membership.TotalMembers,
-			HeartbeatInterval:  cfg.Membership.HeartbeatInterval,
-			HealthCheckTimeout: cfg.Membership.HealthCheckTimeout,
-			Config:             cfg.Membership.Config,
-		}
-
-		membershipInstance, err := membership.NewMembership(membershipConfig, client, logger)
-		if err != nil {
-			logger.Error("Failed to create membership instance", zap.Error(err))
-			return s
-		}
-
-		s.membership = membershipInstance
+	membershipConfig := membership.MembershipConfig{
+		HeartbeatInterval:  cfg.Membership.HeartbeatInterval,
+		HealthCheckTimeout: cfg.Membership.HealthCheckTimeout,
+		Config:             cfg.Membership.Config,
 	}
+
+	membershipInstance := membership.NewMembership(membershipConfig, client, logger)
+
+	s.membership = membershipInstance
 
 	return s
 }
@@ -246,7 +228,6 @@ func (s *stream) Open(ctx context.Context) error {
 
 					return err
 				}
-
 				s.logger.Info("Change stream ended")
 				return nil
 			}
@@ -327,11 +308,9 @@ func (s *stream) startMembershipMonitoring(ctx context.Context) {
 					s.logger.Debug("Membership change detected",
 						zap.String("operation", operationType))
 
-					if dynamicMembership, ok := s.membership.(*membership.DynamicMembership); ok {
-						if err := dynamicMembership.UpdateMembershipInfoFromDatabase(s.membershipContext); err != nil {
-							s.logger.Error("Failed to update membership info from database", zap.Error(err))
-							continue
-						}
+					if err := s.membership.UpdateMembershipInfo(s.membershipContext); err != nil {
+						s.logger.Error("Failed to update membership info from database", zap.Error(err))
+						continue
 					}
 
 					partitionChanged, err := s.updatePartitionInfo()

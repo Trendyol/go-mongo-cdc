@@ -7,7 +7,6 @@ import (
 	"log/slog"
 	"os"
 	"path/filepath"
-	"strconv"
 	"time"
 
 	"go.uber.org/zap"
@@ -45,11 +44,7 @@ type CheckpointConfig struct {
 }
 
 type MembershipConfig struct {
-	Enabled            bool              `json:"enabled" yaml:"enabled"`
-	Type               string            `json:"type" yaml:"type"`
 	MemberID           string            `json:"memberId" yaml:"memberId"`
-	MemberNumber       int               `json:"memberNumber" yaml:"memberNumber"`
-	TotalMembers       int               `json:"totalMembers" yaml:"totalMembers"`
 	HeartbeatInterval  time.Duration     `json:"heartbeatInterval" yaml:"heartbeatInterval"`
 	HealthCheckTimeout time.Duration     `json:"healthCheckTimeout" yaml:"healthCheckTimeout"`
 	Config             map[string]string `json:"config" yaml:"config"`
@@ -79,9 +74,6 @@ func (c *Config) SetDefault() {
 		c.Checkpoint.ResumeTokenRefreshInterval = 60 * time.Second
 	}
 
-	if c.Membership.Type == "" {
-		c.Membership.Type = "dynamic"
-	}
 	if c.Membership.HeartbeatInterval == 0 {
 		c.Membership.HeartbeatInterval = 10 * time.Second
 	}
@@ -92,25 +84,6 @@ func (c *Config) SetDefault() {
 		c.Membership.Config = make(map[string]string)
 	}
 
-	c.applyEnvironmentOverrides()
-}
-
-func (c *Config) applyEnvironmentOverrides() {
-	if memberNumberStr := os.Getenv("GO_MONGO_CDC__MEMBERSHIP_MEMBERNUMBER"); memberNumberStr != "" {
-		if memberNumber, err := strconv.Atoi(memberNumberStr); err == nil {
-			c.Membership.MemberNumber = memberNumber
-		}
-	}
-
-	if totalMembersStr := os.Getenv("GO_MONGO_CDC__MEMBERSHIP_TOTALMEMBERS"); totalMembersStr != "" {
-		if totalMembers, err := strconv.Atoi(totalMembersStr); err == nil {
-			c.Membership.TotalMembers = totalMembers
-		}
-	}
-
-	if membershipType := os.Getenv("GO_MONGO_CDC__MEMBERSHIP_TYPE"); membershipType != "" {
-		c.Membership.Type = membershipType
-	}
 }
 
 func (c *Config) Validate() error {
@@ -123,9 +96,7 @@ func (c *Config) Validate() error {
 	if c.Collection == "" {
 		return fmt.Errorf("collection is required")
 	}
-	if c.Membership.Enabled && c.Membership.Type == "" {
-		return fmt.Errorf("membership type is required when membership is enabled")
-	}
+
 	return nil
 }
 
