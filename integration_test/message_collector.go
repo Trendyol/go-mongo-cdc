@@ -11,7 +11,7 @@ type messageCollector struct {
 }
 
 type MessageCollector interface {
-	CollectMessage(lc *changestream.ListenerContext)
+	CollectMessage(lc *changestream.ListenerContext) error
 	GetMessages() []message.Message
 	GetErrors() []error
 	Clear()
@@ -26,11 +26,13 @@ func NewMessageCollector() MessageCollector {
 	}
 }
 
-func (mc *messageCollector) CollectMessage(lc *changestream.ListenerContext) {
+func (mc *messageCollector) CollectMessage(lc *changestream.ListenerContext) error {
 	mc.messages = append(mc.messages, lc.Message)
 	if err := lc.Ack(); err != nil {
 		mc.errors = append(mc.errors, err)
 	}
+
+	return nil
 }
 
 func (mc *messageCollector) GetMessages() []message.Message {

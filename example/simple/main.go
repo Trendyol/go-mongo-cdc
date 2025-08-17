@@ -2,9 +2,10 @@ package main
 
 import (
 	"context"
-	"go.uber.org/zap/zapcore"
 	"log"
 	"time"
+
+	"go.uber.org/zap/zapcore"
 
 	cdc "github.com/Trendyol/go-mongo-cdc"
 
@@ -32,13 +33,11 @@ func main() {
 		},
 		Checkpoint: config.CheckpointConfig{
 			Collection:   "checkpoint-SellerContents",
-			SaveInterval: 30 * time.Second,
+			SaveInterval: 10 * time.Second,
 		},
 		Membership: config.MembershipConfig{
 			HeartbeatInterval:  30 * time.Second,
 			HealthCheckTimeout: 60 * time.Second,
-			Enabled:            true,
-			Type:               "dynamic",
 			ChunkBased:         false,
 			Config: map[string]string{
 				"shardKey": "sellerId",
@@ -60,7 +59,7 @@ func main() {
 	connector.Start(ctx)
 }
 
-func listenerFunc(lc *changestream.ListenerContext) {
+func listenerFunc(lc *changestream.ListenerContext) error {
 	logger := zap.NewExample()
 	defer func() {
 		if err := logger.Sync(); err != nil {
@@ -94,5 +93,7 @@ func listenerFunc(lc *changestream.ListenerContext) {
 
 	if err := lc.Ack(); err != nil {
 		logger.Error("Failed to acknowledge message", zap.Error(err))
+		return err
 	}
+	return nil
 }

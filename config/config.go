@@ -38,13 +38,11 @@ type LoggerConfig struct {
 }
 
 type CheckpointConfig struct {
-	Collection                 string        `json:"collection" yaml:"collection"`
-	SaveInterval               time.Duration `json:"saveInterval" yaml:"saveInterval"`
-	ResumeTokenRefreshInterval time.Duration `json:"resumeTokenRefreshInterval" yaml:"resumeTokenRefreshInterval"`
+	Collection   string        `json:"collection" yaml:"collection"`
+	SaveInterval time.Duration `json:"saveInterval" yaml:"saveInterval"`
 }
 
 type MembershipConfig struct {
-	MemberID           string            `json:"memberId" yaml:"memberId"`
 	HeartbeatInterval  time.Duration     `json:"heartbeatInterval" yaml:"heartbeatInterval"`
 	HealthCheckTimeout time.Duration     `json:"healthCheckTimeout" yaml:"healthCheckTimeout"`
 	Config             map[string]string `json:"config" yaml:"config"`
@@ -69,9 +67,6 @@ func (c *Config) SetDefault() {
 	}
 	if c.Checkpoint.SaveInterval == 0 {
 		c.Checkpoint.SaveInterval = 30 * time.Second
-	}
-	if c.Checkpoint.ResumeTokenRefreshInterval == 0 {
-		c.Checkpoint.ResumeTokenRefreshInterval = 60 * time.Second
 	}
 
 	if c.Membership.HeartbeatInterval == 0 {
