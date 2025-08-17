@@ -192,11 +192,7 @@ func (s *stream) Open(ctx context.Context) error {
 	}
 
 	if cp != nil {
-		if cp.PartitionIndex == 0 && cp.TotalPartitions == 0 {
-			if len(cp.ResumeToken) > 0 {
-				resumeToken = cp.ResumeToken
-			}
-		} else if cp.PartitionIndex == s.partitionIndex && cp.TotalPartitions == s.totalPartitions {
+		if cp.PartitionIndex == s.partitionIndex && cp.TotalPartitions == s.totalPartitions {
 			if len(cp.ResumeToken) > 0 {
 				resumeToken = cp.ResumeToken
 			}
@@ -208,7 +204,9 @@ func (s *stream) Open(ctx context.Context) error {
 				zap.Int("current_total_partitions", s.totalPartitions))
 		}
 
-		if (cp.LastClusterTime.T != 0 || cp.LastClusterTime.I != 0) && startAtOperationTime == nil {
+		isTimestampSet := cp.LastClusterTime != primitive.Timestamp{}
+
+		if isTimestampSet && startAtOperationTime == nil {
 			ts := cp.LastClusterTime
 			ts.I++
 			startAtOperationTime = &ts
@@ -608,10 +606,8 @@ func (s *stream) clearBootstrapState(ctx context.Context) error {
 func (s *stream) processAllDocuments(ctx context.Context) error {
 	s.logger.Info("Starting to process all existing documents as insert events")
 
-	// işaretle: bootstrap scan başladı
 	_ = s.setBootstrapState(ctx, true)
 
-	// scan ilerleme id'sini oku
 	cp, _ := s.loadCheckpointInfo(ctx)
 
 	var filter bson.D
@@ -621,7 +617,7 @@ func (s *stream) processAllDocuments(ctx context.Context) error {
 		filter = bson.D{}
 	}
 
-	// kaldığın yerden devam etmek için scanLastId filtrelemesi
+	//TODO: random string veya uuid v4 icin dogru calısmıyor
 	if cp != nil && cp.ScanLastID != nil {
 		filter = append(filter, bson.E{Key: "_id", Value: bson.M{"$gt": cp.ScanLastID}})
 	}
