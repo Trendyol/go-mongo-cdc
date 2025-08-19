@@ -6,6 +6,7 @@ import (
 	"fmt"
 	"strings"
 	"sync"
+	"sync/atomic"
 	"time"
 
 	"github.com/Trendyol/go-mongo-cdc/membership"
@@ -49,6 +50,9 @@ type stream struct {
 	membership      membership.Membership
 	partitionIndex  int
 	totalPartitions int
+
+	// Partition version control for race condition prevention
+	partitionVersion int64
 
 	streamContext context.Context
 	streamCancel  context.CancelFunc
@@ -161,24 +165,41 @@ func (s *stream) Open(ctx context.Context) error {
 			return err
 		}
 
-		activeMembers := s.membership.GetMembershipInfo().Members
-		s.totalPartitions = len(activeMembers)
+		s.logger.Info("Initial delay to allow other members to register...")
+		time.Sleep(time.Second * 2)
 
-		actualMemberID := s.membership.GetMemberInfo().ID
-
-		for i, member := range activeMembers {
-			if member.ID == actualMemberID {
-				s.partitionIndex = i
-				break
-			}
+		if err := s.membership.UpdateMembershipInfo(ctx); err != nil {
+			s.logger.Error("Failed to perform post-delay membership update", zap.Error(err))
+			return err
 		}
+
+		// Wait for membership stability before starting stream
+		stabilityDuration := 2 * time.Second
+		s.logger.Info("Waiting for membership stability before starting stream",
+			zap.Duration("stabilityDuration", stabilityDuration))
+
+		if err := s.membership.WaitForMembershipStability(ctx, stabilityDuration); err != nil {
+			s.logger.Error("Failed to wait for membership stability", zap.Error(err))
+			return err
+		}
+
+		// Get stable partition info with version control
+		partitionIndex, totalPartitions, version := s.membership.GetPartitionInfo()
+
+		// Initialize partition state atomically
+		s.partitionMutex.Lock()
+		s.partitionIndex = partitionIndex
+		s.totalPartitions = totalPartitions
+		atomic.StoreInt64(&s.partitionVersion, version)
+		s.partitionMutex.Unlock()
 
 		s.startMembershipMonitoring(ctx)
 
-		s.logger.Info("Membership initialized",
-			zap.Int("partition_index", s.partitionIndex),
-			zap.Int("total_partitions", s.totalPartitions),
-			zap.String("actual_member_id", actualMemberID),
+		s.logger.Info("membership initialized with stability control",
+			zap.Int("partition_index", partitionIndex),
+			zap.Int("total_partitions", totalPartitions),
+			zap.Int64("partition_version", version),
+			zap.String("actual_member_id", s.membership.GetMemberInfo().ID),
 		)
 	}
 
@@ -472,36 +493,51 @@ func (s *stream) updatePartitionInfo() (bool, error) {
 		return false, nil
 	}
 
-	newMembershipInfo := s.membership.GetMembershipInfo()
-	actualMemberID := s.membership.GetMemberInfo().ID
+	// Get partition info with version from membership (race-safe)
+	newPartitionIndex, newTotalPartitions, membershipVersion := s.membership.GetPartitionInfo()
+
+	// Check if partition assignment is invalid
+	if newPartitionIndex < 0 || newTotalPartitions <= 0 {
+		s.logger.Error("Invalid partition assignment received",
+			zap.Int("partitionIndex", newPartitionIndex),
+			zap.Int("totalPartitions", newTotalPartitions),
+			zap.Int64("membershipVersion", membershipVersion))
+		return false, fmt.Errorf("invalid partition assignment: index=%d, total=%d",
+			newPartitionIndex, newTotalPartitions)
+	}
 
 	s.partitionMutex.Lock()
 	defer s.partitionMutex.Unlock()
 
 	oldIndex := s.partitionIndex
 	oldTotal := s.totalPartitions
+	oldVersion := atomic.LoadInt64(&s.partitionVersion)
 
-	s.totalPartitions = len(newMembershipInfo.Members)
+	// Update partition info atomically
+	s.partitionIndex = newPartitionIndex
+	s.totalPartitions = newTotalPartitions
+	atomic.StoreInt64(&s.partitionVersion, membershipVersion)
 
-	for i, member := range newMembershipInfo.Members {
-		if member.ID == actualMemberID {
-			s.partitionIndex = i
-			break
-		}
-	}
+	// Check if partition assignment changed
+	hasChanged := oldIndex != newPartitionIndex ||
+		oldTotal != newTotalPartitions ||
+		oldVersion != membershipVersion
 
-	if oldIndex != s.partitionIndex || oldTotal != s.totalPartitions {
+	if hasChanged {
 		s.logger.Info("partition info updated",
 			zap.Int("old_index", oldIndex),
-			zap.Int("new_index", s.partitionIndex),
+			zap.Int("new_index", newPartitionIndex),
 			zap.Int("old_total", oldTotal),
-			zap.Int("new_total", s.totalPartitions))
+			zap.Int("new_total", newTotalPartitions),
+			zap.Int64("old_version", oldVersion),
+			zap.Int64("new_version", membershipVersion))
 		return true, nil
 	}
 
 	s.logger.Debug("partition info checked, no changes needed",
-		zap.Int("partition_index", s.partitionIndex),
-		zap.Int("total_partitions", s.totalPartitions))
+		zap.Int("partition_index", newPartitionIndex),
+		zap.Int("total_partitions", newTotalPartitions),
+		zap.Int64("version", membershipVersion))
 
 	return false, nil
 }
@@ -690,7 +726,7 @@ func (s *stream) createPipeline() []bson.D {
 	basePipeline := s.createBasePipeline()
 
 	if s.membership != nil && s.totalPartitions > 1 {
-		return s.createSimplePartitionPipeline(basePipeline)
+		return s.createVersionAwarePartitionPipeline(basePipeline)
 	}
 
 	return basePipeline
@@ -708,8 +744,45 @@ func (s *stream) createBasePipeline() []bson.D {
 	}
 }
 
-func (s *stream) createSimplePartitionPipeline(basePipeline []bson.D) []bson.D {
-	if s.membership == nil || s.totalPartitions <= 1 {
+func (s *stream) createVersionAwarePartitionPipeline(basePipeline []bson.D) []bson.D {
+	// Capture current partition state atomically
+	s.partitionMutex.RLock()
+	currentIndex := s.partitionIndex
+	currentTotal := s.totalPartitions
+	currentVersion := atomic.LoadInt64(&s.partitionVersion)
+	s.partitionMutex.RUnlock()
+
+	// Validate partition assignment before creating pipeline
+	if !s.membership.IsPartitionValid(currentVersion, currentIndex, currentTotal) {
+		s.logger.Warn("Partition assignment became invalid during pipeline creation",
+			zap.Int("currentIndex", currentIndex),
+			zap.Int("currentTotal", currentTotal),
+			zap.Int64("currentVersion", currentVersion))
+
+		// Retry with fresh partition info
+		newIndex, newTotal, newVersion := s.membership.GetPartitionInfo()
+
+		s.partitionMutex.Lock()
+		s.partitionIndex = newIndex
+		s.totalPartitions = newTotal
+		atomic.StoreInt64(&s.partitionVersion, newVersion)
+		s.partitionMutex.Unlock()
+
+		currentIndex = newIndex
+		currentTotal = newTotal
+		currentVersion = newVersion
+
+		s.logger.Info("Updated partition info during pipeline creation",
+			zap.Int("newIndex", newIndex),
+			zap.Int("newTotal", newTotal),
+			zap.Int64("newVersion", newVersion))
+	}
+
+	return s.createSimplePartitionPipelineWithState(basePipeline, currentIndex, currentTotal)
+}
+
+func (s *stream) createSimplePartitionPipelineWithState(basePipeline []bson.D, partitionIndex, totalPartitions int) []bson.D {
+	if s.membership == nil || totalPartitions <= 1 {
 		return basePipeline
 	}
 
@@ -717,34 +790,37 @@ func (s *stream) createSimplePartitionPipeline(basePipeline []bson.D) []bson.D {
 		shardKey := s.cfg.Membership.Config["shardKey"]
 		if shardKey == "" {
 			s.logger.Warn("shard key not configured for chunk-based partitioning")
-			return s.createHashBasedPartitionPipeline(basePipeline)
+			return s.createHashBasedPartitionPipelineWithState(basePipeline, partitionIndex, totalPartitions)
 		}
 
-		chunkRanges := s.getChunkRanges()
+		chunkRanges := s.getChunkRangesForPartition(partitionIndex, totalPartitions)
 		if len(chunkRanges) == 0 {
 			s.logger.Warn("no chunk ranges found for this partition, falling back to hash-based partitioning")
-			return s.createHashBasedPartitionPipeline(basePipeline)
+			return s.createHashBasedPartitionPipelineWithState(basePipeline, partitionIndex, totalPartitions)
 		}
 
 		return s.createChunkBasedPartitionPipeline(basePipeline, shardKey, chunkRanges)
 	}
 
-	s.logger.Info("Using hash-based partitioning")
-	return s.createHashBasedPartitionPipeline(basePipeline)
+	s.logger.Info("using hash-based partitioning",
+		zap.Int("partitionIndex", partitionIndex),
+		zap.Int("totalPartitions", totalPartitions))
+	return s.createHashBasedPartitionPipelineWithState(basePipeline, partitionIndex, totalPartitions)
 }
 
-func (s *stream) createHashBasedPartitionPipeline(basePipeline []bson.D) []bson.D {
-	// Hash-based partitioning based on Document ID
-	// Calculates the length of the ObjectID string and takes the last 2 characters
+// createHashBasedPartitionPipelineWithState creates hash-based pipeline with explicit state
+func (s *stream) createHashBasedPartitionPipelineWithState(basePipeline []bson.D, partitionIndex, totalPartitions int) []bson.D {
+	// Document ID'sine göre hash-based partitioning
+	// ObjectID string'inin uzunluğunu hesaplayıp son 2 karakteri alıyoruz
 	hashBasedFilter := bson.D{
 		{Key: "$match", Value: bson.D{
 			{Key: "$expr", Value: bson.D{
 				{Key: "$eq", Value: bson.A{
 					bson.D{{Key: "$mod", Value: bson.A{
 						s.createHexToIntExpression("$documentKey._id"),
-						s.totalPartitions,
+						totalPartitions,
 					}}},
-					s.partitionIndex,
+					partitionIndex,
 				}},
 			}},
 		}},
@@ -902,6 +978,27 @@ func (s *stream) createChunkBasedPartitionPipeline(basePipeline []bson.D, shardK
 //nolint:funlen
 func (s *stream) processEvent(ctx context.Context, event message.ChangeEvent, resumeTokenAtEvent []byte) error {
 	startTime := time.Now()
+
+	// Check partition validity before processing event
+	if s.membership != nil {
+		s.partitionMutex.RLock()
+		currentIndex := s.partitionIndex
+		currentTotal := s.totalPartitions
+		currentVersion := atomic.LoadInt64(&s.partitionVersion)
+		s.partitionMutex.RUnlock()
+
+		// Validate current partition assignment
+		if !s.membership.IsPartitionValid(currentVersion, currentIndex, currentTotal) {
+			s.logger.Warn("Partition assignment became invalid during event processing",
+				zap.Int("currentIndex", currentIndex),
+				zap.Int("currentTotal", currentTotal),
+				zap.Int64("currentVersion", currentVersion),
+				zap.String("eventType", event.OperationType))
+
+			// This will trigger stream restart via membership change detection
+			panic("partition assignment invalid during event processing")
+		}
+	}
 
 	msg, err := message.NewMessage(event)
 	if err != nil {
@@ -1071,6 +1168,15 @@ func (s *stream) createChunkBasedDocumentFilter(shardKey string, chunkRanges []C
 }
 
 func (s *stream) getChunkRanges() []ChunkRange {
+	s.partitionMutex.RLock()
+	currentIndex := s.partitionIndex
+	currentTotal := s.totalPartitions
+	s.partitionMutex.RUnlock()
+
+	return s.getChunkRangesForPartition(currentIndex, currentTotal)
+}
+
+func (s *stream) getChunkRangesForPartition(partitionIndex, totalPartitions int) []ChunkRange {
 	chunks, err := s.getAllChunks()
 	if err != nil {
 		s.logger.Error("failed to get chunks", zap.Error(err))
@@ -1079,11 +1185,12 @@ func (s *stream) getChunkRanges() []ChunkRange {
 
 	var assignedChunks []ChunkRange
 	for i, chunk := range chunks {
-		if i%s.totalPartitions == s.partitionIndex {
+		if i%totalPartitions == partitionIndex {
 			assignedChunks = append(assignedChunks, chunk)
 		}
 	}
 
+	// Final summary with chunk ranges
 	var rangeSummary []string
 	for _, chunk := range assignedChunks {
 		if minDoc, ok := chunk.Min.(bson.M); ok {
@@ -1093,6 +1200,12 @@ func (s *stream) getChunkRanges() []ChunkRange {
 			}
 		}
 	}
+
+	s.logger.Debug("Chunk ranges assigned for partition",
+		zap.Int("partitionIndex", partitionIndex),
+		zap.Int("totalPartitions", totalPartitions),
+		zap.Int("assignedChunks", len(assignedChunks)),
+		zap.Strings("rangeSummary", rangeSummary))
 
 	return assignedChunks
 }
