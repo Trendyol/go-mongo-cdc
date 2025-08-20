@@ -2,24 +2,34 @@ package main
 
 import (
 	"context"
-	"go.uber.org/zap/zapcore"
 	"log"
+	"strings"
 	"time"
 
 	cdc "github.com/Trendyol/go-mongo-cdc"
-
 	"github.com/Trendyol/go-mongo-cdc/config"
 	"github.com/Trendyol/go-mongo-cdc/mongo/changestream"
 	"github.com/Trendyol/go-mongo-cdc/mongo/message"
 	"go.uber.org/zap"
+	"go.uber.org/zap/zapcore"
 )
 
+type CDCListener struct {
+	logger *zap.Logger
+}
+
 func main() {
-	// Debug level logger
 	loggerConfig := zap.NewDevelopmentConfig()
-	loggerConfig.Level = zap.NewAtomicLevelAt(zapcore.DebugLevel)
+	loggerConfig.Level = zap.NewAtomicLevelAt(zapcore.InfoLevel)
 	logger, _ := loggerConfig.Build()
-	defer logger.Sync()
+
+	defer func() {
+		if err := logger.Sync(); err != nil {
+			if !strings.Contains(err.Error(), "inappropriate ioctl for device") && !strings.Contains(err.Error(), "bad file descriptor") {
+				log.Printf("Failed to sync logger: %v", err)
+			}
+		}
+	}()
 
 	cfg := config.Config{
 		Host:       "localhost",
@@ -32,13 +42,11 @@ func main() {
 		},
 		Checkpoint: config.CheckpointConfig{
 			Collection:   "checkpoint-SellerContents",
-			SaveInterval: 30 * time.Second,
+			SaveInterval: 60 * time.Second,
 		},
 		Membership: config.MembershipConfig{
 			HeartbeatInterval:  30 * time.Second,
 			HealthCheckTimeout: 60 * time.Second,
-			Enabled:            true,
-			Type:               "dynamic",
 			ChunkBased:         false,
 			Config: map[string]string{
 				"shardKey": "sellerId",
@@ -49,7 +57,11 @@ func main() {
 		},
 	}
 
-	connector, err := cdc.NewConnector(context.Background(), cfg, listenerFunc)
+	myListener := &CDCListener{
+		logger: logger,
+	}
+
+	connector, err := cdc.NewConnector(context.Background(), cfg, myListener.ProcessChangeEvent)
 	if err != nil {
 		log.Fatal("failed to create connector:", err)
 	}
@@ -60,15 +72,8 @@ func main() {
 	connector.Start(ctx)
 }
 
-func listenerFunc(lc *changestream.ListenerContext) {
-	logger := zap.NewExample()
-	defer func() {
-		if err := logger.Sync(); err != nil {
-			log.Printf("Failed to sync logger: %v", err)
-		}
-	}()
-
-	logger.Info("Change event received",
+func (l *CDCListener) ProcessChangeEvent(lc *changestream.ListenerContext) error {
+	l.logger.Info("Change event received",
 		zap.String("operation", string(lc.Message.OperationType)),
 		zap.String("database", lc.Message.Database),
 		zap.String("collection", lc.Message.Collection),
@@ -79,20 +84,20 @@ func listenerFunc(lc *changestream.ListenerContext) {
 	switch lc.Message.OperationType {
 	case message.OperationInsert, message.OperationUpdate, message.OperationReplace:
 		if lc.Message.FullDocument != nil {
-			logger.Info("Document changed",
+			l.logger.Info("Document changed",
 				zap.String("operation", string(lc.Message.OperationType)),
 				zap.Any("document", lc.Message.FullDocument),
 			)
-
-			logger.Info("Would convert to Elastic DTO here")
 		}
 	case message.OperationDelete:
-		logger.Info("Document deleted",
+		l.logger.Info("Document deleted",
 			zap.Any("documentId", lc.Message.DocumentID),
 		)
 	}
 
 	if err := lc.Ack(); err != nil {
-		logger.Error("Failed to acknowledge message", zap.Error(err))
+		l.logger.Error("Failed to acknowledge message", zap.Error(err))
+		return err
 	}
+	return nil
 }

@@ -5,6 +5,7 @@ import (
 	"fmt"
 	"sort"
 	"sync"
+	"sync/atomic"
 	"time"
 
 	"github.com/Trendyol/go-mongo-cdc/mongo/connection"
@@ -18,9 +19,13 @@ type Membership interface {
 	Initialize(ctx context.Context) error
 	Start(ctx context.Context) error
 	Stop(ctx context.Context) error
-	GetMembershipInfo() MembershipInfo
 	GetMemberInfo() MemberInfo
 	UpdateMembershipInfo(ctx context.Context) error
+
+	// Partition assignment race prevention
+	GetPartitionInfo() (partitionIndex int, totalPartitions int, version int64)
+	IsPartitionValid(expectedVersion int64, expectedIndex int, expectedTotal int) bool
+	WaitForMembershipStability(ctx context.Context, stabilityDuration time.Duration) error
 }
 
 type MembershipInfo struct {
@@ -56,6 +61,9 @@ type membership struct {
 	membershipInfo MembershipInfo
 	memberInfo     MemberInfo
 	isRunning      bool
+
+	// Version control for race condition prevention
+	membershipVersion int64
 
 	heartbeatTicker *time.Ticker
 	stopChan        chan struct{}
@@ -159,36 +167,14 @@ func (d *membership) Start(ctx context.Context) error {
 }
 
 func (d *membership) updateMembershipInfo(ctx context.Context) error {
+	selfID := d.getSelfID()
+
 	members, err := d.getActiveMembers(ctx)
 	if err != nil {
 		return err
 	}
 
-	if len(members) == 0 {
-		d.logger.Fatal("No active members found in cluster, including self. This indicates a critical membership issue.",
-			zap.String("memberID", d.memberInfo.ID),
-			zap.Time("lastSeen", d.memberInfo.LastSeen),
-			zap.Duration("healthCheckTimeout", d.config.HealthCheckTimeout))
-
-		panic("No active members found in membership cluster")
-	}
-
-	selfFound := false
-	for _, member := range members {
-		if member.ID == d.memberInfo.ID {
-			selfFound = true
-			break
-		}
-	}
-
-	if !selfFound {
-		d.logger.Fatal("Self not found in active members list",
-			zap.String("selfID", d.memberInfo.ID),
-			zap.Int("activeMembersCount", len(members)),
-			zap.Any("activeMembers", members))
-
-		panic("Self not found in membership cluster")
-	}
+	d.validateMembershipState(members, selfID)
 
 	return d.updateMembershipInfoInternal(members)
 }
@@ -233,12 +219,47 @@ func (d *membership) getActiveMembers(ctx context.Context) ([]MemberInfo, error)
 	return members, nil
 }
 
+func (d *membership) validateMembershipState(members []MemberInfo, selfID string) {
+	if len(members) == 0 {
+		d.logger.Fatal("No active members found in cluster, including self. This indicates a critical membership issue.",
+			zap.String("memberID", selfID),
+			zap.Time("lastSeen", d.memberInfo.LastSeen),
+			zap.Duration("healthCheckTimeout", d.config.HealthCheckTimeout))
+	}
+
+	selfFound := false
+	for _, member := range members {
+		if member.ID == selfID {
+			selfFound = true
+			break
+		}
+	}
+
+	if !selfFound {
+		d.logger.Fatal("Self not found in active members list",
+			zap.String("selfID", selfID),
+			zap.Int("activeMembersCount", len(members)),
+			zap.Any("activeMembers", members))
+	}
+}
+
 func (d *membership) updateMembershipInfoInternal(members []MemberInfo) error {
 	sort.Slice(members, func(i, j int) bool {
 		return members[i].ID < members[j].ID
 	})
 
+	var selfMember *MemberInfo
+	selfID := d.getSelfID()
+	for i := range members {
+		if members[i].ID == selfID {
+			selfMember = &members[i]
+			break
+		}
+	}
+
 	d.mu.Lock()
+
+	newVersion := atomic.AddInt64(&d.membershipVersion, 1)
 
 	d.membershipInfo = MembershipInfo{
 		TotalMembers: len(members),
@@ -246,14 +267,17 @@ func (d *membership) updateMembershipInfoInternal(members []MemberInfo) error {
 		LastUpdated:  time.Now(),
 	}
 
-	for _, member := range members {
-		if member.ID == d.memberInfo.ID {
-			d.memberInfo = member
-			break
-		}
+	if selfMember != nil {
+		d.memberInfo = *selfMember
 	}
 
 	d.mu.Unlock()
+
+	d.logger.Debug("Membership info updated",
+		zap.Int64("version", newVersion),
+		zap.Int("totalMembers", len(members)),
+		zap.String("selfID", selfID),
+		zap.Bool("selfFound", selfMember != nil))
 
 	return nil
 }
@@ -296,7 +320,6 @@ func (d *membership) sendHeartbeat(ctx context.Context) error {
 			d.logger.Fatal("Failed to re-register member after heartbeat failure",
 				zap.String("memberID", d.memberInfo.ID),
 				zap.Error(regErr))
-			panic("Cannot maintain membership presence")
 		}
 
 		d.logger.Info("Successfully re-registered member after heartbeat failure",
@@ -341,14 +364,72 @@ func (d *membership) unregisterMember(ctx context.Context) error {
 	return err
 }
 
-func (d *membership) GetMembershipInfo() MembershipInfo {
-	d.mu.RLock()
-	defer d.mu.RUnlock()
-	return d.membershipInfo
-}
-
 func (d *membership) GetMemberInfo() MemberInfo {
 	d.mu.RLock()
 	defer d.mu.RUnlock()
 	return d.memberInfo
+}
+
+func (d *membership) getSelfID() string {
+	d.mu.RLock()
+	defer d.mu.RUnlock()
+	return d.memberInfo.ID
+}
+
+func (d *membership) GetPartitionInfo() (partitionIndex int, totalPartitions int, version int64) {
+	d.mu.RLock()
+	defer d.mu.RUnlock()
+
+	selfID := d.memberInfo.ID
+	totalMembers := len(d.membershipInfo.Members)
+	partitionIdx := -1
+
+	for i, member := range d.membershipInfo.Members {
+		if member.ID == selfID {
+			partitionIdx = i
+			break
+		}
+	}
+
+	return partitionIdx, totalMembers, atomic.LoadInt64(&d.membershipVersion)
+}
+
+func (d *membership) IsPartitionValid(expectedVersion int64, expectedIndex int, expectedTotal int) bool {
+	currentIndex, currentTotal, currentVersion := d.GetPartitionInfo()
+
+	return currentVersion == expectedVersion &&
+		currentIndex == expectedIndex &&
+		currentTotal == expectedTotal
+}
+
+func (d *membership) WaitForMembershipStability(ctx context.Context, stabilityDuration time.Duration) error {
+	ticker := time.NewTicker(100 * time.Millisecond)
+	defer ticker.Stop()
+
+	var lastVersion int64 = -1
+	var stableStart time.Time
+
+	for {
+		select {
+		case <-ctx.Done():
+			return ctx.Err()
+		case <-ticker.C:
+			currentVersion := atomic.LoadInt64(&d.membershipVersion)
+
+			if lastVersion != currentVersion {
+				lastVersion = currentVersion
+				stableStart = time.Now()
+				d.logger.Debug("Membership version changed, resetting stability timer",
+					zap.Int64("version", currentVersion))
+				continue
+			}
+
+			if time.Since(stableStart) >= stabilityDuration {
+				d.logger.Debug("Membership stable",
+					zap.Int64("version", currentVersion),
+					zap.Duration("stableDuration", time.Since(stableStart)))
+				return nil
+			}
+		}
+	}
 }

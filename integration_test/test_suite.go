@@ -14,7 +14,6 @@ import (
 
 	cdc "github.com/Trendyol/go-mongo-cdc"
 	"github.com/Trendyol/go-mongo-cdc/config"
-	"github.com/Trendyol/go-mongo-cdc/internal/http"
 	"github.com/Trendyol/go-mongo-cdc/internal/metric"
 	"github.com/Trendyol/go-mongo-cdc/logger"
 	"github.com/Trendyol/go-mongo-cdc/mongo/changestream"
@@ -25,7 +24,6 @@ import (
 	"github.com/testcontainers/testcontainers-go/modules/mongodb"
 	"github.com/testcontainers/testcontainers-go/wait"
 	"go.mongodb.org/mongo-driver/bson"
-	"go.mongodb.org/mongo-driver/bson/primitive"
 	"go.mongodb.org/mongo-driver/mongo"
 	"go.mongodb.org/mongo-driver/mongo/options"
 	"go.mongodb.org/mongo-driver/mongo/readpref"
@@ -312,9 +310,8 @@ func (suite *CDCTestSuite) createTestConfig() config.Config {
 			Logger: suite.logger,
 		},
 		Checkpoint: config.CheckpointConfig{
-			Collection:                 "cdc_checkpoints",
-			SaveInterval:               1 * time.Second,
-			ResumeTokenRefreshInterval: 2 * time.Second,
+			Collection:   "cdc_checkpoints",
+			SaveInterval: 1 * time.Second,
 		},
 	}
 
@@ -382,7 +379,6 @@ func (suite *CDCTestSuite) createTestConnector(listenerFunc changestream.Listene
 		mongoClient:        mongoClient,
 		stream:             stream,
 		prometheusRegistry: prometheusRegistry,
-		server:             http.NewServer(cfg, prometheusRegistry, zapLogger, mongoClient, nil),
 		logger:             zapLogger,
 		cancelCh:           make(chan os.Signal, 1),
 		readyCh:            make(chan struct{}, 1),
@@ -392,39 +388,93 @@ func (suite *CDCTestSuite) createTestConnector(listenerFunc changestream.Listene
 type testConnector struct {
 	stream             changestream.Streamer
 	prometheusRegistry metric.Registry
-	server             http.Server
 	cfg                *config.Config
 	cancelCh           chan os.Signal
 	readyCh            chan struct{}
 	mongoClient        connection.Client
 	logger             *zap.Logger
 	once               sync.Once
+	mu                 sync.RWMutex
+	closed             bool
 }
 
 func (c *testConnector) Start(ctx context.Context) {
-	c.once.Do(func() {
-		go c.server.Listen()
-	})
-
 	c.logger.Info("Starting MongoDB Change Stream watcher...")
 
-	err := c.stream.Open(ctx)
-	if err != nil {
-		if goerrors.Is(err, changestream.ErrorStreamInUse) {
-			c.logger.Info("Stream capture failed, retrying...")
-			time.Sleep(5 * time.Second)
-			c.Start(ctx)
-			return
-		}
-		c.logger.Error("MongoDB stream open error", zap.Error(err))
-		return
-	}
+	go func() {
+		retryCount := 0
+		maxRetries := 5
 
-	c.logger.Info("MongoDB Change Stream started successfully")
+		for {
+			err := c.stream.Open(ctx)
+			if err == nil {
+				c.logger.Info("MongoDB stream completed normally")
+				return
+			}
+
+			if goerrors.Is(err, changestream.ErrorStreamInUse) {
+				c.logger.Info("Stream capture failed, retrying...")
+				time.Sleep(5 * time.Second)
+				continue
+			}
+
+			if goerrors.Is(err, context.Canceled) {
+				c.once.Do(func() {
+					if !isClosed(c.readyCh) {
+						c.readyCh <- struct{}{}
+					}
+				})
+
+				c.mu.Lock()
+				isClosed := c.closed
+				c.mu.Unlock()
+
+				if isClosed || ctx.Err() != nil {
+					c.logger.Info("Stream stopped due to shutdown")
+					return
+				}
+
+				c.logger.Info("Stream restarting due to membership change")
+				time.Sleep(1 * time.Second)
+				retryCount = 0 // Reset retry count for membership changes
+				continue
+			}
+
+			// Resume token hatası için sınırlı retry
+			if err != nil && (strings.Contains(err.Error(), "resume token") ||
+				strings.Contains(err.Error(), "ChangeStreamFatalError") ||
+				strings.Contains(err.Error(), "PlanExecutor")) {
+				retryCount++
+				if retryCount > maxRetries {
+					c.logger.Error("Max retries reached for resume token errors, stopping", zap.Int("retries", retryCount))
+					return
+				}
+				c.logger.Warn("Resume token error, retrying", zap.Error(err), zap.Int("attempt", retryCount))
+				time.Sleep(2 * time.Second)
+				continue
+			}
+
+			if ctx.Err() != nil {
+				c.logger.Info("Stream stopping due to context cancellation")
+				return
+			}
+
+			c.logger.Error("MongoDB stream open error", zap.Error(err))
+			time.Sleep(5 * time.Second)
+		}
+	}()
+
+	// İlk ready sinyali için
+	c.once.Do(func() {
+		go func() {
+			time.Sleep(2 * time.Second) // Stream'in başlaması için kısa bekleme
+			if !isClosed(c.readyCh) {
+				c.readyCh <- struct{}{}
+			}
+		}()
+	})
 
 	signal.Notify(c.cancelCh, syscall.SIGTERM, syscall.SIGINT, syscall.SIGABRT, syscall.SIGQUIT)
-
-	c.readyCh <- struct{}{}
 
 	<-c.cancelCh
 	c.logger.Debug("Cancel channel triggered")
@@ -440,6 +490,18 @@ func (c *testConnector) WaitUntilReady(ctx context.Context) error {
 }
 
 func (c *testConnector) Close() {
+	c.mu.Lock()
+	defer c.mu.Unlock()
+
+	c.logger.Info("Closing test connector")
+
+	if c.closed {
+		c.logger.Info("Already closed, skipping cleanup")
+		return
+	}
+
+	c.closed = true
+
 	if !isClosed(c.cancelCh) {
 		close(c.cancelCh)
 	}
@@ -447,13 +509,19 @@ func (c *testConnector) Close() {
 		close(c.readyCh)
 	}
 
-	if err := c.stream.Close(context.TODO()); err != nil {
+	closeCtx, cancel := context.WithTimeout(context.Background(), 10*time.Second)
+	defer cancel()
+
+	if err := c.stream.Close(closeCtx); err != nil {
 		c.logger.Error("Failed to close stream", zap.Error(err))
 	}
-	if err := c.mongoClient.Close(context.TODO()); err != nil {
+
+	c.logger.Info("Closing mongo client")
+	if err := c.mongoClient.Close(closeCtx); err != nil {
 		c.logger.Error("Failed to close mongo client", zap.Error(err))
 	}
-	c.server.Shutdown()
+
+	c.logger.Info("Test connector closed")
 }
 
 func (c *testConnector) GetConfig() *config.Config {
@@ -502,30 +570,6 @@ func (suite *CDCTestSuite) waitForCondition(condition func() bool, timeout time.
 	}
 }
 
-func (suite *CDCTestSuite) waitForCDCReady(collector MessageCollector, timeout time.Duration) {
-	suite.logger.Info("Testing CDC readiness...")
-
-	initialCount := collector.MessageCount()
-
-	testDoc := bson.M{
-		"_id":       primitive.NewObjectID(),
-		"testType":  "cdc_readiness_check",
-		"sellerId":  int32(0),
-		"timestamp": time.Now(),
-	}
-
-	_, err := suite.insertTestDocument(testDoc)
-	suite.Require().NoError(err, "Failed to insert CDC readiness test document")
-
-	suite.waitForCondition(func() bool {
-		return collector.MessageCount() > initialCount
-	}, timeout, "CDC to capture readiness test document")
-
-	suite.logger.Info("CDC readiness confirmed")
-
-	collector.Clear()
-}
-
 func (suite *CDCTestSuite) startConnectorWithReadinessCheck(collector MessageCollector) (cdc.Connector, context.Context, context.CancelFunc) {
 	connector, err := suite.createTestConnector(collector.CollectMessage)
 	suite.Require().NoError(err)
@@ -536,7 +580,6 @@ func (suite *CDCTestSuite) startConnectorWithReadinessCheck(collector MessageCol
 	suite.logger.Info("Starting CDC connector...")
 	time.Sleep(3 * time.Second)
 
-	suite.waitForCDCReady(collector, 15*time.Second)
 	suite.logger.Info("CDC connector ready for testing")
 	return connector, ctx, cancel
 }

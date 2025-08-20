@@ -6,6 +6,7 @@ import (
 	"fmt"
 	"strings"
 	"sync"
+	"sync/atomic"
 	"time"
 
 	"github.com/Trendyol/go-mongo-cdc/membership"
@@ -16,6 +17,7 @@ import (
 	"github.com/Trendyol/go-mongo-cdc/mongo/message"
 	"go.mongodb.org/mongo-driver/bson"
 	"go.mongodb.org/mongo-driver/bson/primitive"
+	"go.mongodb.org/mongo-driver/mongo"
 	"go.mongodb.org/mongo-driver/mongo/options"
 	"go.uber.org/zap"
 )
@@ -27,7 +29,7 @@ type Streamer interface {
 	Close(ctx context.Context) error
 }
 
-type ListenerFunc func(ctx *ListenerContext)
+type ListenerFunc func(ctx *ListenerContext) error
 
 type ListenerContext struct {
 	Message message.Message
@@ -49,6 +51,9 @@ type stream struct {
 	partitionIndex  int
 	totalPartitions int
 
+	// Partition version control for race condition prevention
+	partitionVersion int64
+
 	streamContext context.Context
 	streamCancel  context.CancelFunc
 
@@ -58,6 +63,24 @@ type stream struct {
 	membershipCancel       context.CancelFunc
 
 	partitionMutex sync.RWMutex
+
+	membershipWG sync.WaitGroup
+
+	tokenMutex           sync.RWMutex
+	lastAckedToken       []byte
+	lastAckedClusterTime *primitive.Timestamp
+}
+
+type checkpointInfo struct {
+	ID                      string              `bson:"_id"`
+	ResumeToken             []byte              `bson:"resumeToken"`
+	LastRun                 primitive.DateTime  `bson:"lastRun"`
+	LastClusterTime         primitive.Timestamp `bson:"lastClusterTime"`
+	PartitionIndex          int                 `bson:"partitionIndex"`
+	TotalPartitions         int                 `bson:"totalPartitions"`
+	BootstrapScanInProgress bool                `bson:"bootstrapScanInProgress"`
+	BootstrapCompleted      bool                `bson:"bootstrapCompleted"`
+	ScanLastID              interface{}         `bson:"scanLastId"`
 }
 
 func NewStream(
@@ -121,6 +144,10 @@ func (s *stream) Open(ctx context.Context) error {
 		s.isActive = false
 	}()
 
+	if err := s.checkReplicaSetStatus(ctx); err != nil {
+		return err
+	}
+
 	s.streamContext, s.streamCancel = context.WithCancel(ctx)
 
 	s.logger.Info("Starting MongoDB Change Stream",
@@ -138,39 +165,94 @@ func (s *stream) Open(ctx context.Context) error {
 			return err
 		}
 
-		activeMembers := s.membership.GetMembershipInfo().Members
-		s.totalPartitions = len(activeMembers)
+		s.logger.Info("Initial delay to allow other members to register...")
+		time.Sleep(time.Second * 2)
 
-		actualMemberID := s.membership.GetMemberInfo().ID
-
-		for i, member := range activeMembers {
-			if member.ID == actualMemberID {
-				s.partitionIndex = i
-				break
-			}
+		if err := s.membership.UpdateMembershipInfo(ctx); err != nil {
+			s.logger.Error("Failed to perform post-delay membership update", zap.Error(err))
+			return err
 		}
+
+		// Wait for membership stability before starting stream
+		stabilityDuration := 2 * time.Second
+		s.logger.Info("Waiting for membership stability before starting stream",
+			zap.Duration("stabilityDuration", stabilityDuration))
+
+		if err := s.membership.WaitForMembershipStability(ctx, stabilityDuration); err != nil {
+			s.logger.Error("Failed to wait for membership stability", zap.Error(err))
+			return err
+		}
+
+		// Get stable partition info with version control
+		partitionIndex, totalPartitions, version := s.membership.GetPartitionInfo()
+
+		// Initialize partition state atomically
+		s.partitionMutex.Lock()
+		s.partitionIndex = partitionIndex
+		s.totalPartitions = totalPartitions
+		atomic.StoreInt64(&s.partitionVersion, version)
+		s.partitionMutex.Unlock()
 
 		s.startMembershipMonitoring(ctx)
 
-		s.logger.Info("Membership initialized",
-			zap.Int("partition_index", s.partitionIndex),
-			zap.Int("total_partitions", s.totalPartitions),
-			zap.String("actual_member_id", actualMemberID),
+		s.logger.Info("membership initialized with stability control",
+			zap.Int("partition_index", partitionIndex),
+			zap.Int("total_partitions", totalPartitions),
+			zap.Int64("partition_version", version),
+			zap.String("actual_member_id", s.membership.GetMemberInfo().ID),
 		)
 	}
 
-	if err := s.checkReplicaSetStatus(ctx); err != nil {
-		return err
+	var resumeToken []byte
+	var startAtOperationTime *primitive.Timestamp
+
+	cp, err := s.loadCheckpointInfo(ctx)
+	if err != nil {
+		s.logger.Error("Failed to load checkpoint info", zap.Error(err))
+		panic("Failed to load checkpoint info")
 	}
 
-	//TODO: Sometimes when the pod is restarted, it can't find the token then breaks. Investigate this.
-	resumeToken, err := s.loadResumeToken(ctx)
-	if err != nil || resumeToken == nil {
-		s.logger.Warn("Resume token not found or failed to load, processing all existing documents", zap.Error(err))
+	if cp != nil {
+		if cp.PartitionIndex == s.partitionIndex && cp.TotalPartitions == s.totalPartitions {
+			if len(cp.ResumeToken) > 0 {
+				resumeToken = cp.ResumeToken
+			}
+		} else {
+			s.logger.Warn("Checkpoint partition info mismatched; will use lastClusterTime if available",
+				zap.Int("saved_partition_index", cp.PartitionIndex),
+				zap.Int("saved_total_partitions", cp.TotalPartitions),
+				zap.Int("current_partition_index", s.partitionIndex),
+				zap.Int("current_total_partitions", s.totalPartitions))
+		}
+
+		isTimestampSet := cp.LastClusterTime != primitive.Timestamp{}
+
+		if isTimestampSet && startAtOperationTime == nil {
+			ts := cp.LastClusterTime
+			ts.I++
+			startAtOperationTime = &ts
+		}
+	}
+
+	if resumeToken == nil && startAtOperationTime == nil {
+		s.logger.Warn("No usable resume token or lastClusterTime, processing all existing documents")
+
+		opTime, opErr := s.getServerOperationTime(ctx)
+		if opErr != nil {
+			s.logger.Warn("Failed to get server operationTime; starting stream without startAtOperationTime", zap.Error(opErr))
+		} else {
+			startAtOperationTime = opTime
+		}
 
 		if err := s.processAllDocuments(ctx); err != nil {
 			s.logger.Error("Failed to process existing documents", zap.Error(err))
 			return err
+		}
+
+		if startAtOperationTime != nil {
+			if err := s.saveBootstrapLastClusterTime(ctx, *startAtOperationTime); err != nil {
+				s.logger.Warn("Failed to save bootstrap lastClusterTime", zap.Error(err))
+			}
 		}
 	}
 
@@ -181,6 +263,9 @@ func (s *stream) Open(ctx context.Context) error {
 		resumeTokenRaw := bson.Raw(resumeToken)
 		opts.SetResumeAfter(resumeTokenRaw)
 		s.logger.Info("Resuming change stream from stored token")
+	} else if startAtOperationTime != nil {
+		opts.SetStartAtOperationTime(startAtOperationTime)
+		s.logger.Info("Starting change stream from operationTime", zap.Any("operationTime", startAtOperationTime))
 	}
 
 	changeStream := s.collection.Watch(s.streamContext, pipeline, opts)
@@ -195,13 +280,20 @@ func (s *stream) Open(ctx context.Context) error {
 	tokenSaveTicker := time.NewTicker(s.cfg.Checkpoint.SaveInterval)
 	defer tokenSaveTicker.Stop()
 
-	saveTokenChan := make(chan struct{})
 	go func() {
 		for {
 			select {
 			case <-tokenSaveTicker.C:
-				saveTokenChan <- struct{}{}
-			case <-ctx.Done():
+				s.tokenMutex.RLock()
+				acked := s.lastAckedToken
+				ct := s.lastAckedClusterTime
+				s.tokenMutex.RUnlock()
+				if len(acked) > 0 {
+					if err := s.saveResumeToken(s.streamContext, acked, ct); err != nil {
+						s.logger.Error("Failed to periodically save resume token", zap.Error(err))
+					}
+				}
+			case <-s.streamContext.Done():
 				return
 			}
 		}
@@ -213,12 +305,7 @@ func (s *stream) Open(ctx context.Context) error {
 			return ctx.Err()
 		case <-s.streamContext.Done():
 			return context.Canceled
-		case <-saveTokenChan:
-			if changeStream.ResumeToken() != nil {
-				if err := s.saveResumeToken(ctx, changeStream.ResumeToken()); err != nil {
-					s.logger.Error("Failed to periodically save resume token", zap.Error(err))
-				}
-			}
+
 		default:
 			if !changeStream.Next(s.streamContext) {
 				if err := changeStream.Err(); err != nil {
@@ -226,6 +313,11 @@ func (s *stream) Open(ctx context.Context) error {
 						s.logger.Error("Change stream error", zap.Error(err))
 					}
 
+					if s.isResumeTokenError(err) {
+						if recErr := s.recoverFromResumeError(ctx); recErr == nil {
+							return context.Canceled
+						}
+					}
 					return err
 				}
 				s.logger.Info("Change stream ended")
@@ -238,18 +330,40 @@ func (s *stream) Open(ctx context.Context) error {
 				continue
 			}
 
-			if err := s.processEvent(ctx, event); err != nil {
+			currentToken := changeStream.ResumeToken()
+			if err := s.processEvent(ctx, event, currentToken); err != nil {
 				s.logger.Error("Error processing change event",
 					zap.String("operationType", event.OperationType),
 					zap.Error(err))
 				continue
 			}
 
-			if err := s.saveResumeToken(ctx, changeStream.ResumeToken()); err != nil {
-				s.logger.Error("Failed to save resume token after event", zap.Error(err))
-			}
 		}
 	}
+}
+
+func (s *stream) checkReplicaSetStatus(ctx context.Context) error {
+	result := s.database.RunCommand(ctx, bson.D{{Key: "isMaster", Value: 1}})
+
+	var isMaster bson.M
+	if err := result.Decode(&isMaster); err != nil {
+		return err
+	}
+
+	if _, ok := isMaster["setName"]; ok {
+		s.logger.Info("Connected to MongoDB replica set")
+		return nil
+	}
+
+	if msg, ok := isMaster["msg"]; ok && msg == "isdbgrid" {
+		s.logger.Debug("Connected to MongoDB sharded cluster")
+		return nil
+	}
+
+	return errors.New(
+		"MongoDB is not running as a replica set or sharded cluster. " +
+			"Change streams require replica set or sharded cluster",
+	)
 }
 
 func (s *stream) startMembershipMonitoring(ctx context.Context) {
@@ -258,9 +372,25 @@ func (s *stream) startMembershipMonitoring(ctx context.Context) {
 		return
 	}
 
+	if s.membershipCancel != nil {
+		s.membershipCancel()
+		done := make(chan struct{})
+		go func() {
+			s.membershipWG.Wait()
+			close(done)
+		}()
+		select {
+		case <-done:
+		case <-time.After(2 * time.Second):
+			s.logger.Warn("Previous membership monitor did not stop in time; proceeding to start new one")
+		}
+	}
+
 	s.membershipContext, s.membershipCancel = context.WithCancel(ctx)
 
+	s.membershipWG.Add(1)
 	go func() {
+		defer s.membershipWG.Done()
 		s.logger.Info("Starting membership change stream monitoring")
 
 		pipeline := []bson.D{
@@ -327,7 +457,12 @@ func (s *stream) startMembershipMonitoring(ctx context.Context) {
 					}
 				}
 
-				changeStream.Close(s.membershipContext)
+				// Close change stream with a short timeout to avoid hangs on canceled contexts
+				{
+					closeCtx, cancel := context.WithTimeout(context.Background(), 2*time.Second)
+					_ = changeStream.Close(closeCtx)
+					cancel()
+				}
 
 				if s.membershipContext.Err() != nil {
 					s.logger.Debug("Membership change stream closed due to shutdown")
@@ -358,98 +493,158 @@ func (s *stream) updatePartitionInfo() (bool, error) {
 		return false, nil
 	}
 
-	newMembershipInfo := s.membership.GetMembershipInfo()
-	actualMemberID := s.membership.GetMemberInfo().ID
+	// Get partition info with version from membership (race-safe)
+	newPartitionIndex, newTotalPartitions, membershipVersion := s.membership.GetPartitionInfo()
+
+	// Check if partition assignment is invalid
+	if newPartitionIndex < 0 || newTotalPartitions <= 0 {
+		s.logger.Error("Invalid partition assignment received",
+			zap.Int("partitionIndex", newPartitionIndex),
+			zap.Int("totalPartitions", newTotalPartitions),
+			zap.Int64("membershipVersion", membershipVersion))
+		return false, fmt.Errorf("invalid partition assignment: index=%d, total=%d",
+			newPartitionIndex, newTotalPartitions)
+	}
 
 	s.partitionMutex.Lock()
 	defer s.partitionMutex.Unlock()
 
 	oldIndex := s.partitionIndex
 	oldTotal := s.totalPartitions
+	oldVersion := atomic.LoadInt64(&s.partitionVersion)
 
-	s.totalPartitions = len(newMembershipInfo.Members)
+	// Update partition info atomically
+	s.partitionIndex = newPartitionIndex
+	s.totalPartitions = newTotalPartitions
+	atomic.StoreInt64(&s.partitionVersion, membershipVersion)
 
-	for i, member := range newMembershipInfo.Members {
-		if member.ID == actualMemberID {
-			s.partitionIndex = i
-			break
-		}
-	}
+	// Check if partition assignment changed
+	hasChanged := oldIndex != newPartitionIndex ||
+		oldTotal != newTotalPartitions ||
+		oldVersion != membershipVersion
 
-	if oldIndex != s.partitionIndex || oldTotal != s.totalPartitions {
+	if hasChanged {
 		s.logger.Info("partition info updated",
 			zap.Int("old_index", oldIndex),
-			zap.Int("new_index", s.partitionIndex),
+			zap.Int("new_index", newPartitionIndex),
 			zap.Int("old_total", oldTotal),
-			zap.Int("new_total", s.totalPartitions))
+			zap.Int("new_total", newTotalPartitions),
+			zap.Int64("old_version", oldVersion),
+			zap.Int64("new_version", membershipVersion))
 		return true, nil
 	}
 
 	s.logger.Debug("partition info checked, no changes needed",
-		zap.Int("partition_index", s.partitionIndex),
-		zap.Int("total_partitions", s.totalPartitions))
+		zap.Int("partition_index", newPartitionIndex),
+		zap.Int("total_partitions", newTotalPartitions),
+		zap.Int64("version", membershipVersion))
 
 	return false, nil
 }
 
-func (s *stream) checkReplicaSetStatus(ctx context.Context) error {
-	result := s.database.RunCommand(ctx, bson.D{{Key: "isMaster", Value: 1}})
-
-	var isMaster bson.M
-	if err := result.Decode(&isMaster); err != nil {
-		return err
-	}
-
-	if _, ok := isMaster["setName"]; ok {
-		s.logger.Info("Connected to MongoDB replica set")
-		return nil
-	}
-
-	if msg, ok := isMaster["msg"]; ok && msg == "isdbgrid" {
-		s.logger.Debug("Connected to MongoDB sharded cluster")
-		return nil
-	}
-
-	return errors.New(
-		"MongoDB is not running as a replica set or sharded cluster. " +
-			"Change streams require replica set or sharded cluster",
-	)
-}
-
-func (s *stream) loadResumeToken(ctx context.Context) ([]byte, error) {
-	checkpointID := s.cfg.Database + "_" + s.cfg.Collection + "_checkpoint"
-
+func (s *stream) loadCheckpointInfo(ctx context.Context) (*checkpointInfo, error) {
+	checkpointID := s.getCheckpointID()
 	filter := bson.M{"_id": checkpointID}
-	result := s.checkpoint.FindOne(ctx, filter)
 
-	if result.Err() != nil {
-		if result.Err().Error() == "mongo: no documents in result" {
-			s.logger.Info("No resume token found, starting from scratch")
+	result := s.checkpoint.FindOne(ctx, filter)
+	if err := result.Err(); err != nil {
+		if errors.Is(err, mongo.ErrNoDocuments) {
 			return nil, nil
 		}
-		return nil, result.Err()
-	}
-
-	var checkpoint struct {
-		ID          string             `bson:"_id"`
-		ResumeToken []byte             `bson:"resumeToken"`
-		LastRun     primitive.DateTime `bson:"lastRun"`
-	}
-
-	if err := result.Decode(&checkpoint); err != nil {
 		return nil, err
 	}
 
-	s.logger.Info("Resume token loaded successfully",
-		zap.String("checkpoint_id", checkpoint.ID),
-		zap.Time("lastRun", checkpoint.LastRun.Time()))
+	var cp checkpointInfo
+	if err := result.Decode(&cp); err != nil {
+		return nil, err
+	}
+	return &cp, nil
+}
 
-	return checkpoint.ResumeToken, nil
+func (s *stream) getServerOperationTime(ctx context.Context) (*primitive.Timestamp, error) {
+	result := s.database.RunCommand(ctx, bson.D{{Key: "isMaster", Value: 1}})
+	var isMaster bson.M
+	if err := result.Decode(&isMaster); err != nil {
+		return nil, err
+	}
+
+	if opTime, ok := isMaster["operationTime"].(primitive.Timestamp); ok {
+		return &opTime, nil
+	}
+	return nil, nil
+}
+
+func (s *stream) saveBootstrapLastClusterTime(ctx context.Context, ts primitive.Timestamp) error {
+	checkpointID := s.getCheckpointID()
+	filter := bson.M{"_id": checkpointID}
+	update := bson.M{
+		"$set": bson.M{
+			"lastClusterTime": ts,
+			"updatedAt":       time.Now(),
+			"database":        s.cfg.Database,
+			"collection":      s.cfg.Collection,
+			"partitionIndex":  s.partitionIndex,
+			"totalPartitions": s.totalPartitions,
+		},
+	}
+	opts := options.Update().SetUpsert(true)
+	_, err := s.checkpoint.UpdateOne(ctx, filter, update, opts)
+	return err
+}
+
+func (s *stream) setBootstrapState(ctx context.Context, inProgress bool) error {
+	checkpointID := s.getCheckpointID()
+	filter := bson.M{"_id": checkpointID}
+	update := bson.M{"$set": bson.M{
+		"bootstrapScanInProgress": inProgress,
+		"updatedAt":               time.Now(),
+		"database":                s.cfg.Database,
+		"collection":              s.cfg.Collection,
+		"partitionIndex":          s.partitionIndex,
+		"totalPartitions":         s.totalPartitions,
+	}}
+	opts := options.Update().SetUpsert(true)
+	_, err := s.checkpoint.UpdateOne(ctx, filter, update, opts)
+	return err
+}
+
+func (s *stream) saveScanProgress(ctx context.Context, lastID interface{}) error {
+	checkpointID := s.getCheckpointID()
+	filter := bson.M{"_id": checkpointID}
+	update := bson.M{"$set": bson.M{
+		"scanLastId":      lastID,
+		"updatedAt":       time.Now(),
+		"database":        s.cfg.Database,
+		"collection":      s.cfg.Collection,
+		"partitionIndex":  s.partitionIndex,
+		"totalPartitions": s.totalPartitions,
+	}}
+	opts := options.Update().SetUpsert(true)
+	_, err := s.checkpoint.UpdateOne(ctx, filter, update, opts)
+	return err
+}
+
+func (s *stream) clearBootstrapState(ctx context.Context) error {
+	checkpointID := s.getCheckpointID()
+	filter := bson.M{"_id": checkpointID}
+	update := bson.M{"$set": bson.M{
+		"bootstrapScanInProgress": false,
+		"bootstrapCompleted":      true,
+		"updatedAt":               time.Now(),
+	}, "$unset": bson.M{
+		"scanLastId": "",
+	}}
+	_, err := s.checkpoint.UpdateOne(ctx, filter, update, options.Update())
+	return err
 }
 
 //nolint:funlen
 func (s *stream) processAllDocuments(ctx context.Context) error {
 	s.logger.Info("Starting to process all existing documents as insert events")
+
+	_ = s.setBootstrapState(ctx, true)
+
+	cp, _ := s.loadCheckpointInfo(ctx)
 
 	var filter bson.D
 	if s.membership != nil && s.totalPartitions > 1 {
@@ -458,8 +653,14 @@ func (s *stream) processAllDocuments(ctx context.Context) error {
 		filter = bson.D{}
 	}
 
+	//TODO: random string veya uuid v4 icin dogru calısmıyor
+	if cp != nil && cp.ScanLastID != nil {
+		filter = append(filter, bson.E{Key: "_id", Value: bson.M{"$gt": cp.ScanLastID}})
+	}
+
 	cursor, err := s.collection.Find(ctx, filter)
 	if err != nil {
+		_ = s.setBootstrapState(ctx, false)
 		return err
 	}
 	defer func() {
@@ -489,7 +690,7 @@ func (s *stream) processAllDocuments(ctx context.Context) error {
 			ClusterTime: primitive.Timestamp{T: uint32(time.Now().Unix()), I: 1}, // #nosec G115
 		}
 
-		if err := s.processEvent(ctx, syntheticEvent); err != nil {
+		if err := s.processEvent(ctx, syntheticEvent, nil); err != nil {
 			s.logger.Error("Error processing synthetic insert event",
 				zap.Any("documentId", document["_id"]),
 				zap.Error(err))
@@ -500,6 +701,7 @@ func (s *stream) processAllDocuments(ctx context.Context) error {
 
 		if processedCount%1000 == 0 {
 			s.logger.Info("Processed documents", zap.Int("count", processedCount))
+			_ = s.saveScanProgress(ctx, document["_id"])
 		}
 
 		select {
@@ -515,6 +717,7 @@ func (s *stream) processAllDocuments(ctx context.Context) error {
 
 	s.logger.Info("Completed processing all existing documents",
 		zap.Int("totalProcessed", processedCount))
+	_ = s.clearBootstrapState(ctx)
 
 	return nil
 }
@@ -523,7 +726,7 @@ func (s *stream) createPipeline() []bson.D {
 	basePipeline := s.createBasePipeline()
 
 	if s.membership != nil && s.totalPartitions > 1 {
-		return s.createSimplePartitionPipeline(basePipeline)
+		return s.createVersionAwarePartitionPipeline(basePipeline)
 	}
 
 	return basePipeline
@@ -541,8 +744,45 @@ func (s *stream) createBasePipeline() []bson.D {
 	}
 }
 
-func (s *stream) createSimplePartitionPipeline(basePipeline []bson.D) []bson.D {
-	if s.membership == nil || s.totalPartitions <= 1 {
+func (s *stream) createVersionAwarePartitionPipeline(basePipeline []bson.D) []bson.D {
+	// Capture current partition state atomically
+	s.partitionMutex.RLock()
+	currentIndex := s.partitionIndex
+	currentTotal := s.totalPartitions
+	currentVersion := atomic.LoadInt64(&s.partitionVersion)
+	s.partitionMutex.RUnlock()
+
+	// Validate partition assignment before creating pipeline
+	if !s.membership.IsPartitionValid(currentVersion, currentIndex, currentTotal) {
+		s.logger.Warn("Partition assignment became invalid during pipeline creation",
+			zap.Int("currentIndex", currentIndex),
+			zap.Int("currentTotal", currentTotal),
+			zap.Int64("currentVersion", currentVersion))
+
+		// Retry with fresh partition info
+		newIndex, newTotal, newVersion := s.membership.GetPartitionInfo()
+
+		s.partitionMutex.Lock()
+		s.partitionIndex = newIndex
+		s.totalPartitions = newTotal
+		atomic.StoreInt64(&s.partitionVersion, newVersion)
+		s.partitionMutex.Unlock()
+
+		currentIndex = newIndex
+		currentTotal = newTotal
+		currentVersion = newVersion
+
+		s.logger.Info("Updated partition info during pipeline creation",
+			zap.Int("newIndex", newIndex),
+			zap.Int("newTotal", newTotal),
+			zap.Int64("newVersion", newVersion))
+	}
+
+	return s.createSimplePartitionPipelineWithState(basePipeline, currentIndex, currentTotal)
+}
+
+func (s *stream) createSimplePartitionPipelineWithState(basePipeline []bson.D, partitionIndex, totalPartitions int) []bson.D {
+	if s.membership == nil || totalPartitions <= 1 {
 		return basePipeline
 	}
 
@@ -550,54 +790,37 @@ func (s *stream) createSimplePartitionPipeline(basePipeline []bson.D) []bson.D {
 		shardKey := s.cfg.Membership.Config["shardKey"]
 		if shardKey == "" {
 			s.logger.Warn("shard key not configured for chunk-based partitioning")
-			return s.createHashBasedPartitionPipeline(basePipeline)
+			return s.createHashBasedPartitionPipelineWithState(basePipeline, partitionIndex, totalPartitions)
 		}
 
-		chunkRanges := s.getChunkRanges()
+		chunkRanges := s.getChunkRangesForPartition(partitionIndex, totalPartitions)
 		if len(chunkRanges) == 0 {
 			s.logger.Warn("no chunk ranges found for this partition, falling back to hash-based partitioning")
-			return s.createHashBasedPartitionPipeline(basePipeline)
+			return s.createHashBasedPartitionPipelineWithState(basePipeline, partitionIndex, totalPartitions)
 		}
 
 		return s.createChunkBasedPartitionPipeline(basePipeline, shardKey, chunkRanges)
 	}
 
-	s.logger.Info("Using hash-based partitioning")
-	return s.createHashBasedPartitionPipeline(basePipeline)
+	s.logger.Info("using hash-based partitioning",
+		zap.Int("partitionIndex", partitionIndex),
+		zap.Int("totalPartitions", totalPartitions))
+	return s.createHashBasedPartitionPipelineWithState(basePipeline, partitionIndex, totalPartitions)
 }
 
-/*func (s *stream) createHashBasedPartitionPipeline(basePipeline []bson.D) []bson.D {
-	hashBasedFilter := bson.D{
-		{Key: "$match", Value: bson.D{
-			{Key: "$expr", Value: bson.D{
-				{Key: "$eq", Value: bson.A{
-					bson.D{{Key: "$mod", Value: bson.A{
-						bson.D{{Key: "$toHashedIndexKey", Value: "$documentKey._id"}},
-						s.totalPartitions,
-					}}},
-					s.partitionIndex,
-				}},
-			}},
-		}},
-	}
-
-	result := append(basePipeline, hashBasedFilter)
-
-	return result
-}*/
-
-func (s *stream) createHashBasedPartitionPipeline(basePipeline []bson.D) []bson.D {
-	// Hash-based partitioning based on Document ID
-	// Calculates the length of the ObjectID string and takes the last 2 characters
+// createHashBasedPartitionPipelineWithState creates hash-based pipeline with explicit state
+func (s *stream) createHashBasedPartitionPipelineWithState(basePipeline []bson.D, partitionIndex, totalPartitions int) []bson.D {
+	// Document ID'sine göre hash-based partitioning
+	// ObjectID string'inin uzunluğunu hesaplayıp son 2 karakteri alıyoruz
 	hashBasedFilter := bson.D{
 		{Key: "$match", Value: bson.D{
 			{Key: "$expr", Value: bson.D{
 				{Key: "$eq", Value: bson.A{
 					bson.D{{Key: "$mod", Value: bson.A{
 						s.createHexToIntExpression("$documentKey._id"),
-						s.totalPartitions,
+						totalPartitions,
 					}}},
-					s.partitionIndex,
+					partitionIndex,
 				}},
 			}},
 		}},
@@ -753,8 +976,29 @@ func (s *stream) createChunkBasedPartitionPipeline(basePipeline []bson.D, shardK
 }
 
 //nolint:funlen
-func (s *stream) processEvent(_ context.Context, event message.ChangeEvent) error {
+func (s *stream) processEvent(ctx context.Context, event message.ChangeEvent, resumeTokenAtEvent []byte) error {
 	startTime := time.Now()
+
+	// Check partition validity before processing event
+	if s.membership != nil {
+		s.partitionMutex.RLock()
+		currentIndex := s.partitionIndex
+		currentTotal := s.totalPartitions
+		currentVersion := atomic.LoadInt64(&s.partitionVersion)
+		s.partitionMutex.RUnlock()
+
+		// Validate current partition assignment
+		if !s.membership.IsPartitionValid(currentVersion, currentIndex, currentTotal) {
+			s.logger.Warn("Partition assignment became invalid during event processing",
+				zap.Int("currentIndex", currentIndex),
+				zap.Int("currentTotal", currentTotal),
+				zap.Int64("currentVersion", currentVersion),
+				zap.String("eventType", event.OperationType))
+
+			// This will trigger stream restart via membership change detection
+			panic("partition assignment invalid during event processing")
+		}
+	}
 
 	msg, err := message.NewMessage(event)
 	if err != nil {
@@ -768,11 +1012,24 @@ func (s *stream) processEvent(_ context.Context, event message.ChangeEvent) erro
 		Ack: func() error {
 			processingLatency := time.Since(startTime)
 			s.metric.SetProcessLatency(processingLatency.Nanoseconds())
+			if len(resumeTokenAtEvent) > 0 {
+				s.tokenMutex.Lock()
+				s.lastAckedToken = append([]byte(nil), resumeTokenAtEvent...)
+				ct := event.ClusterTime
+				s.lastAckedClusterTime = &ct
+				s.tokenMutex.Unlock()
+				if err := s.saveResumeToken(ctx, resumeTokenAtEvent, &ct); err != nil {
+					s.logger.Error("Failed to save resume token on ack", zap.Error(err))
+				}
+			}
 			return nil
 		},
 	}
 
-	s.listener(listenerCtx)
+	if err := s.listener(listenerCtx); err != nil {
+		return err
+	}
+
 	return nil
 }
 
@@ -789,24 +1046,28 @@ func (s *stream) updateMetrics(opType message.OperationType) {
 	}
 }
 
-func (s *stream) saveResumeToken(ctx context.Context, token []byte) error {
+func (s *stream) saveResumeToken(ctx context.Context, token []byte, clusterTime *primitive.Timestamp) error {
 	if len(token) == 0 {
 		s.logger.Debug("Resume token is empty, skipping save")
 		return nil
 	}
 
-	checkpointID := s.cfg.Database + "_" + s.cfg.Collection + "_checkpoint"
+	checkpointID := s.getCheckpointID()
 
 	filter := bson.M{"_id": checkpointID}
-	update := bson.M{
-		"$set": bson.M{
-			"resumeToken": token,
-			"lastRun":     time.Now(),
-			"updatedAt":   time.Now(),
-			"database":    s.cfg.Database,
-			"collection":  s.cfg.Collection,
-		},
+	set := bson.M{
+		"resumeToken":     token,
+		"lastRun":         time.Now(),
+		"updatedAt":       time.Now(),
+		"database":        s.cfg.Database,
+		"collection":      s.cfg.Collection,
+		"partitionIndex":  s.partitionIndex,
+		"totalPartitions": s.totalPartitions,
 	}
+	if clusterTime != nil {
+		set["lastClusterTime"] = *clusterTime
+	}
+	update := bson.M{"$set": set}
 
 	opts := options.Update().SetUpsert(true)
 	_, err := s.checkpoint.UpdateOne(ctx, filter, update, opts)
@@ -822,6 +1083,10 @@ func (s *stream) saveResumeToken(ctx context.Context, token []byte) error {
 		zap.String("checkpoint_id", checkpointID))
 
 	return nil
+}
+
+func (s *stream) getCheckpointID() string {
+	return s.cfg.Database + "_" + s.cfg.Collection + "_checkpoint"
 }
 
 func (s *stream) createDocumentFilter() bson.D {
@@ -903,6 +1168,15 @@ func (s *stream) createChunkBasedDocumentFilter(shardKey string, chunkRanges []C
 }
 
 func (s *stream) getChunkRanges() []ChunkRange {
+	s.partitionMutex.RLock()
+	currentIndex := s.partitionIndex
+	currentTotal := s.totalPartitions
+	s.partitionMutex.RUnlock()
+
+	return s.getChunkRangesForPartition(currentIndex, currentTotal)
+}
+
+func (s *stream) getChunkRangesForPartition(partitionIndex, totalPartitions int) []ChunkRange {
 	chunks, err := s.getAllChunks()
 	if err != nil {
 		s.logger.Error("failed to get chunks", zap.Error(err))
@@ -911,11 +1185,12 @@ func (s *stream) getChunkRanges() []ChunkRange {
 
 	var assignedChunks []ChunkRange
 	for i, chunk := range chunks {
-		if i%s.totalPartitions == s.partitionIndex {
+		if i%totalPartitions == partitionIndex {
 			assignedChunks = append(assignedChunks, chunk)
 		}
 	}
 
+	// Final summary with chunk ranges
 	var rangeSummary []string
 	for _, chunk := range assignedChunks {
 		if minDoc, ok := chunk.Min.(bson.M); ok {
@@ -925,6 +1200,12 @@ func (s *stream) getChunkRanges() []ChunkRange {
 			}
 		}
 	}
+
+	s.logger.Debug("Chunk ranges assigned for partition",
+		zap.Int("partitionIndex", partitionIndex),
+		zap.Int("totalPartitions", totalPartitions),
+		zap.Int("assignedChunks", len(assignedChunks)),
+		zap.Strings("rangeSummary", rangeSummary))
 
 	return assignedChunks
 }
@@ -1016,6 +1297,16 @@ func (s *stream) Close(ctx context.Context) error {
 	}
 
 	s.stopMembershipMonitoring()
+	done := make(chan struct{})
+	go func() {
+		s.membershipWG.Wait()
+		close(done)
+	}()
+	select {
+	case <-done:
+	case <-ctx.Done():
+		s.logger.Warn("Timeout waiting for membership monitoring to stop")
+	}
 
 	s.isActive = false
 
@@ -1033,13 +1324,50 @@ func (s *stream) stopMembershipMonitoring() {
 	if s.membershipCancel != nil {
 		s.membershipCancel()
 	}
+	s.membershipChangeStream = nil
+}
 
-	if s.membershipChangeStream != nil {
-		if closeableStream, ok := s.membershipChangeStream.(interface{ Close(context.Context) error }); ok {
-			if err := closeableStream.Close(context.Background()); err != nil {
-				s.logger.Error("Failed to close membership change stream", zap.Error(err))
-			}
-		}
-		s.membershipChangeStream = nil
+func (s *stream) isResumeTokenError(err error) bool {
+	if err == nil {
+		return false
 	}
+	msg := err.Error()
+	if strings.Contains(msg, "resume token") ||
+		strings.Contains(msg, "ChangeStreamFatalError") ||
+		strings.Contains(msg, "PlanExecutor") {
+		return true
+	}
+	return false
+}
+
+func (s *stream) recoverFromResumeError(ctx context.Context) error {
+	s.logger.Warn("Attempting to recover from resume token error")
+
+	checkpointID := s.cfg.Database + "_" + s.cfg.Collection + "_checkpoint"
+	filter := bson.M{"_id": checkpointID}
+
+	var cp struct {
+		ResumeToken     []byte               `bson:"resumeToken"`
+		LastClusterTime *primitive.Timestamp `bson:"lastClusterTime"`
+	}
+
+	res := s.checkpoint.FindOne(ctx, filter)
+	if res != nil && res.Err() == nil {
+		_ = res.Decode(&cp)
+	}
+
+	if len(cp.ResumeToken) > 0 {
+		_, _ = s.checkpoint.UpdateOne(ctx, filter, bson.M{"$unset": bson.M{"resumeToken": ""}}, options.Update())
+	}
+
+	if cp.LastClusterTime != nil {
+		s.logger.Info("Will try to restart from lastClusterTime", zap.Any("lastClusterTime", cp.LastClusterTime))
+		s.tokenMutex.Lock()
+		s.lastAckedClusterTime = cp.LastClusterTime
+		s.tokenMutex.Unlock()
+		return nil
+	}
+
+	s.logger.Info("No lastClusterTime found; fallback to server operationTime or full scan on next start")
+	return nil
 }
