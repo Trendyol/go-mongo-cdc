@@ -72,15 +72,13 @@ type stream struct {
 }
 
 type checkpointInfo struct {
-	ID                      string              `bson:"_id"`
-	ResumeToken             []byte              `bson:"resumeToken"`
-	LastRun                 primitive.DateTime  `bson:"lastRun"`
-	LastClusterTime         primitive.Timestamp `bson:"lastClusterTime"`
-	PartitionIndex          int                 `bson:"partitionIndex"`
-	TotalPartitions         int                 `bson:"totalPartitions"`
-	BootstrapScanInProgress bool                `bson:"bootstrapScanInProgress"`
-	BootstrapCompleted      bool                `bson:"bootstrapCompleted"`
-	ScanLastID              interface{}         `bson:"scanLastId"`
+	ID              string              `bson:"_id"`
+	ResumeToken     []byte              `bson:"resumeToken"`
+	LastRun         primitive.DateTime  `bson:"lastRun"`
+	LastClusterTime primitive.Timestamp `bson:"lastClusterTime"`
+	PartitionIndex  int                 `bson:"partitionIndex"`
+	TotalPartitions int                 `bson:"totalPartitions"`
+	ScanLastID      interface{}         `bson:"scanLastId"`
 }
 
 func NewStream(
@@ -166,7 +164,7 @@ func (s *stream) Open(ctx context.Context) error {
 		}
 
 		s.logger.Info("Initial delay to allow other members to register...")
-		time.Sleep(time.Second * 2)
+		time.Sleep(time.Second * 5)
 
 		if err := s.membership.UpdateMembershipInfo(ctx); err != nil {
 			s.logger.Error("Failed to perform post-delay membership update", zap.Error(err))
@@ -227,16 +225,25 @@ func (s *stream) Open(ctx context.Context) error {
 
 		isTimestampSet := cp.LastClusterTime != primitive.Timestamp{}
 
-		if isTimestampSet && startAtOperationTime == nil {
+		if isTimestampSet {
 			ts := cp.LastClusterTime
 			ts.I++
 			startAtOperationTime = &ts
 		}
 	}
 
-	if resumeToken == nil && startAtOperationTime == nil {
-		s.logger.Warn("No usable resume token or lastClusterTime, processing all existing documents")
+	// Bootstrap durumunu kontrol et
+	shouldProcessDocuments := false
 
+	if cp != nil && cp.ScanLastID != nil {
+		s.logger.Info("Continuing incomplete bootstrap from last scan position", zap.Any("lastScanId", cp.ScanLastID))
+		shouldProcessDocuments = true
+	} else if len(resumeToken) == 0 && startAtOperationTime == nil {
+		s.logger.Warn("No usable resume token or lastClusterTime, starting bootstrap process")
+		shouldProcessDocuments = true
+	}
+
+	if shouldProcessDocuments {
 		opTime, opErr := s.getServerOperationTime(ctx)
 		if opErr != nil {
 			s.logger.Warn("Failed to get server operationTime; starting stream without startAtOperationTime", zap.Error(opErr))
@@ -592,16 +599,15 @@ func (s *stream) saveBootstrapLastClusterTime(ctx context.Context, ts primitive.
 	return err
 }
 
-func (s *stream) setBootstrapState(ctx context.Context, inProgress bool) error {
+func (s *stream) initBootstrapState(ctx context.Context) error {
 	checkpointID := s.getCheckpointID()
 	filter := bson.M{"_id": checkpointID}
 	update := bson.M{"$set": bson.M{
-		"bootstrapScanInProgress": inProgress,
-		"updatedAt":               time.Now(),
-		"database":                s.cfg.Database,
-		"collection":              s.cfg.Collection,
-		"partitionIndex":          s.partitionIndex,
-		"totalPartitions":         s.totalPartitions,
+		"updatedAt":       time.Now(),
+		"database":        s.cfg.Database,
+		"collection":      s.cfg.Collection,
+		"partitionIndex":  s.partitionIndex,
+		"totalPartitions": s.totalPartitions,
 	}}
 	opts := options.Update().SetUpsert(true)
 	_, err := s.checkpoint.UpdateOne(ctx, filter, update, opts)
@@ -627,13 +633,14 @@ func (s *stream) saveScanProgress(ctx context.Context, lastID interface{}) error
 func (s *stream) clearBootstrapState(ctx context.Context) error {
 	checkpointID := s.getCheckpointID()
 	filter := bson.M{"_id": checkpointID}
-	update := bson.M{"$set": bson.M{
-		"bootstrapScanInProgress": false,
-		"bootstrapCompleted":      true,
-		"updatedAt":               time.Now(),
-	}, "$unset": bson.M{
-		"scanLastId": "",
-	}}
+	update := bson.M{
+		"$unset": bson.M{
+			"scanLastId": "",
+		},
+		"$set": bson.M{
+			"updatedAt": time.Now(),
+		},
+	}
 	_, err := s.checkpoint.UpdateOne(ctx, filter, update, options.Update())
 	return err
 }
@@ -642,7 +649,11 @@ func (s *stream) clearBootstrapState(ctx context.Context) error {
 func (s *stream) processAllDocuments(ctx context.Context) error {
 	s.logger.Info("Starting to process all existing documents as insert events")
 
-	_ = s.setBootstrapState(ctx, true)
+	// Bootstrap başlangıcını kaydet
+	if err := s.initBootstrapState(ctx); err != nil {
+		s.logger.Error("Failed to init bootstrap state", zap.Error(err))
+		return err
+	}
 
 	cp, _ := s.loadCheckpointInfo(ctx)
 
@@ -660,7 +671,7 @@ func (s *stream) processAllDocuments(ctx context.Context) error {
 
 	cursor, err := s.collection.Find(ctx, filter)
 	if err != nil {
-		_ = s.setBootstrapState(ctx, false)
+		s.logger.Error("Failed to create cursor for bootstrap scan", zap.Error(err))
 		return err
 	}
 	defer func() {
@@ -701,7 +712,9 @@ func (s *stream) processAllDocuments(ctx context.Context) error {
 
 		if processedCount%1000 == 0 {
 			s.logger.Info("Processed documents", zap.Int("count", processedCount))
-			_ = s.saveScanProgress(ctx, document["_id"])
+			if err := s.saveScanProgress(ctx, document["_id"]); err != nil {
+				s.logger.Error("Failed to save scan progress", zap.Error(err))
+			}
 		}
 
 		select {
@@ -717,7 +730,11 @@ func (s *stream) processAllDocuments(ctx context.Context) error {
 
 	s.logger.Info("Completed processing all existing documents",
 		zap.Int("totalProcessed", processedCount))
-	_ = s.clearBootstrapState(ctx)
+
+	if err := s.clearBootstrapState(ctx); err != nil {
+		s.logger.Error("Failed to clear bootstrap state", zap.Error(err))
+		return err
+	}
 
 	return nil
 }
