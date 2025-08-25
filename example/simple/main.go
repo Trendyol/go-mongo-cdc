@@ -73,14 +73,6 @@ func main() {
 }
 
 func (l *CDCListener) ProcessChangeEvent(lc *changestream.ListenerContext) error {
-	l.logger.Info("Change event received",
-		zap.String("operation", string(lc.Message.OperationType)),
-		zap.String("database", lc.Message.Database),
-		zap.String("collection", lc.Message.Collection),
-		zap.Any("documentId", lc.Message.DocumentID),
-		zap.Time("eventTime", lc.Message.EventTime),
-	)
-
 	switch lc.Message.OperationType {
 	case message.OperationInsert, message.OperationUpdate, message.OperationReplace:
 		if lc.Message.FullDocument != nil {
