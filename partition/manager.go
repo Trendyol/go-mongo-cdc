@@ -1,0 +1,452 @@
+package partition
+
+import (
+	"context"
+	"fmt"
+	"sync"
+	"time"
+
+	"github.com/Trendyol/go-mongo-cdc/mongo/connection"
+	"go.mongodb.org/mongo-driver/bson"
+	"go.mongodb.org/mongo-driver/mongo"
+	"go.mongodb.org/mongo-driver/mongo/options"
+	"go.uber.org/zap"
+)
+
+const (
+	TotalPartitions = 10
+)
+
+type Manager interface {
+	Initialize(ctx context.Context) error
+	AcquirePartitions(ctx context.Context) ([]int, error)
+	ReleasePartitions(ctx context.Context) error
+	RefreshPartitions(ctx context.Context) error
+	GetAssignedPartitions() []int
+	Stop(ctx context.Context) error
+}
+
+type WorkerInfo struct {
+	ID                 string    `bson:"_id"`
+	AssignedPartitions []int     `bson:"assignedPartitions"`
+	LastHeartbeat      time.Time `bson:"lastHeartbeat"`
+	Status             string    `bson:"status"`
+}
+
+type PartitionAssignment struct {
+	PartitionID   int       `bson:"_id"`
+	WorkerID      string    `bson:"workerId"`
+	AssignedAt    time.Time `bson:"assignedAt"`
+	LastHeartbeat time.Time `bson:"lastHeartbeat"`
+}
+
+type manager struct {
+	workerID      string
+	client        connection.Client
+	workersCol    connection.Collection
+	partitionsCol connection.Collection
+	logger        *zap.Logger
+
+	mu                 sync.RWMutex
+	assignedPartitions []int
+	isRunning          bool
+
+	heartbeatInterval time.Duration
+	workerTimeout     time.Duration
+
+	stopCh chan struct{}
+	wg     sync.WaitGroup
+}
+
+func NewManager(workerID string, client connection.Client, logger *zap.Logger) Manager {
+	return &manager{
+		workerID:           workerID,
+		client:             client,
+		logger:             logger,
+		heartbeatInterval:  5 * time.Second,
+		workerTimeout:      30 * time.Second,
+		stopCh:             make(chan struct{}),
+		assignedPartitions: make([]int, 0),
+	}
+}
+
+func (m *manager) Initialize(ctx context.Context) error {
+	db := m.client.Database("cdc_partitions")
+	m.workersCol = db.Collection("workers")
+	m.partitionsCol = db.Collection("partition_assignments")
+
+	if err := m.createIndexes(ctx); err != nil {
+		return fmt.Errorf("failed to create indexes: %w", err)
+	}
+
+	if err := m.registerWorker(ctx); err != nil {
+		return fmt.Errorf("failed to register worker: %w", err)
+	}
+
+	m.isRunning = true
+
+	m.wg.Add(1)
+	go m.heartbeatLoop()
+
+	m.logger.Info("Partition manager initialized",
+		zap.String("workerId", m.workerID),
+		zap.Int("totalPartitions", TotalPartitions))
+
+	return nil
+}
+
+func (m *manager) createIndexes(ctx context.Context) error {
+	workerIndexes := []mongo.IndexModel{
+		{
+			Keys:    bson.D{{Key: "lastHeartbeat", Value: 1}},
+			Options: options.Index().SetName("lastHeartbeat_1"),
+		},
+	}
+
+	partitionIndexes := []mongo.IndexModel{
+		{
+			Keys:    bson.D{{Key: "workerId", Value: 1}},
+			Options: options.Index().SetName("workerId_1"),
+		},
+		{
+			Keys:    bson.D{{Key: "lastHeartbeat", Value: 1}},
+			Options: options.Index().SetName("lastHeartbeat_1"),
+		},
+	}
+
+	if _, err := m.workersCol.Indexes().CreateMany(ctx, workerIndexes); err != nil {
+		return err
+	}
+
+	if _, err := m.partitionsCol.Indexes().CreateMany(ctx, partitionIndexes); err != nil {
+		return err
+	}
+
+	return nil
+}
+
+func (m *manager) registerWorker(ctx context.Context) error {
+	worker := WorkerInfo{
+		ID:                 m.workerID,
+		AssignedPartitions: []int{},
+		LastHeartbeat:      time.Now(),
+		Status:             "active",
+	}
+
+	filter := bson.M{"_id": m.workerID}
+	update := bson.M{"$set": worker}
+	opts := options.Update().SetUpsert(true)
+
+	_, err := m.workersCol.UpdateOne(ctx, filter, update, opts)
+	return err
+}
+
+func (m *manager) AcquirePartitions(ctx context.Context) ([]int, error) {
+	if err := m.cleanupDeadWorkers(ctx); err != nil {
+		m.logger.Error("Failed to cleanup dead workers", zap.Error(err))
+	}
+
+	activeWorkers, err := m.getActiveWorkerCount(ctx)
+	if err != nil {
+		return nil, err
+	}
+
+	if activeWorkers == 0 {
+		activeWorkers = 1
+	}
+
+	partitionsPerWorker := TotalPartitions / activeWorkers
+	extraPartitions := TotalPartitions % activeWorkers
+
+	workerIndex, err := m.getWorkerIndex(ctx)
+	if err != nil {
+		return nil, err
+	}
+
+	startPartition := workerIndex * partitionsPerWorker
+	endPartition := startPartition + partitionsPerWorker
+
+	if workerIndex < extraPartitions {
+		startPartition += workerIndex
+		endPartition += workerIndex + 1
+	} else {
+		startPartition += extraPartitions
+		endPartition += extraPartitions
+	}
+
+	acquiredPartitions := []int{}
+
+	for i := startPartition; i < endPartition && i < TotalPartitions; i++ {
+		if err := m.acquirePartition(ctx, i); err != nil {
+			m.logger.Warn("Failed to acquire partition",
+				zap.Int("partition", i),
+				zap.Error(err))
+			continue
+		}
+		acquiredPartitions = append(acquiredPartitions, i)
+	}
+
+	m.mu.Lock()
+	m.assignedPartitions = acquiredPartitions
+	m.mu.Unlock()
+
+	if err := m.updateWorkerPartitions(ctx, acquiredPartitions); err != nil {
+		m.logger.Error("Failed to update worker partitions", zap.Error(err))
+	}
+
+	m.logger.Info("Acquired partitions",
+		zap.Int("count", len(acquiredPartitions)),
+		zap.Ints("partitions", acquiredPartitions),
+		zap.Int("workerIndex", workerIndex),
+		zap.Int("activeWorkers", activeWorkers))
+
+	return acquiredPartitions, nil
+}
+
+func (m *manager) acquirePartition(ctx context.Context, partitionID int) error {
+	assignment := PartitionAssignment{
+		PartitionID:   partitionID,
+		WorkerID:      m.workerID,
+		AssignedAt:    time.Now(),
+		LastHeartbeat: time.Now(),
+	}
+
+	filter := bson.M{"_id": partitionID}
+	update := bson.M{"$set": assignment}
+	opts := options.Update().SetUpsert(true)
+
+	_, err := m.partitionsCol.UpdateOne(ctx, filter, update, opts)
+	return err
+}
+
+func (m *manager) cleanupDeadWorkers(ctx context.Context) error {
+	cutoff := time.Now().Add(-m.workerTimeout)
+
+	filter := bson.M{"lastHeartbeat": bson.M{"$lt": cutoff}}
+	cursor, err := m.workersCol.Find(ctx, filter)
+	if err != nil {
+		return err
+	}
+	defer cursor.Close(ctx)
+
+	var deadWorkerIDs []string
+	for cursor.Next(ctx) {
+		var worker WorkerInfo
+		if err := cursor.Decode(&worker); err != nil {
+			continue
+		}
+		deadWorkerIDs = append(deadWorkerIDs, worker.ID)
+	}
+
+	if len(deadWorkerIDs) > 0 {
+		partitionFilter := bson.M{"workerId": bson.M{"$in": deadWorkerIDs}}
+		_, err = m.partitionsCol.DeleteMany(ctx, partitionFilter)
+		if err != nil {
+			m.logger.Error("Failed to release dead worker partitions", zap.Error(err))
+		}
+
+		workerFilter := bson.M{"_id": bson.M{"$in": deadWorkerIDs}}
+		_, err = m.workersCol.DeleteMany(ctx, workerFilter)
+		if err != nil {
+			m.logger.Error("Failed to delete dead workers", zap.Error(err))
+		}
+
+		m.logger.Info("Cleaned up dead workers", zap.Strings("workerIds", deadWorkerIDs))
+	}
+
+	return nil
+}
+
+func (m *manager) getActiveWorkerCount(ctx context.Context) (int, error) {
+	cutoff := time.Now().Add(-m.workerTimeout)
+	filter := bson.M{"lastHeartbeat": bson.M{"$gte": cutoff}}
+
+	count, err := m.workersCol.CountDocuments(ctx, filter)
+	if err != nil {
+		return 0, err
+	}
+
+	return int(count), nil
+}
+
+func (m *manager) getWorkerIndex(ctx context.Context) (int, error) {
+	cutoff := time.Now().Add(-m.workerTimeout)
+	filter := bson.M{"lastHeartbeat": bson.M{"$gte": cutoff}}
+	opts := options.Find().SetSort(bson.D{{Key: "_id", Value: 1}})
+
+	cursor, err := m.workersCol.Find(ctx, filter, opts)
+	if err != nil {
+		return -1, err
+	}
+	defer cursor.Close(ctx)
+
+	index := 0
+	for cursor.Next(ctx) {
+		var worker WorkerInfo
+		if err := cursor.Decode(&worker); err != nil {
+			continue
+		}
+
+		if worker.ID == m.workerID {
+			return index, nil
+		}
+		index++
+	}
+
+	return -1, fmt.Errorf("worker not found in active workers list")
+}
+
+func (m *manager) updateWorkerPartitions(ctx context.Context, partitions []int) error {
+	filter := bson.M{"_id": m.workerID}
+	update := bson.M{
+		"$set": bson.M{
+			"assignedPartitions": partitions,
+			"lastHeartbeat":      time.Now(),
+		},
+	}
+
+	_, err := m.workersCol.UpdateOne(ctx, filter, update)
+	return err
+}
+
+func (m *manager) RefreshPartitions(ctx context.Context) error {
+	_, err := m.AcquirePartitions(ctx)
+	return err
+}
+
+func (m *manager) ReleasePartitions(ctx context.Context) error {
+	m.mu.RLock()
+	partitions := make([]int, len(m.assignedPartitions))
+	copy(partitions, m.assignedPartitions)
+	m.mu.RUnlock()
+
+	if len(partitions) == 0 {
+		return nil
+	}
+
+	filter := bson.M{"workerId": m.workerID}
+	_, err := m.partitionsCol.DeleteMany(ctx, filter)
+	if err != nil {
+		return err
+	}
+
+	m.mu.Lock()
+	m.assignedPartitions = []int{}
+	m.mu.Unlock()
+
+	return m.updateWorkerPartitions(ctx, []int{})
+}
+
+func (m *manager) GetAssignedPartitions() []int {
+	m.mu.RLock()
+	defer m.mu.RUnlock()
+
+	result := make([]int, len(m.assignedPartitions))
+	copy(result, m.assignedPartitions)
+	return result
+}
+
+func (m *manager) heartbeatLoop() {
+	defer m.wg.Done()
+
+	ticker := time.NewTicker(m.heartbeatInterval)
+	defer ticker.Stop()
+
+	for {
+		select {
+		case <-m.stopCh:
+			return
+		case <-ticker.C:
+			ctx, cancel := context.WithTimeout(context.Background(), 5*time.Second)
+
+			if err := m.sendHeartbeat(ctx); err != nil {
+				m.logger.Error("Failed to send heartbeat", zap.Error(err))
+			}
+
+			if err := m.updatePartitionHeartbeats(ctx); err != nil {
+				m.logger.Error("Failed to update partition heartbeats", zap.Error(err))
+			}
+
+			cancel()
+		}
+	}
+}
+
+func (m *manager) sendHeartbeat(ctx context.Context) error {
+	filter := bson.M{"_id": m.workerID}
+	update := bson.M{
+		"$set": bson.M{
+			"lastHeartbeat": time.Now(),
+		},
+	}
+
+	result, err := m.workersCol.UpdateOne(ctx, filter, update)
+	if err != nil {
+		return err
+	}
+
+	if result.MatchedCount() == 0 {
+		return m.registerWorker(ctx)
+	}
+
+	return nil
+}
+
+func (m *manager) updatePartitionHeartbeats(ctx context.Context) error {
+	m.mu.RLock()
+	partitions := m.assignedPartitions
+	m.mu.RUnlock()
+
+	if len(partitions) == 0 {
+		return nil
+	}
+
+	filter := bson.M{
+		"_id":      bson.M{"$in": partitions},
+		"workerId": m.workerID,
+	}
+	update := bson.M{
+		"$set": bson.M{
+			"lastHeartbeat": time.Now(),
+		},
+	}
+
+	_, err := m.partitionsCol.UpdateMany(ctx, filter, update)
+	return err
+}
+
+func (m *manager) Stop(ctx context.Context) error {
+	m.mu.Lock()
+	if !m.isRunning {
+		m.mu.Unlock()
+		return nil
+	}
+	m.isRunning = false
+	m.mu.Unlock()
+
+	close(m.stopCh)
+
+	done := make(chan struct{})
+	go func() {
+		m.wg.Wait()
+		close(done)
+	}()
+
+	select {
+	case <-done:
+	case <-time.After(10 * time.Second):
+		m.logger.Warn("Timeout waiting for heartbeat loop to stop")
+	}
+
+	if err := m.ReleasePartitions(ctx); err != nil {
+		m.logger.Error("Failed to release partitions during stop", zap.Error(err))
+	}
+
+	filter := bson.M{"_id": m.workerID}
+	if _, err := m.workersCol.DeleteOne(ctx, filter); err != nil {
+		m.logger.Error("Failed to unregister worker", zap.Error(err))
+	}
+
+	m.logger.Info("Partition manager stopped")
+	return nil
+}

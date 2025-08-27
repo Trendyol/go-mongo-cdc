@@ -25,7 +25,7 @@ type Config struct {
 	Metric       MetricConfig     `json:"metric" yaml:"metric"`
 	Logger       LoggerConfig     `json:"logger" yaml:"logger"`
 	Checkpoint   CheckpointConfig `json:"checkpoint" yaml:"checkpoint"`
-	Membership   MembershipConfig `json:"membership" yaml:"membership"`
+	Partition    PartitionConfig  `json:"partition" yaml:"partition"`
 }
 
 type MetricConfig struct {
@@ -42,11 +42,11 @@ type CheckpointConfig struct {
 	SaveInterval time.Duration `json:"saveInterval" yaml:"saveInterval"`
 }
 
-type MembershipConfig struct {
-	HeartbeatInterval  time.Duration     `json:"heartbeatInterval" yaml:"heartbeatInterval"`
-	HealthCheckTimeout time.Duration     `json:"healthCheckTimeout" yaml:"healthCheckTimeout"`
-	Config             map[string]string `json:"config" yaml:"config"`
-	ChunkBased         bool              `json:"chunkBased" yaml:"chunkBased"`
+type PartitionConfig struct {
+	HeartbeatInterval time.Duration `json:"heartbeatInterval" yaml:"heartbeatInterval"`
+	WorkerTimeout     time.Duration `json:"workerTimeout" yaml:"workerTimeout"`
+	PartitionDatabase string        `json:"partitionDatabase" yaml:"partitionDatabase"`
+	RefreshInterval   time.Duration `json:"refreshInterval" yaml:"refreshInterval"`
 }
 
 func (c *Config) SetDefault() {
@@ -69,14 +69,17 @@ func (c *Config) SetDefault() {
 		c.Checkpoint.SaveInterval = 30 * time.Second
 	}
 
-	if c.Membership.HeartbeatInterval == 0 {
-		c.Membership.HeartbeatInterval = 10 * time.Second
+	if c.Partition.HeartbeatInterval == 0 {
+		c.Partition.HeartbeatInterval = 5 * time.Second
 	}
-	if c.Membership.HealthCheckTimeout == 0 {
-		c.Membership.HealthCheckTimeout = 30 * time.Second
+	if c.Partition.WorkerTimeout == 0 {
+		c.Partition.WorkerTimeout = 30 * time.Second
 	}
-	if c.Membership.Config == nil {
-		c.Membership.Config = make(map[string]string)
+	if c.Partition.PartitionDatabase == "" {
+		c.Partition.PartitionDatabase = "cdc_partitions"
+	}
+	if c.Partition.RefreshInterval == 0 {
+		c.Partition.RefreshInterval = 30 * time.Second
 	}
 
 }

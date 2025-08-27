@@ -8,8 +8,8 @@ import (
 
 	cdc "github.com/Trendyol/go-mongo-cdc"
 	"github.com/Trendyol/go-mongo-cdc/config"
-	"github.com/Trendyol/go-mongo-cdc/mongo/changestream"
 	"github.com/Trendyol/go-mongo-cdc/mongo/message"
+	"github.com/Trendyol/go-mongo-cdc/stream"
 	"go.uber.org/zap"
 	"go.uber.org/zap/zapcore"
 )
@@ -41,16 +41,14 @@ func main() {
 			Port: 8080,
 		},
 		Checkpoint: config.CheckpointConfig{
-			Collection:   "checkpoint-SellerContents",
+			Collection:   "checkpoint",
 			SaveInterval: 60 * time.Second,
 		},
-		Membership: config.MembershipConfig{
-			HeartbeatInterval:  30 * time.Second,
-			HealthCheckTimeout: 60 * time.Second,
-			ChunkBased:         false,
-			Config: map[string]string{
-				"shardKey": "sellerId",
-			},
+		Partition: config.PartitionConfig{
+			HeartbeatInterval: 5 * time.Second,
+			WorkerTimeout:     30 * time.Second,
+			PartitionDatabase: "cdc_partitions",
+			RefreshInterval:   30 * time.Second,
 		},
 		Logger: config.LoggerConfig{
 			Logger: logger,
@@ -72,18 +70,20 @@ func main() {
 	connector.Start(ctx)
 }
 
-func (l *CDCListener) ProcessChangeEvent(lc *changestream.ListenerContext) error {
+func (l *CDCListener) ProcessChangeEvent(lc *stream.ListenerContext) error {
 	switch lc.Message.OperationType {
 	case message.OperationInsert, message.OperationUpdate, message.OperationReplace:
 		if lc.Message.FullDocument != nil {
 			l.logger.Info("Document changed",
 				zap.String("operation", string(lc.Message.OperationType)),
 				zap.Any("document", lc.Message.FullDocument),
+				zap.Int("partitionId", lc.PartitionID),
 			)
 		}
 	case message.OperationDelete:
 		l.logger.Info("Document deleted",
 			zap.Any("documentId", lc.Message.DocumentID),
+			zap.Int("partitionId", lc.PartitionID),
 		)
 	}
 
