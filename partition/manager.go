@@ -25,6 +25,7 @@ type Manager interface {
 	RefreshPartitions(ctx context.Context) error
 	GetAssignedPartitions() []int
 	Stop(ctx context.Context) error
+	SetPartitionsChangedCallback(callback func(newPartitions []int))
 }
 
 type WorkerInfo struct {
@@ -61,6 +62,9 @@ type manager struct {
 
 	// Worker change monitoring
 	workerChangeStream connection.ChangeStream
+
+	// Callback for partition changes to manage streams
+	onPartitionsChanged func(newPartitions []int)
 }
 
 func NewManager(workerID string, client connection.Client, cfg config.PartitionConfig, logger *zap.Logger) Manager {
@@ -319,8 +323,21 @@ func (m *manager) updateWorkerPartitions(ctx context.Context, partitions []int) 
 }
 
 func (m *manager) RefreshPartitions(ctx context.Context) error {
-	_, err := m.AcquirePartitions(ctx)
-	return err
+	newPartitions, err := m.AcquirePartitions(ctx)
+	if err != nil {
+		return err
+	}
+
+	// Notify about partition changes to manage streams
+	if m.onPartitionsChanged != nil {
+		m.onPartitionsChanged(newPartitions)
+	}
+
+	return nil
+}
+
+func (m *manager) SetPartitionsChangedCallback(callback func(newPartitions []int)) {
+	m.onPartitionsChanged = callback
 }
 
 func (m *manager) ReleasePartitions(ctx context.Context) error {
@@ -432,6 +449,8 @@ func (m *manager) monitorWorkerChanges() {
 			m.logger.Info("Worker change stream created successfully")
 
 			for changeStream.Next(context.Background()) {
+				m.logger.Info("Worker change detected")
+
 				var changeDoc bson.M
 				if err := changeStream.Decode(&changeDoc); err != nil {
 					m.logger.Error("Failed to decode worker change document", zap.Error(err))
@@ -443,11 +462,11 @@ func (m *manager) monitorWorkerChanges() {
 					zap.String("operation", operationType))
 
 				// Wait for the change to be fully propagated and new worker to be ready
-				time.Sleep(50 * time.Millisecond)
+				//time.Sleep(50 * time.Millisecond)
 
 				// Refresh partitions immediately when worker count changes
 				ctx, cancel := context.WithTimeout(context.Background(), 15*time.Second)
-				newPartitions, err := m.AcquirePartitions(ctx)
+				err := m.RefreshPartitions(ctx)
 				cancel()
 
 				if err != nil {
@@ -456,9 +475,7 @@ func (m *manager) monitorWorkerChanges() {
 						zap.String("operation", operationType))
 				} else {
 					m.logger.Info("Successfully refreshed partitions after worker change",
-						zap.String("operation", operationType),
-						zap.Int("partitionCount", len(newPartitions)),
-						zap.Ints("assignedPartitions", newPartitions))
+						zap.String("operation", operationType))
 				}
 			}
 
