@@ -73,7 +73,7 @@ func NewPartitionStream(
 	database := client.Database(cfg.Database)
 	collection := database.Collection(cfg.Collection)
 
-	partitionManager := partition.NewManager(workerID, client, logger)
+	partitionManager := partition.NewManager(workerID, client, cfg.Partition, logger)
 	checkpointManager := checkpoint.NewManager(client, cfg.Database, cfg.Collection, logger)
 
 	return &partitionStream{
@@ -101,9 +101,6 @@ func (ps *partitionStream) Start(ctx context.Context) error {
 		return fmt.Errorf("failed to initialize partition manager: %w", err)
 	}
 
-	ps.logger.Info("Waiting for initial partition assignment...")
-	time.Sleep(5 * time.Second)
-
 	// Initial partition assignment
 	if err := ps.refreshPartitions(); err != nil {
 		ps.logger.Error("Failed to acquire initial partitions", zap.Error(err))
@@ -119,7 +116,7 @@ func (ps *partitionStream) Start(ctx context.Context) error {
 func (ps *partitionStream) partitionMonitor() {
 	defer ps.wg.Done()
 
-	ticker := time.NewTicker(30 * time.Second)
+	ticker := time.NewTicker(ps.cfg.Partition.RefreshInterval)
 	defer ticker.Stop()
 
 	for {
@@ -521,6 +518,34 @@ func (ps *partitionStream) processEvent(worker *streamWorker, event message.Chan
 	}
 
 	ps.updateMetrics(msg.OperationType)
+
+	/*// Double-check partition assignment during event processing
+	ps.streamsMutex.RLock()
+	isStillAssigned := false
+	for partitionID := range ps.activeStreams {
+		if partitionID == worker.partitionID {
+			isStillAssigned = true
+			break
+		}
+	}
+	ps.streamsMutex.RUnlock()
+
+	if !isStillAssigned {
+		ps.logger.Warn("Received event for unassigned partition - this should not happen!",
+			zap.Int("partitionId", worker.partitionID),
+			zap.String("operation", string(msg.OperationType)),
+			zap.Any("documentId", msg.DocumentID),
+			zap.Ints("activePartitions", func() []int {
+				ps.streamsMutex.RLock()
+				defer ps.streamsMutex.RUnlock()
+				partitions := make([]int, 0, len(ps.activeStreams))
+				for pid := range ps.activeStreams {
+					partitions = append(partitions, pid)
+				}
+				return partitions
+			}()))
+		return nil
+	}*/
 
 	listenerCtx := &ListenerContext{
 		Message:     msg,

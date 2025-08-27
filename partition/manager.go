@@ -6,6 +6,7 @@ import (
 	"sync"
 	"time"
 
+	"github.com/Trendyol/go-mongo-cdc/config"
 	"github.com/Trendyol/go-mongo-cdc/mongo/connection"
 	"go.mongodb.org/mongo-driver/bson"
 	"go.mongodb.org/mongo-driver/mongo"
@@ -46,6 +47,7 @@ type manager struct {
 	workersCol    connection.Collection
 	partitionsCol connection.Collection
 	logger        *zap.Logger
+	config        config.PartitionConfig
 
 	mu                 sync.RWMutex
 	assignedPartitions []int
@@ -56,22 +58,26 @@ type manager struct {
 
 	stopCh chan struct{}
 	wg     sync.WaitGroup
+
+	// Worker change monitoring
+	workerChangeStream connection.ChangeStream
 }
 
-func NewManager(workerID string, client connection.Client, logger *zap.Logger) Manager {
+func NewManager(workerID string, client connection.Client, cfg config.PartitionConfig, logger *zap.Logger) Manager {
 	return &manager{
 		workerID:           workerID,
 		client:             client,
 		logger:             logger,
-		heartbeatInterval:  5 * time.Second,
-		workerTimeout:      30 * time.Second,
+		config:             cfg,
+		heartbeatInterval:  cfg.HeartbeatInterval,
+		workerTimeout:      cfg.WorkerTimeout,
 		stopCh:             make(chan struct{}),
 		assignedPartitions: make([]int, 0),
 	}
 }
 
 func (m *manager) Initialize(ctx context.Context) error {
-	db := m.client.Database("cdc_partitions")
+	db := m.client.Database(m.config.PartitionDatabase)
 	m.workersCol = db.Collection("workers")
 	m.partitionsCol = db.Collection("partition_assignments")
 
@@ -87,6 +93,9 @@ func (m *manager) Initialize(ctx context.Context) error {
 
 	m.wg.Add(1)
 	go m.heartbeatLoop()
+
+	m.wg.Add(1)
+	go m.monitorWorkerChanges()
 
 	m.logger.Info("Partition manager initialized",
 		zap.String("workerId", m.workerID),
@@ -368,6 +377,100 @@ func (m *manager) heartbeatLoop() {
 			}
 
 			cancel()
+		}
+	}
+}
+
+func (m *manager) monitorWorkerChanges() {
+	defer m.wg.Done()
+
+	m.logger.Info("Starting worker change monitoring")
+
+	pipeline := []bson.D{
+		{
+			{Key: "$match", Value: bson.D{
+				{Key: "operationType", Value: bson.D{
+					{Key: "$in", Value: []string{"insert", "delete"}},
+				}},
+			}},
+		},
+	}
+
+	var retryCount int
+	maxRetries := 5
+
+	for {
+		select {
+		case <-m.stopCh:
+			m.logger.Info("Stopping worker change monitoring")
+			if m.workerChangeStream != nil {
+				ctx, cancel := context.WithTimeout(context.Background(), 5*time.Second)
+				m.workerChangeStream.Close(ctx)
+				cancel()
+			}
+			return
+		default:
+			changeStream, err := m.workersCol.Watch(context.Background(), pipeline)
+			if err != nil {
+				retryCount++
+				m.logger.Error("Failed to create worker change stream",
+					zap.Error(err),
+					zap.Int("retryCount", retryCount))
+
+				if retryCount >= maxRetries {
+					m.logger.Fatal("Max retries reached for worker change stream")
+					return
+				}
+
+				time.Sleep(time.Duration(retryCount) * 5 * time.Second)
+				continue
+			}
+
+			m.workerChangeStream = changeStream
+			retryCount = 0
+
+			m.logger.Info("Worker change stream created successfully")
+
+			for changeStream.Next(context.Background()) {
+				var changeDoc bson.M
+				if err := changeStream.Decode(&changeDoc); err != nil {
+					m.logger.Error("Failed to decode worker change document", zap.Error(err))
+					continue
+				}
+
+				operationType := changeDoc["operationType"].(string)
+				m.logger.Debug("Worker change detected",
+					zap.String("operation", operationType))
+
+				// Wait for the change to be fully propagated and new worker to be ready
+				time.Sleep(50 * time.Millisecond)
+
+				// Refresh partitions immediately when worker count changes
+				ctx, cancel := context.WithTimeout(context.Background(), 15*time.Second)
+				newPartitions, err := m.AcquirePartitions(ctx)
+				cancel()
+
+				if err != nil {
+					m.logger.Error("Failed to refresh partitions after worker change",
+						zap.Error(err),
+						zap.String("operation", operationType))
+				} else {
+					m.logger.Info("Successfully refreshed partitions after worker change",
+						zap.String("operation", operationType),
+						zap.Int("partitionCount", len(newPartitions)),
+						zap.Ints("assignedPartitions", newPartitions))
+				}
+			}
+
+			if err := changeStream.Err(); err != nil {
+				m.logger.Error("Worker change stream error", zap.Error(err))
+			}
+
+			changeStream.Close(context.Background())
+			m.workerChangeStream = nil
+
+			m.logger.Debug("Worker change stream closed, will retry")
+			time.Sleep(5 * time.Second)
 		}
 	}
 }
