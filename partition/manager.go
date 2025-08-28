@@ -15,7 +15,7 @@ import (
 )
 
 const (
-	TotalPartitions = 10
+	TotalPartitions = 100
 )
 
 type Manager interface {
@@ -23,16 +23,15 @@ type Manager interface {
 	AcquirePartitions(ctx context.Context) ([]int, error)
 	ReleasePartitions(ctx context.Context) error
 	RefreshPartitions(ctx context.Context) error
-	GetAssignedPartitions() []int
-	Stop(ctx context.Context) error
 	SetPartitionsChangedCallback(callback func(newPartitions []int))
+	//GetAssignedPartitions() []int
+	Stop(ctx context.Context) error
 }
 
 type WorkerInfo struct {
 	ID                 string    `bson:"_id"`
 	AssignedPartitions []int     `bson:"assignedPartitions"`
 	LastHeartbeat      time.Time `bson:"lastHeartbeat"`
-	Status             string    `bson:"status"`
 }
 
 type PartitionAssignment struct {
@@ -54,9 +53,6 @@ type manager struct {
 	assignedPartitions []int
 	isRunning          bool
 
-	heartbeatInterval time.Duration
-	workerTimeout     time.Duration
-
 	stopCh chan struct{}
 	wg     sync.WaitGroup
 
@@ -73,8 +69,6 @@ func NewManager(workerID string, client connection.Client, cfg config.PartitionC
 		client:             client,
 		logger:             logger,
 		config:             cfg,
-		heartbeatInterval:  cfg.HeartbeatInterval,
-		workerTimeout:      cfg.WorkerTimeout,
 		stopCh:             make(chan struct{}),
 		assignedPartitions: make([]int, 0),
 	}
@@ -143,7 +137,6 @@ func (m *manager) registerWorker(ctx context.Context) error {
 		ID:                 m.workerID,
 		AssignedPartitions: []int{},
 		LastHeartbeat:      time.Now(),
-		Status:             "active",
 	}
 
 	filter := bson.M{"_id": m.workerID}
@@ -152,6 +145,169 @@ func (m *manager) registerWorker(ctx context.Context) error {
 
 	_, err := m.workersCol.UpdateOne(ctx, filter, update, opts)
 	return err
+}
+
+func (m *manager) heartbeatLoop() {
+	defer m.wg.Done()
+
+	ticker := time.NewTicker(m.config.HeartbeatInterval)
+	defer ticker.Stop()
+
+	for {
+		select {
+		case <-m.stopCh:
+			return
+		case <-ticker.C:
+			ctx, cancel := context.WithTimeout(context.Background(), 5*time.Second)
+
+			if err := m.sendHeartbeat(ctx); err != nil {
+				m.logger.Error("Failed to send heartbeat", zap.Error(err))
+			}
+
+			if err := m.updatePartitionHeartbeats(ctx); err != nil {
+				m.logger.Error("Failed to update partition heartbeats", zap.Error(err))
+			}
+
+			cancel()
+		}
+	}
+}
+
+func (m *manager) sendHeartbeat(ctx context.Context) error {
+	filter := bson.M{"_id": m.workerID}
+	update := bson.M{
+		"$set": bson.M{
+			"lastHeartbeat": time.Now(),
+		},
+	}
+
+	result, err := m.workersCol.UpdateOne(ctx, filter, update)
+	if err != nil {
+		return err
+	}
+
+	if result.MatchedCount() == 0 {
+		return m.registerWorker(ctx)
+	}
+
+	return nil
+}
+
+// TODO: worker heartbeat verebilirken partitionun veremedigi case olabilir mi?
+func (m *manager) updatePartitionHeartbeats(ctx context.Context) error {
+	m.mu.RLock()
+	partitions := m.assignedPartitions
+	m.mu.RUnlock()
+
+	if len(partitions) == 0 {
+		return nil
+	}
+
+	filter := bson.M{
+		"_id":      bson.M{"$in": partitions},
+		"workerId": m.workerID,
+	}
+	update := bson.M{
+		"$set": bson.M{
+			"lastHeartbeat": time.Now(),
+		},
+	}
+
+	_, err := m.partitionsCol.UpdateMany(ctx, filter, update)
+	return err
+}
+
+// TODO: burası degisiklikleri 5 saniye falan gec dinliyor bu neden arastırılacak
+func (m *manager) monitorWorkerChanges() {
+	defer m.wg.Done()
+
+	m.logger.Info("Starting worker change monitoring")
+
+	pipeline := []bson.D{
+		{
+			{Key: "$match", Value: bson.D{
+				{Key: "operationType", Value: bson.D{
+					{Key: "$in", Value: []string{"insert", "delete"}},
+				}},
+			}},
+		},
+	}
+
+	var retryCount int
+	maxRetries := 5
+
+	for {
+		select {
+		case <-m.stopCh:
+			m.logger.Info("Stopping worker change monitoring")
+			if m.workerChangeStream != nil {
+				ctx, cancel := context.WithTimeout(context.Background(), 5*time.Second)
+				m.workerChangeStream.Close(ctx)
+				cancel()
+			}
+			return
+		default:
+			changeStream, err := m.workersCol.Watch(context.Background(), pipeline)
+			if err != nil {
+				retryCount++
+				m.logger.Error("Failed to create worker change stream",
+					zap.Error(err),
+					zap.Int("retryCount", retryCount))
+
+				if retryCount >= maxRetries {
+					m.logger.Fatal("Max retries reached for worker change stream")
+					return
+				}
+
+				time.Sleep(time.Duration(retryCount) * 2 * time.Second)
+				continue
+			}
+
+			m.workerChangeStream = changeStream
+			retryCount = 0
+
+			m.logger.Info("Worker change stream created successfully")
+
+			for changeStream.Next(context.Background()) {
+				var changeDoc bson.M
+				if err := changeStream.Decode(&changeDoc); err != nil {
+					m.logger.Error("Failed to decode worker change document", zap.Error(err))
+					continue
+				}
+
+				operationType := changeDoc["operationType"].(string)
+				m.logger.Debug("Worker change detected",
+					zap.String("operation", operationType))
+
+				// TODO: buna gerek var mı?
+				// Wait for the change to be fully propagated and new worker to be ready
+				//time.Sleep(50 * time.Millisecond)
+
+				ctx, cancel := context.WithTimeout(context.Background(), 15*time.Second)
+				err := m.RefreshPartitions(ctx)
+				cancel()
+
+				if err != nil {
+					m.logger.Error("Failed to refresh partitions after worker change",
+						zap.Error(err),
+						zap.String("operation", operationType))
+				} else {
+					m.logger.Info("Successfully refreshed partitions after worker change",
+						zap.String("operation", operationType))
+				}
+			}
+
+			if err := changeStream.Err(); err != nil {
+				m.logger.Error("Worker change stream error", zap.Error(err))
+			}
+
+			changeStream.Close(context.Background())
+			m.workerChangeStream = nil
+
+			m.logger.Debug("Worker change stream closed, will retry")
+			time.Sleep(5 * time.Second)
+		}
+	}
 }
 
 func (m *manager) AcquirePartitions(ctx context.Context) ([]int, error) {
@@ -164,6 +320,7 @@ func (m *manager) AcquirePartitions(ctx context.Context) ([]int, error) {
 		return nil, err
 	}
 
+	//TODO: activeWorker bulamıyorsam default 1 mi yapmalıyım panic mi atmalıyım?
 	if activeWorkers == 0 {
 		activeWorkers = 1
 	}
@@ -187,7 +344,7 @@ func (m *manager) AcquirePartitions(ctx context.Context) ([]int, error) {
 		endPartition += extraPartitions
 	}
 
-	acquiredPartitions := []int{}
+	var acquiredPartitions []int
 
 	for i := startPartition; i < endPartition && i < TotalPartitions; i++ {
 		if err := m.acquirePartition(ctx, i); err != nil {
@@ -216,25 +373,11 @@ func (m *manager) AcquirePartitions(ctx context.Context) ([]int, error) {
 	return acquiredPartitions, nil
 }
 
-func (m *manager) acquirePartition(ctx context.Context, partitionID int) error {
-	assignment := PartitionAssignment{
-		PartitionID:   partitionID,
-		WorkerID:      m.workerID,
-		AssignedAt:    time.Now(),
-		LastHeartbeat: time.Now(),
-	}
-
-	filter := bson.M{"_id": partitionID}
-	update := bson.M{"$set": assignment}
-	opts := options.Update().SetUpsert(true)
-
-	_, err := m.partitionsCol.UpdateOne(ctx, filter, update, opts)
-	return err
-}
-
 func (m *manager) cleanupDeadWorkers(ctx context.Context) error {
-	cutoff := time.Now().Add(-m.workerTimeout)
+	cutoff := time.Now().Add(-m.config.WorkerTimeout)
 
+	//TODO: sadece workers tablosuna filter atıyor eger dead worker
+	//bulursa partition ve workeri temizliyor o zaman neden 2 tablo icin de herthbeat tutuyoruz
 	filter := bson.M{"lastHeartbeat": bson.M{"$lt": cutoff}}
 	cursor, err := m.workersCol.Find(ctx, filter)
 	if err != nil {
@@ -271,9 +414,10 @@ func (m *manager) cleanupDeadWorkers(ctx context.Context) error {
 }
 
 func (m *manager) getActiveWorkerCount(ctx context.Context) (int, error) {
-	cutoff := time.Now().Add(-m.workerTimeout)
+	cutoff := time.Now().Add(-m.config.WorkerTimeout)
 	filter := bson.M{"lastHeartbeat": bson.M{"$gte": cutoff}}
 
+	//TODO: zaten cleanupDeadWorkers de bunları temizliyorum neden tekrar filter yapıyorum bir sekilde anlık hata alırsa safe olmak icin mi?
 	count, err := m.workersCol.CountDocuments(ctx, filter)
 	if err != nil {
 		return 0, err
@@ -283,7 +427,8 @@ func (m *manager) getActiveWorkerCount(ctx context.Context) (int, error) {
 }
 
 func (m *manager) getWorkerIndex(ctx context.Context) (int, error) {
-	cutoff := time.Now().Add(-m.workerTimeout)
+	cutoff := time.Now().Add(-m.config.WorkerTimeout)
+	//TODO: zaten cleanupDeadWorkers de bunları temizliyorum neden tekrar filter yapıyorum bir sekilde anlık hata alırsa safe olmak icin mi?
 	filter := bson.M{"lastHeartbeat": bson.M{"$gte": cutoff}}
 	opts := options.Find().SetSort(bson.D{{Key: "_id", Value: 1}})
 
@@ -306,7 +451,24 @@ func (m *manager) getWorkerIndex(ctx context.Context) (int, error) {
 		index++
 	}
 
+	//TODO: worker not found ise panic?
 	return -1, fmt.Errorf("worker not found in active workers list")
+}
+
+func (m *manager) acquirePartition(ctx context.Context, partitionID int) error {
+	assignment := PartitionAssignment{
+		PartitionID:   partitionID,
+		WorkerID:      m.workerID,
+		AssignedAt:    time.Now(),
+		LastHeartbeat: time.Now(),
+	}
+
+	filter := bson.M{"_id": partitionID}
+	update := bson.M{"$set": assignment}
+	opts := options.Update().SetUpsert(true)
+
+	_, err := m.partitionsCol.UpdateOne(ctx, filter, update, opts)
+	return err
 }
 
 func (m *manager) updateWorkerPartitions(ctx context.Context, partitions []int) error {
@@ -363,177 +525,14 @@ func (m *manager) ReleasePartitions(ctx context.Context) error {
 	return m.updateWorkerPartitions(ctx, []int{})
 }
 
-func (m *manager) GetAssignedPartitions() []int {
+/*func (m *manager) GetAssignedPartitions() []int {
 	m.mu.RLock()
 	defer m.mu.RUnlock()
 
 	result := make([]int, len(m.assignedPartitions))
 	copy(result, m.assignedPartitions)
 	return result
-}
-
-func (m *manager) heartbeatLoop() {
-	defer m.wg.Done()
-
-	ticker := time.NewTicker(m.heartbeatInterval)
-	defer ticker.Stop()
-
-	for {
-		select {
-		case <-m.stopCh:
-			return
-		case <-ticker.C:
-			ctx, cancel := context.WithTimeout(context.Background(), 5*time.Second)
-
-			if err := m.sendHeartbeat(ctx); err != nil {
-				m.logger.Error("Failed to send heartbeat", zap.Error(err))
-			}
-
-			if err := m.updatePartitionHeartbeats(ctx); err != nil {
-				m.logger.Error("Failed to update partition heartbeats", zap.Error(err))
-			}
-
-			cancel()
-		}
-	}
-}
-
-func (m *manager) monitorWorkerChanges() {
-	defer m.wg.Done()
-
-	m.logger.Info("Starting worker change monitoring")
-
-	pipeline := []bson.D{
-		{
-			{Key: "$match", Value: bson.D{
-				{Key: "operationType", Value: bson.D{
-					{Key: "$in", Value: []string{"insert", "delete"}},
-				}},
-			}},
-		},
-	}
-
-	var retryCount int
-	maxRetries := 5
-
-	for {
-		select {
-		case <-m.stopCh:
-			m.logger.Info("Stopping worker change monitoring")
-			if m.workerChangeStream != nil {
-				ctx, cancel := context.WithTimeout(context.Background(), 5*time.Second)
-				m.workerChangeStream.Close(ctx)
-				cancel()
-			}
-			return
-		default:
-			changeStream, err := m.workersCol.Watch(context.Background(), pipeline)
-			if err != nil {
-				retryCount++
-				m.logger.Error("Failed to create worker change stream",
-					zap.Error(err),
-					zap.Int("retryCount", retryCount))
-
-				if retryCount >= maxRetries {
-					m.logger.Fatal("Max retries reached for worker change stream")
-					return
-				}
-
-				time.Sleep(time.Duration(retryCount) * 5 * time.Second)
-				continue
-			}
-
-			m.workerChangeStream = changeStream
-			retryCount = 0
-
-			m.logger.Info("Worker change stream created successfully")
-
-			for changeStream.Next(context.Background()) {
-				m.logger.Info("Worker change detected")
-
-				var changeDoc bson.M
-				if err := changeStream.Decode(&changeDoc); err != nil {
-					m.logger.Error("Failed to decode worker change document", zap.Error(err))
-					continue
-				}
-
-				operationType := changeDoc["operationType"].(string)
-				m.logger.Debug("Worker change detected",
-					zap.String("operation", operationType))
-
-				// Wait for the change to be fully propagated and new worker to be ready
-				//time.Sleep(50 * time.Millisecond)
-
-				// Refresh partitions immediately when worker count changes
-				ctx, cancel := context.WithTimeout(context.Background(), 15*time.Second)
-				err := m.RefreshPartitions(ctx)
-				cancel()
-
-				if err != nil {
-					m.logger.Error("Failed to refresh partitions after worker change",
-						zap.Error(err),
-						zap.String("operation", operationType))
-				} else {
-					m.logger.Info("Successfully refreshed partitions after worker change",
-						zap.String("operation", operationType))
-				}
-			}
-
-			if err := changeStream.Err(); err != nil {
-				m.logger.Error("Worker change stream error", zap.Error(err))
-			}
-
-			changeStream.Close(context.Background())
-			m.workerChangeStream = nil
-
-			m.logger.Debug("Worker change stream closed, will retry")
-			time.Sleep(5 * time.Second)
-		}
-	}
-}
-
-func (m *manager) sendHeartbeat(ctx context.Context) error {
-	filter := bson.M{"_id": m.workerID}
-	update := bson.M{
-		"$set": bson.M{
-			"lastHeartbeat": time.Now(),
-		},
-	}
-
-	result, err := m.workersCol.UpdateOne(ctx, filter, update)
-	if err != nil {
-		return err
-	}
-
-	if result.MatchedCount() == 0 {
-		return m.registerWorker(ctx)
-	}
-
-	return nil
-}
-
-func (m *manager) updatePartitionHeartbeats(ctx context.Context) error {
-	m.mu.RLock()
-	partitions := m.assignedPartitions
-	m.mu.RUnlock()
-
-	if len(partitions) == 0 {
-		return nil
-	}
-
-	filter := bson.M{
-		"_id":      bson.M{"$in": partitions},
-		"workerId": m.workerID,
-	}
-	update := bson.M{
-		"$set": bson.M{
-			"lastHeartbeat": time.Now(),
-		},
-	}
-
-	_, err := m.partitionsCol.UpdateMany(ctx, filter, update)
-	return err
-}
+}*/
 
 func (m *manager) Stop(ctx context.Context) error {
 	m.mu.Lock()
@@ -562,6 +561,7 @@ func (m *manager) Stop(ctx context.Context) error {
 		m.logger.Error("Failed to release partitions during stop", zap.Error(err))
 	}
 
+	//TODO: ReleasePartitions icerisinde worker'in partitionlarını empty slice yapıyoruz zaten hemen sonrasında siliyoruz gerek var mı?
 	filter := bson.M{"_id": m.workerID}
 	if _, err := m.workersCol.DeleteOne(ctx, filter); err != nil {
 		m.logger.Error("Failed to unregister worker", zap.Error(err))

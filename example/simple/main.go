@@ -36,7 +36,6 @@ func main() {
 		Port:       27017,
 		Database:   "exampleDB",
 		Collection: "exampleCollection",
-		DebugMode:  true,
 		Metric: config.MetricConfig{
 			Port: 8080,
 		},

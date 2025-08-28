@@ -101,7 +101,7 @@ func (ps *partitionStream) Start(ctx context.Context) error {
 		return fmt.Errorf("failed to initialize partition manager: %w", err)
 	}
 
-	// Set callback for partition changes
+	//TODO: burası daha iyi nasıl yapılabilir?
 	ps.partitionManager.SetPartitionsChangedCallback(func(newPartitions []int) {
 		ps.streamsMutex.Lock()
 		defer ps.streamsMutex.Unlock()
@@ -140,7 +140,7 @@ func (ps *partitionStream) Start(ctx context.Context) error {
 			}
 		}
 
-		ps.logger.Info("Active partitions updated",
+		ps.logger.Debug("Active partitions updated",
 			zap.Int("count", len(ps.activeStreams)),
 			zap.Ints("partitions", newPartitions))
 	})
@@ -157,22 +157,28 @@ func (ps *partitionStream) Start(ctx context.Context) error {
 	return nil
 }
 
-func (ps *partitionStream) partitionMonitor() {
-	defer ps.wg.Done()
+func (ps *partitionStream) checkReplicaSetStatus(ctx context.Context) error {
+	result := ps.database.RunCommand(ctx, bson.D{{Key: "isMaster", Value: 1}})
 
-	ticker := time.NewTicker(ps.cfg.Partition.RefreshInterval)
-	defer ticker.Stop()
-
-	for {
-		select {
-		case <-ps.ctx.Done():
-			return
-		case <-ticker.C:
-			if err := ps.refreshPartitions(); err != nil {
-				ps.logger.Error("Failed to refresh partitions", zap.Error(err))
-			}
-		}
+	var isMaster bson.M
+	if err := result.Decode(&isMaster); err != nil {
+		return err
 	}
+
+	if _, ok := isMaster["setName"]; ok {
+		ps.logger.Info("Connected to MongoDB replica set")
+		return nil
+	}
+
+	if msg, ok := isMaster["msg"]; ok && msg == "isdbgrid" {
+		ps.logger.Debug("Connected to MongoDB sharded cluster")
+		return nil
+	}
+
+	return errors.New(
+		"MongoDB is not running as a replica set or sharded cluster. " +
+			"Change streams require replica set or sharded cluster",
+	)
 }
 
 func (ps *partitionStream) refreshPartitions() error {
@@ -218,7 +224,7 @@ func (ps *partitionStream) refreshPartitions() error {
 		}
 	}
 
-	ps.logger.Info("Active partitions updated",
+	ps.logger.Debug("Active partitions updated",
 		zap.Int("count", len(ps.activeStreams)),
 		zap.Ints("partitions", newPartitions))
 
@@ -263,7 +269,7 @@ func (ps *partitionStream) processPartitionStream(worker *streamWorker) error {
 
 	shouldBootstrap := false
 	if resumeToken == nil && startAtOperationTime == nil {
-		ps.logger.Info("No resume token or cluster time found, starting bootstrap",
+		ps.logger.Debug("No resume token or cluster time found, starting bootstrap",
 			zap.Int("partitionId", worker.partitionID))
 		shouldBootstrap = true
 
@@ -295,7 +301,7 @@ func (ps *partitionStream) processPartitionStream(worker *streamWorker) error {
 		ps.logger.Info("Resuming from token", zap.Int("partitionId", worker.partitionID))
 	} else if startAtOperationTime != nil {
 		opts.SetStartAtOperationTime(startAtOperationTime)
-		ps.logger.Info("Starting from operation time",
+		ps.logger.Debug("Starting from operation time",
 			zap.Int("partitionId", worker.partitionID),
 			zap.Any("operationTime", startAtOperationTime))
 	}
@@ -361,8 +367,21 @@ func (ps *partitionStream) prepareStreamStart(partitionID int) ([]byte, *primiti
 	return resumeToken, clusterTime, nil
 }
 
+func (ps *partitionStream) getServerOperationTime(ctx context.Context) (*primitive.Timestamp, error) {
+	result := ps.database.RunCommand(ctx, bson.D{{Key: "isMaster", Value: 1}})
+	var isMaster bson.M
+	if err := result.Decode(&isMaster); err != nil {
+		return nil, err
+	}
+
+	if opTime, ok := isMaster["operationTime"].(primitive.Timestamp); ok {
+		return &opTime, nil
+	}
+	return nil, nil
+}
+
 func (ps *partitionStream) bootstrapPartition(worker *streamWorker) error {
-	ps.logger.Info("Starting bootstrap for partition", zap.Int("partitionId", worker.partitionID))
+	ps.logger.Debug("Starting bootstrap for partition", zap.Int("partitionId", worker.partitionID))
 
 	bootstrapLastID, _ := ps.checkpointManager.GetBootstrapProgress(ps.ctx, worker.partitionID)
 
@@ -422,7 +441,7 @@ func (ps *partitionStream) bootstrapPartition(worker *streamWorker) error {
 		return err
 	}
 
-	ps.logger.Info("Bootstrap completed",
+	ps.logger.Debug("Bootstrap completed",
 		zap.Int("partitionId", worker.partitionID),
 		zap.Int("totalProcessed", processedCount))
 
@@ -618,6 +637,19 @@ func (ps *partitionStream) processEvent(worker *streamWorker, event message.Chan
 	return ps.listener(listenerCtx)
 }
 
+func (ps *partitionStream) updateMetrics(opType message.OperationType) {
+	switch opType {
+	case message.OperationInsert:
+		ps.metric.IncInsertTotal()
+	case message.OperationUpdate:
+		ps.metric.IncUpdateTotal()
+	case message.OperationDelete:
+		ps.metric.IncDeleteTotal()
+	case message.OperationReplace:
+		ps.metric.IncInsertTotal()
+	}
+}
+
 func (ps *partitionStream) periodicTokenSave(worker *streamWorker, ticker *time.Ticker) {
 	for {
 		select {
@@ -645,54 +677,22 @@ func (ps *partitionStream) periodicTokenSave(worker *streamWorker, ticker *time.
 	}
 }
 
-func (ps *partitionStream) updateMetrics(opType message.OperationType) {
-	switch opType {
-	case message.OperationInsert:
-		ps.metric.IncInsertTotal()
-	case message.OperationUpdate:
-		ps.metric.IncUpdateTotal()
-	case message.OperationDelete:
-		ps.metric.IncDeleteTotal()
-	case message.OperationReplace:
-		ps.metric.IncInsertTotal()
+func (ps *partitionStream) partitionMonitor() {
+	defer ps.wg.Done()
+
+	ticker := time.NewTicker(ps.cfg.Partition.RefreshInterval)
+	defer ticker.Stop()
+
+	for {
+		select {
+		case <-ps.ctx.Done():
+			return
+		case <-ticker.C:
+			if err := ps.refreshPartitions(); err != nil {
+				ps.logger.Error("Failed to refresh partitions", zap.Error(err))
+			}
+		}
 	}
-}
-
-func (ps *partitionStream) checkReplicaSetStatus(ctx context.Context) error {
-	result := ps.database.RunCommand(ctx, bson.D{{Key: "isMaster", Value: 1}})
-
-	var isMaster bson.M
-	if err := result.Decode(&isMaster); err != nil {
-		return err
-	}
-
-	if _, ok := isMaster["setName"]; ok {
-		ps.logger.Info("Connected to MongoDB replica set")
-		return nil
-	}
-
-	if msg, ok := isMaster["msg"]; ok && msg == "isdbgrid" {
-		ps.logger.Debug("Connected to MongoDB sharded cluster")
-		return nil
-	}
-
-	return errors.New(
-		"MongoDB is not running as a replica set or sharded cluster. " +
-			"Change streams require replica set or sharded cluster",
-	)
-}
-
-func (ps *partitionStream) getServerOperationTime(ctx context.Context) (*primitive.Timestamp, error) {
-	result := ps.database.RunCommand(ctx, bson.D{{Key: "isMaster", Value: 1}})
-	var isMaster bson.M
-	if err := result.Decode(&isMaster); err != nil {
-		return nil, err
-	}
-
-	if opTime, ok := isMaster["operationTime"].(primitive.Timestamp); ok {
-		return &opTime, nil
-	}
-	return nil, nil
 }
 
 func (ps *partitionStream) Stop(ctx context.Context) error {

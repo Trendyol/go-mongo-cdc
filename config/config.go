@@ -21,7 +21,6 @@ type Config struct {
 	Database     string           `json:"database" yaml:"database"`
 	Collection   string           `json:"collection" yaml:"collection"`
 	AuthDatabase string           `json:"authDatabase" yaml:"authDatabase"`
-	DebugMode    bool             `json:"debugMode" yaml:"debugMode"`
 	Metric       MetricConfig     `json:"metric" yaml:"metric"`
 	Logger       LoggerConfig     `json:"logger" yaml:"logger"`
 	Checkpoint   CheckpointConfig `json:"checkpoint" yaml:"checkpoint"`

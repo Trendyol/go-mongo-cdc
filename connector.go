@@ -95,7 +95,7 @@ func NewConnector(ctx context.Context, cfg config.Config, listenerFunc stream.Li
 }
 
 func (c *connector) Start(ctx context.Context) {
-	c.logger.Info("Starting CDC connector", zap.String("workerId", c.workerID))
+	c.logger.Info("Starting MongoDB change stream connector", zap.String("workerId", c.workerID))
 
 	if err := c.stream.Start(ctx); err != nil {
 		c.logger.Fatal("Failed to start partition stream", zap.Error(err))
