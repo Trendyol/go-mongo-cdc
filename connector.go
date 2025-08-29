@@ -2,7 +2,7 @@ package cdc
 
 import (
 	"context"
-	goerrors "errors"
+	"fmt"
 	"os"
 	"os/signal"
 	"strings"
@@ -13,8 +13,8 @@ import (
 	"github.com/Trendyol/go-mongo-cdc/config"
 	"github.com/Trendyol/go-mongo-cdc/internal/metric"
 	"github.com/Trendyol/go-mongo-cdc/logger"
-	"github.com/Trendyol/go-mongo-cdc/mongo/changestream"
 	"github.com/Trendyol/go-mongo-cdc/mongo/connection"
+	"github.com/Trendyol/go-mongo-cdc/stream"
 	"github.com/go-playground/errors"
 	"go.uber.org/zap"
 )
@@ -25,12 +25,13 @@ type Connector interface {
 }
 
 type connector struct {
-	stream             changestream.Streamer
+	stream             stream.PartitionStream
 	prometheusRegistry metric.Registry
 	cfg                *config.Config
 	mongoClient        connection.Client
 	logger             *zap.Logger
 	cancelCh           chan os.Signal
+	workerID           string
 
 	once   sync.Once
 	closed bool
@@ -40,7 +41,7 @@ type connector struct {
 func NewConnectorWithConfigFile(
 	ctx context.Context,
 	configFilePath string,
-	listenerFunc changestream.ListenerFunc,
+	listenerFunc stream.ListenerFunc,
 ) (Connector, error) {
 	var cfg config.Config
 	var err error
@@ -60,7 +61,7 @@ func NewConnectorWithConfigFile(
 	return NewConnector(ctx, cfg, listenerFunc)
 }
 
-func NewConnector(ctx context.Context, cfg config.Config, listenerFunc changestream.ListenerFunc) (Connector, error) {
+func NewConnector(ctx context.Context, cfg config.Config, listenerFunc stream.ListenerFunc) (Connector, error) {
 	cfg.SetDefault()
 	if err := cfg.Validate(); err != nil {
 		return nil, errors.Wrap(err, "config validation")
@@ -76,58 +77,29 @@ func NewConnector(ctx context.Context, cfg config.Config, listenerFunc changestr
 
 	m := metric.NewMetric(cfg.Database, cfg.Collection)
 
-	stream := changestream.NewStream(mongoClient, cfg, m, listenerFunc, zapLogger)
+	// Generate unique worker ID
+	workerID := generateWorkerID()
+
+	partitionStream := stream.NewPartitionStream(mongoClient, cfg, m, listenerFunc, zapLogger, workerID)
 
 	prometheusRegistry := metric.NewRegistry(m)
 
 	return &connector{
 		mongoClient:        mongoClient,
-		stream:             stream,
+		stream:             partitionStream,
 		prometheusRegistry: prometheusRegistry,
 		logger:             zapLogger,
+		workerID:           workerID,
 		cancelCh:           make(chan os.Signal, 1),
 	}, nil
 }
 
 func (c *connector) Start(ctx context.Context) {
-	go func() {
-		for {
-			err := c.stream.Open(ctx)
-			if err == nil {
-				c.logger.Info("MongoDB stream completed normally")
-				return
-			}
+	c.logger.Info("Starting MongoDB change stream connector", zap.String("workerId", c.workerID))
 
-			if goerrors.Is(err, changestream.ErrorStreamInUse) {
-				c.logger.Info("Stream capture failed, retrying")
-				time.Sleep(5 * time.Second)
-				continue
-			}
-
-			if goerrors.Is(err, context.Canceled) {
-				c.mu.Lock()
-				isClosed := c.closed
-				c.mu.Unlock()
-
-				if isClosed || ctx.Err() != nil {
-					c.logger.Info("Stream stopped due to shutdown")
-					return
-				}
-
-				c.logger.Info("Stream restarting due to membership change")
-				time.Sleep(1 * time.Second)
-				continue
-			}
-
-			if ctx.Err() != nil {
-				c.logger.Info("Stream stopping due to context cancellation")
-				return
-			}
-
-			c.logger.Error("MongoDB stream open error", zap.Error(err))
-			time.Sleep(5 * time.Second)
-		}
-	}()
+	if err := c.stream.Start(ctx); err != nil {
+		c.logger.Fatal("Failed to start partition stream", zap.Error(err))
+	}
 
 	signal.Notify(c.cancelCh, syscall.SIGTERM, syscall.SIGINT, syscall.SIGABRT, syscall.SIGQUIT)
 
@@ -152,11 +124,11 @@ func (c *connector) Close() {
 		close(c.cancelCh)
 	}
 
-	closeCtx, cancel := context.WithTimeout(context.Background(), 10*time.Second)
+	closeCtx, cancel := context.WithTimeout(context.Background(), 30*time.Second)
 	defer cancel()
 
-	if err := c.stream.Close(closeCtx); err != nil {
-		c.logger.Error("Failed to close stream", zap.Error(err))
+	if err := c.stream.Stop(closeCtx); err != nil {
+		c.logger.Error("Failed to stop stream", zap.Error(err))
 	}
 
 	c.logger.Info("Closing mongo client")
@@ -174,4 +146,9 @@ func isClosed[T any](ch <-chan T) bool {
 	default:
 		return false
 	}
+}
+
+func generateWorkerID() string {
+	hostname, _ := os.Hostname()
+	return fmt.Sprintf("%s-%d-%d", hostname, os.Getpid(), time.Now().UnixNano())
 }

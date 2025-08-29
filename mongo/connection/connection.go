@@ -22,7 +22,7 @@ type Database interface {
 }
 
 type Collection interface {
-	Watch(ctx context.Context, pipeline interface{}, opts ...*options.ChangeStreamOptions) ChangeStream
+	Watch(ctx context.Context, pipeline interface{}, opts ...*options.ChangeStreamOptions) (ChangeStream, error)
 	FindOne(ctx context.Context, filter interface{}, opts ...*options.FindOneOptions) SingleResult
 	Find(ctx context.Context, filter interface{}, opts ...*options.FindOptions) (Cursor, error)
 	UpdateOne(
@@ -31,8 +31,15 @@ type Collection interface {
 		update interface{},
 		opts ...*options.UpdateOptions,
 	) (UpdateResult, error)
+	UpdateMany(
+		ctx context.Context,
+		filter interface{},
+		update interface{},
+		opts ...*options.UpdateOptions,
+	) (UpdateResult, error)
 	DeleteOne(ctx context.Context, filter interface{}, opts ...*options.DeleteOptions) (DeleteResult, error)
 	DeleteMany(ctx context.Context, filter interface{}, opts ...*options.DeleteOptions) (DeleteResult, error)
+	CountDocuments(ctx context.Context, filter interface{}, opts ...*options.CountOptions) (int64, error)
 	Indexes() IndexView
 }
 
@@ -149,12 +156,12 @@ func (c *mongoCollectionImpl) Watch(
 	ctx context.Context,
 	pipeline interface{},
 	opts ...*options.ChangeStreamOptions,
-) ChangeStream {
+) (ChangeStream, error) {
 	cs, err := c.coll.Watch(ctx, pipeline, opts...)
 	if err != nil {
-		panic(err) // TODO For now, we'll panic, but this should be handled better
+		return nil, err
 	}
-	return &mongoChangeStreamImpl{cs: cs}
+	return &mongoChangeStreamImpl{cs: cs}, nil
 }
 
 func (c *mongoCollectionImpl) FindOne(
@@ -212,6 +219,27 @@ func (c *mongoCollectionImpl) DeleteMany(
 		return nil, err
 	}
 	return &mongoDeleteResultImpl{dr: result}, nil
+}
+
+func (c *mongoCollectionImpl) UpdateMany(
+	ctx context.Context,
+	filter interface{},
+	update interface{},
+	opts ...*options.UpdateOptions,
+) (UpdateResult, error) {
+	result, err := c.coll.UpdateMany(ctx, filter, update, opts...)
+	if err != nil {
+		return nil, err
+	}
+	return &mongoUpdateResultImpl{ur: result}, nil
+}
+
+func (c *mongoCollectionImpl) CountDocuments(
+	ctx context.Context,
+	filter interface{},
+	opts ...*options.CountOptions,
+) (int64, error) {
+	return c.coll.CountDocuments(ctx, filter, opts...)
 }
 
 func (c *mongoCollectionImpl) Indexes() IndexView {
