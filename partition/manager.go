@@ -15,7 +15,7 @@ import (
 )
 
 const (
-	TotalPartitions = 100
+	TotalPartitions = 5
 )
 
 type Manager interface {
