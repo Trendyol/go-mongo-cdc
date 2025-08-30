@@ -357,6 +357,8 @@ func (m *manager) AcquirePartitions(ctx context.Context) ([]int, error) {
 	}
 
 	m.mu.Lock()
+	oldPartitions := make([]int, len(m.assignedPartitions))
+	copy(oldPartitions, m.assignedPartitions)
 	m.assignedPartitions = acquiredPartitions
 	m.mu.Unlock()
 
@@ -369,6 +371,45 @@ func (m *manager) AcquirePartitions(ctx context.Context) ([]int, error) {
 		zap.Ints("partitions", acquiredPartitions),
 		zap.Int("workerIndex", workerIndex),
 		zap.Int("activeWorkers", activeWorkers))
+
+	// Check if partitions actually changed (ignore order)
+	partitionsChanged := len(oldPartitions) != len(acquiredPartitions)
+	if !partitionsChanged {
+		oldPartitionMap := make(map[int]bool)
+		newPartitionMap := make(map[int]bool)
+
+		for _, p := range oldPartitions {
+			oldPartitionMap[p] = true
+		}
+		for _, p := range acquiredPartitions {
+			newPartitionMap[p] = true
+		}
+
+		// Check if any partition was added or removed
+		for p := range oldPartitionMap {
+			if !newPartitionMap[p] {
+				partitionsChanged = true
+				break
+			}
+		}
+		if !partitionsChanged {
+			for p := range newPartitionMap {
+				if !oldPartitionMap[p] {
+					partitionsChanged = true
+					break
+				}
+			}
+		}
+	}
+
+	// Notify about partition changes to manage streams
+	// Don't trigger callback for initial assignment (when oldPartitions is empty)
+	if partitionsChanged && len(oldPartitions) > 0 && m.onPartitionsChanged != nil {
+		m.logger.Info("Partitions changed, notifying callback",
+			zap.Ints("oldPartitions", oldPartitions),
+			zap.Ints("newPartitions", acquiredPartitions))
+		m.onPartitionsChanged(acquiredPartitions)
+	}
 
 	return acquiredPartitions, nil
 }
@@ -553,7 +594,7 @@ func (m *manager) Stop(ctx context.Context) error {
 
 	select {
 	case <-done:
-	case <-time.After(10 * time.Second):
+	case <-time.After(2 * time.Second):
 		m.logger.Warn("Timeout waiting for heartbeat loop to stop")
 	}
 

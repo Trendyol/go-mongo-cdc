@@ -135,10 +135,20 @@ func (ps *partitionStream) Start(ctx context.Context) error {
 		// Eğer partition'lar değişti ise stream'i yeniden başlat
 		partitionsChanged := len(oldPartitions) != len(ps.assignedPartitions)
 		if !partitionsChanged {
+			// Yeni eklenen partition'ları kontrol et
 			for partitionID := range ps.assignedPartitions {
 				if !oldPartitions[partitionID] {
 					partitionsChanged = true
 					break
+				}
+			}
+			// Kaldırılan partition'ları kontrol et
+			if !partitionsChanged {
+				for partitionID := range oldPartitions {
+					if !ps.assignedPartitions[partitionID] {
+						partitionsChanged = true
+						break
+					}
 				}
 			}
 		}
@@ -390,9 +400,9 @@ func (ps *partitionStream) prepareGlobalStreamStart() ([]byte, *primitive.Timest
 	}
 	ps.tokenMutex.Unlock()
 
-	// En eski cluster time'a sahip token'ı bul (stream start için)
-	var oldestToken []byte
-	var oldestTime *primitive.Timestamp
+	// En yeni cluster time'a sahip token'ı bul (stream start için)
+	var newestToken []byte
+	var newestTime *primitive.Timestamp
 
 	for _, partitionID := range assignedPartitions {
 		resumeToken, clusterTime, err := ps.checkpointManager.GetResumeToken(ps.ctx, partitionID)
@@ -400,9 +410,9 @@ func (ps *partitionStream) prepareGlobalStreamStart() ([]byte, *primitive.Timest
 			continue
 		}
 
-		if oldestTime == nil || (clusterTime != nil && clusterTime.T < oldestTime.T) {
-			oldestToken = resumeToken
-			oldestTime = clusterTime
+		if newestTime == nil || (clusterTime != nil && clusterTime.T > newestTime.T) {
+			newestToken = resumeToken
+			newestTime = clusterTime
 		}
 	}
 
@@ -421,7 +431,7 @@ func (ps *partitionStream) prepareGlobalStreamStart() ([]byte, *primitive.Timest
 		}
 	}
 
-	return oldestToken, oldestTime, nil
+	return newestToken, newestTime, nil
 }
 
 func (ps *partitionStream) getServerOperationTime(ctx context.Context) (*primitive.Timestamp, error) {
