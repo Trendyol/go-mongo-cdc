@@ -101,6 +101,9 @@ func (ps *partitionStream) Start(ctx context.Context) error {
 		return fmt.Errorf("failed to initialize partition manager: %w", err)
 	}
 
+	// Manager'dan partition değişikliklerini dinle ve stream'leri güncelle
+	ps.partitionManager.SetPartitionsChangedCallback(ps.updateStreams)
+
 	// Initial partition assignment
 	if err := ps.refreshPartitions(); err != nil {
 		ps.logger.Error("Failed to acquire initial partitions", zap.Error(err))
@@ -143,6 +146,12 @@ func (ps *partitionStream) refreshPartitions() error {
 		return err
 	}
 
+	// Manager'dan gelen partition listesine göre stream'leri güncelle
+	ps.updateStreams(newPartitions)
+	return nil
+}
+
+func (ps *partitionStream) updateStreams(newPartitions []int) {
 	ps.streamsMutex.Lock()
 	defer ps.streamsMutex.Unlock()
 
@@ -183,8 +192,6 @@ func (ps *partitionStream) refreshPartitions() error {
 	ps.logger.Debug("Active partitions updated",
 		zap.Int("count", len(ps.activeStreams)),
 		zap.Ints("partitions", newPartitions))
-
-	return nil
 }
 
 func (ps *partitionStream) runPartitionStream(worker *streamWorker) {

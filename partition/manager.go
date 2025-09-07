@@ -23,6 +23,8 @@ type Manager interface {
 	Initialize(ctx context.Context) error
 	AcquirePartitions(ctx context.Context) ([]int, error)
 	ReleasePartitions(ctx context.Context) error
+	RefreshPartitions(ctx context.Context) error
+	SetPartitionsChangedCallback(callback func(newPartitions []int))
 	Stop(ctx context.Context) error
 }
 
@@ -56,6 +58,9 @@ type manager struct {
 
 	// Worker change monitoring - simplified without change stream
 	lastKnownWorkerCount int
+
+	// Callback for partition changes to manage streams
+	onPartitionsChanged func(newPartitions []int)
 }
 
 func NewManager(workerID string, client connection.Client, cfg config.PartitionConfig, logger *zap.Logger) Manager {
@@ -256,7 +261,7 @@ func (m *manager) checkForWorkerChangesAndRebalance() {
 			zap.Int("currentCount", currentWorkerCount))
 
 		// Rebalance işlemini tetikle
-		if _, err := m.AcquirePartitions(ctx); err != nil {
+		if err := m.RefreshPartitions(ctx); err != nil {
 			m.logger.Error("Failed to refresh partitions after worker count change",
 				zap.Error(err),
 				zap.Int("workerCount", currentWorkerCount))
@@ -310,41 +315,6 @@ func (m *manager) AcquirePartitions(ctx context.Context) ([]int, error) {
 		expectedPartitions = append(expectedPartitions, i)
 	}
 
-	// Get current assigned partitions
-	m.mu.RLock()
-	currentPartitions := make([]int, len(m.assignedPartitions))
-	copy(currentPartitions, m.assignedPartitions)
-	m.mu.RUnlock()
-
-	// Release partitions that are no longer assigned to this worker
-	var partitionsToRelease []int
-	for _, current := range currentPartitions {
-		shouldKeep := false
-		for _, expected := range expectedPartitions {
-			if current == expected {
-				shouldKeep = true
-				break
-			}
-		}
-		if !shouldKeep {
-			partitionsToRelease = append(partitionsToRelease, current)
-		}
-	}
-
-	if len(partitionsToRelease) > 0 {
-		m.logger.Info("Releasing partitions no longer assigned to this worker",
-			zap.Ints("partitionsToRelease", partitionsToRelease))
-
-		for _, partitionID := range partitionsToRelease {
-			if err := m.releasePartition(ctx, partitionID); err != nil {
-				m.logger.Error("Failed to release partition",
-					zap.Int("partition", partitionID),
-					zap.Error(err))
-			}
-		}
-	}
-
-	// Acquire new partitions
 	var acquiredPartitions []int
 	for _, partitionID := range expectedPartitions {
 		if err := m.acquirePartition(ctx, partitionID); err != nil {
@@ -542,6 +512,59 @@ func (m *manager) updateWorkerPartitions(ctx context.Context, partitions []int) 
 
 	_, err := m.workersCol.UpdateOne(ctx, filter, update)
 	return err
+}
+
+func (m *manager) RefreshPartitions(ctx context.Context) error {
+	// 1. Mevcut partition'ları al
+	m.mu.RLock()
+	currentPartitions := make([]int, len(m.assignedPartitions))
+	copy(currentPartitions, m.assignedPartitions)
+	m.mu.RUnlock()
+
+	// 2. Yeni partition'ları hesapla ve acquire et
+	newPartitions, err := m.AcquirePartitions(ctx)
+	if err != nil {
+		return err
+	}
+
+	// 3. Artık sahip olmadığımız partition'ları MongoDB'den release et
+	var partitionsToRelease []int
+	for _, current := range currentPartitions {
+		shouldKeep := false
+		for _, new := range newPartitions {
+			if current == new {
+				shouldKeep = true
+				break
+			}
+		}
+		if !shouldKeep {
+			partitionsToRelease = append(partitionsToRelease, current)
+		}
+	}
+
+	if len(partitionsToRelease) > 0 {
+		m.logger.Info("Releasing partitions from MongoDB",
+			zap.Ints("partitionsToRelease", partitionsToRelease))
+
+		for _, partitionID := range partitionsToRelease {
+			if err := m.releasePartition(ctx, partitionID); err != nil {
+				m.logger.Error("Failed to release partition from MongoDB",
+					zap.Int("partition", partitionID),
+					zap.Error(err))
+			}
+		}
+	}
+
+	// 4. Stream layer'ı bilgilendir (sadece yeni partition listesi)
+	if m.onPartitionsChanged != nil {
+		m.onPartitionsChanged(newPartitions)
+	}
+
+	return nil
+}
+
+func (m *manager) SetPartitionsChangedCallback(callback func(newPartitions []int)) {
+	m.onPartitionsChanged = callback
 }
 
 func (m *manager) ReleasePartitions(ctx context.Context) error {
