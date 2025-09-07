@@ -2,11 +2,13 @@ package main
 
 import (
 	"context"
+
+	cdc "github.com/Trendyol/go-mongo-cdc"
+
 	"log"
 	"strings"
 	"time"
 
-	cdc "github.com/Trendyol/go-mongo-cdc"
 	"github.com/Trendyol/go-mongo-cdc/config"
 	"github.com/Trendyol/go-mongo-cdc/mongo/message"
 	"github.com/Trendyol/go-mongo-cdc/stream"
@@ -44,10 +46,10 @@ func main() {
 			SaveInterval: 60 * time.Second,
 		},
 		Partition: config.PartitionConfig{
-			HeartbeatInterval: 5 * time.Second,
-			WorkerTimeout:     30 * time.Second,
-			PartitionDatabase: "cdc_partitions",
-			RefreshInterval:   30 * time.Second,
+			HeartbeatInterval:      5 * time.Second,
+			WorkerTimeout:          30 * time.Second,
+			PartitionDatabase:      "exampleDB",
+			RebalanceCheckInterval: 10 * time.Second,
 		},
 		Logger: config.LoggerConfig{
 			Logger: logger,

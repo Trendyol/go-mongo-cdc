@@ -25,6 +25,7 @@ type Collection interface {
 	Watch(ctx context.Context, pipeline interface{}, opts ...*options.ChangeStreamOptions) (ChangeStream, error)
 	FindOne(ctx context.Context, filter interface{}, opts ...*options.FindOneOptions) SingleResult
 	Find(ctx context.Context, filter interface{}, opts ...*options.FindOptions) (Cursor, error)
+	InsertOne(ctx context.Context, document interface{}, opts ...*options.InsertOneOptions) (InsertResult, error)
 	UpdateOne(
 		ctx context.Context,
 		filter interface{},
@@ -61,6 +62,10 @@ type Cursor interface {
 	Decode(val interface{}) error
 	Close(ctx context.Context) error
 	Err() error
+}
+
+type InsertResult interface {
+	InsertedID() interface{}
 }
 
 type UpdateResult interface {
@@ -100,6 +105,10 @@ type mongoSingleResultImpl struct {
 
 type mongoCursorImpl struct {
 	cursor *mongo.Cursor
+}
+
+type mongoInsertResultImpl struct {
+	ir *mongo.InsertOneResult
 }
 
 type mongoUpdateResultImpl struct {
@@ -182,6 +191,18 @@ func (c *mongoCollectionImpl) Find(
 		return nil, err
 	}
 	return &mongoCursorImpl{cursor: cursor}, nil
+}
+
+func (c *mongoCollectionImpl) InsertOne(
+	ctx context.Context,
+	document interface{},
+	opts ...*options.InsertOneOptions,
+) (InsertResult, error) {
+	result, err := c.coll.InsertOne(ctx, document, opts...)
+	if err != nil {
+		return nil, err
+	}
+	return &mongoInsertResultImpl{ir: result}, nil
 }
 
 func (c *mongoCollectionImpl) UpdateOne(
@@ -307,6 +328,10 @@ func (ur *mongoUpdateResultImpl) UpsertedCount() int64 {
 
 func (ur *mongoUpdateResultImpl) UpsertedID() interface{} {
 	return ur.ur.UpsertedID
+}
+
+func (ir *mongoInsertResultImpl) InsertedID() interface{} {
+	return ir.ir.InsertedID
 }
 
 func (dr *mongoDeleteResultImpl) DeletedCount() int64 {

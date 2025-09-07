@@ -101,58 +101,14 @@ func (ps *partitionStream) Start(ctx context.Context) error {
 		return fmt.Errorf("failed to initialize partition manager: %w", err)
 	}
 
-	//TODO: burası daha iyi nasıl yapılabilir?
-	ps.partitionManager.SetPartitionsChangedCallback(func(newPartitions []int) {
-		ps.streamsMutex.Lock()
-		defer ps.streamsMutex.Unlock()
-
-		// Stop streams for partitions we no longer own
-		for partitionID, worker := range ps.activeStreams {
-			found := false
-			for _, p := range newPartitions {
-				if p == partitionID {
-					found = true
-					break
-				}
-			}
-
-			if !found {
-				ps.logger.Info("Stopping stream for partition", zap.Int("partitionId", partitionID))
-				worker.cancel()
-				delete(ps.activeStreams, partitionID)
-			}
-		}
-
-		// Start streams for new partitions
-		for _, partitionID := range newPartitions {
-			if _, exists := ps.activeStreams[partitionID]; !exists {
-				ps.logger.Info("Starting stream for partition", zap.Int("partitionId", partitionID))
-
-				worker := &streamWorker{
-					partitionID: partitionID,
-				}
-				worker.ctx, worker.cancel = context.WithCancel(ps.ctx)
-
-				ps.activeStreams[partitionID] = worker
-
-				ps.wg.Add(1)
-				go ps.runPartitionStream(worker)
-			}
-		}
-
-		ps.logger.Debug("Active partitions updated",
-			zap.Int("count", len(ps.activeStreams)),
-			zap.Ints("partitions", newPartitions))
-	})
+	// Manager'dan partition değişikliklerini dinle ve stream'leri güncelle
+	ps.partitionManager.SetPartitionsChangedCallback(ps.updateStreams)
 
 	// Initial partition assignment
 	if err := ps.refreshPartitions(); err != nil {
 		ps.logger.Error("Failed to acquire initial partitions", zap.Error(err))
 		return err
 	}
-
-	ps.wg.Add(1)
-	go ps.partitionMonitor()
 
 	return nil
 }
@@ -187,6 +143,12 @@ func (ps *partitionStream) refreshPartitions() error {
 		return err
 	}
 
+	// Manager'dan gelen partition listesine göre stream'leri güncelle
+	ps.updateStreams(newPartitions)
+	return nil
+}
+
+func (ps *partitionStream) updateStreams(newPartitions []int) {
 	ps.streamsMutex.Lock()
 	defer ps.streamsMutex.Unlock()
 
@@ -227,8 +189,6 @@ func (ps *partitionStream) refreshPartitions() error {
 	ps.logger.Debug("Active partitions updated",
 		zap.Int("count", len(ps.activeStreams)),
 		zap.Ints("partitions", newPartitions))
-
-	return nil
 }
 
 func (ps *partitionStream) runPartitionStream(worker *streamWorker) {
@@ -488,6 +448,40 @@ func (ps *partitionStream) createDocumentFilter(partitionID int) bson.D {
 }
 
 func (ps *partitionStream) createHashExpression(idField string) bson.D {
+	return bson.D{
+		{Key: "$cond", Value: bson.D{
+			{Key: "if", Value: bson.D{
+				{Key: "$or", Value: bson.A{
+					bson.D{{Key: "$eq", Value: bson.A{bson.D{{Key: "$type", Value: idField}}, "int"}}},
+					bson.D{{Key: "$eq", Value: bson.A{bson.D{{Key: "$type", Value: idField}}, "long"}}},
+					bson.D{{Key: "$eq", Value: bson.A{bson.D{{Key: "$type", Value: idField}}, "double"}}},
+				}},
+			}},
+			{Key: "then", Value: idField},
+			{Key: "else", Value: bson.D{
+				{Key: "$cond", Value: bson.D{
+					{Key: "if", Value: ps.createIsNumericStringCheck(idField)},
+					{Key: "then", Value: bson.D{{Key: "$toDouble", Value: idField}}},
+					{Key: "else", Value: ps.createStringHashExpression(idField)},
+				}},
+			}},
+		}},
+	}
+}
+
+func (ps *partitionStream) createIsNumericStringCheck(idField string) bson.D {
+	return bson.D{
+		{Key: "$and", Value: bson.A{
+			bson.D{{Key: "$eq", Value: bson.A{bson.D{{Key: "$type", Value: idField}}, "string"}}},
+			bson.D{{Key: "$regexMatch", Value: bson.D{
+				{Key: "input", Value: idField},
+				{Key: "regex", Value: "^[0-9]+$"},
+			}}},
+		}},
+	}
+}
+
+func (ps *partitionStream) createStringHashExpression(idField string) bson.D {
 	// Hash using last 3 characters for better distribution with 1000 partitions
 	return bson.D{
 		{Key: "$add", Value: bson.A{
@@ -672,24 +666,6 @@ func (ps *partitionStream) periodicTokenSave(worker *streamWorker, ticker *time.
 						zap.Int("partitionId", worker.partitionID),
 						zap.Error(err))
 				}
-			}
-		}
-	}
-}
-
-func (ps *partitionStream) partitionMonitor() {
-	defer ps.wg.Done()
-
-	ticker := time.NewTicker(ps.cfg.Partition.RefreshInterval)
-	defer ticker.Stop()
-
-	for {
-		select {
-		case <-ps.ctx.Done():
-			return
-		case <-ticker.C:
-			if err := ps.refreshPartitions(); err != nil {
-				ps.logger.Error("Failed to refresh partitions", zap.Error(err))
 			}
 		}
 	}
