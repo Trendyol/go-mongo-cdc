@@ -448,6 +448,40 @@ func (ps *partitionStream) createDocumentFilter(partitionID int) bson.D {
 }
 
 func (ps *partitionStream) createHashExpression(idField string) bson.D {
+	return bson.D{
+		{Key: "$cond", Value: bson.D{
+			{Key: "if", Value: bson.D{
+				{Key: "$or", Value: bson.A{
+					bson.D{{Key: "$eq", Value: bson.A{bson.D{{Key: "$type", Value: idField}}, "int"}}},
+					bson.D{{Key: "$eq", Value: bson.A{bson.D{{Key: "$type", Value: idField}}, "long"}}},
+					bson.D{{Key: "$eq", Value: bson.A{bson.D{{Key: "$type", Value: idField}}, "double"}}},
+				}},
+			}},
+			{Key: "then", Value: idField},
+			{Key: "else", Value: bson.D{
+				{Key: "$cond", Value: bson.D{
+					{Key: "if", Value: ps.createIsNumericStringCheck(idField)},
+					{Key: "then", Value: bson.D{{Key: "$toDouble", Value: idField}}},
+					{Key: "else", Value: ps.createStringHashExpression(idField)},
+				}},
+			}},
+		}},
+	}
+}
+
+func (ps *partitionStream) createIsNumericStringCheck(idField string) bson.D {
+	return bson.D{
+		{Key: "$and", Value: bson.A{
+			bson.D{{Key: "$eq", Value: bson.A{bson.D{{Key: "$type", Value: idField}}, "string"}}},
+			bson.D{{Key: "$regexMatch", Value: bson.D{
+				{Key: "input", Value: idField},
+				{Key: "regex", Value: "^[0-9]+$"},
+			}}},
+		}},
+	}
+}
+
+func (ps *partitionStream) createStringHashExpression(idField string) bson.D {
 	// Hash using last 3 characters for better distribution with 1000 partitions
 	return bson.D{
 		{Key: "$add", Value: bson.A{
