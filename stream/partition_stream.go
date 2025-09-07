@@ -110,9 +110,6 @@ func (ps *partitionStream) Start(ctx context.Context) error {
 		return err
 	}
 
-	ps.wg.Add(1)
-	go ps.partitionMonitor()
-
 	return nil
 }
 
@@ -635,24 +632,6 @@ func (ps *partitionStream) periodicTokenSave(worker *streamWorker, ticker *time.
 						zap.Int("partitionId", worker.partitionID),
 						zap.Error(err))
 				}
-			}
-		}
-	}
-}
-
-func (ps *partitionStream) partitionMonitor() {
-	defer ps.wg.Done()
-
-	ticker := time.NewTicker(ps.cfg.Partition.RefreshInterval)
-	defer ticker.Stop()
-
-	for {
-		select {
-		case <-ps.ctx.Done():
-			return
-		case <-ticker.C:
-			if err := ps.refreshPartitions(); err != nil {
-				ps.logger.Error("Failed to refresh partitions", zap.Error(err))
 			}
 		}
 	}

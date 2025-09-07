@@ -45,7 +45,6 @@ type PartitionConfig struct {
 	HeartbeatInterval      time.Duration `json:"heartbeatInterval" yaml:"heartbeatInterval"`
 	WorkerTimeout          time.Duration `json:"workerTimeout" yaml:"workerTimeout"`
 	PartitionDatabase      string        `json:"partitionDatabase" yaml:"partitionDatabase"`
-	RefreshInterval        time.Duration `json:"refreshInterval" yaml:"refreshInterval"`
 	RebalanceCheckInterval time.Duration `json:"rebalanceCheckInterval" yaml:"rebalanceCheckInterval"`
 }
 
@@ -77,9 +76,6 @@ func (c *Config) SetDefault() {
 	}
 	if c.Partition.PartitionDatabase == "" {
 		c.Partition.PartitionDatabase = "cdc_partitions"
-	}
-	if c.Partition.RefreshInterval == 0 {
-		c.Partition.RefreshInterval = 30 * time.Second
 	}
 	if c.Partition.RebalanceCheckInterval == 0 {
 		c.Partition.RebalanceCheckInterval = 10 * time.Second

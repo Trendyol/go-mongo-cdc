@@ -98,7 +98,7 @@ func (m *manager) Initialize(ctx context.Context) error {
 	go m.heartbeatLoop()
 
 	m.wg.Add(1)
-	go m.smartRebalanceMonitor()
+	go m.monitorWorkerChanges()
 
 	m.logger.Info("Partition manager initialized",
 		zap.String("workerId", m.workerID),
@@ -222,10 +222,10 @@ func (m *manager) updatePartitionHeartbeats(ctx context.Context) error {
 	return err
 }
 
-func (m *manager) smartRebalanceMonitor() {
+func (m *manager) monitorWorkerChanges() {
 	defer m.wg.Done()
 
-	m.logger.Info("Starting smart rebalance monitoring")
+	m.logger.Info("Starting worker changes monitoring")
 
 	// Configurable rebalance check interval
 	checkInterval := m.config.RebalanceCheckInterval
@@ -235,7 +235,7 @@ func (m *manager) smartRebalanceMonitor() {
 	for {
 		select {
 		case <-m.stopCh:
-			m.logger.Info("Stopping smart rebalance monitoring")
+			m.logger.Info("Stopping worker changes monitoring")
 			return
 		case <-ticker.C:
 			m.checkForWorkerChangesAndRebalance()
@@ -254,25 +254,66 @@ func (m *manager) checkForWorkerChangesAndRebalance() {
 		return
 	}
 
-	// Worker sayısında değişiklik var mı kontrol et
-	if currentWorkerCount != m.lastKnownWorkerCount {
-		m.logger.Info("Worker count change detected",
-			zap.Int("previousCount", m.lastKnownWorkerCount),
-			zap.Int("currentCount", currentWorkerCount))
+	// Worker sayısında değişiklik var mı kontrol et VEYA partition retry gerekiyor mu
+	needsRebalance := currentWorkerCount != m.lastKnownWorkerCount || m.needsPartitionRetry(ctx)
+
+	if needsRebalance {
+		if currentWorkerCount != m.lastKnownWorkerCount {
+			m.logger.Info("Worker count change detected",
+				zap.Int("previousCount", m.lastKnownWorkerCount),
+				zap.Int("currentCount", currentWorkerCount))
+		} else {
+			m.logger.Debug("Retrying partition acquisition",
+				zap.Int("workerCount", currentWorkerCount))
+		}
 
 		// Rebalance işlemini tetikle
 		if err := m.RefreshPartitions(ctx); err != nil {
-			m.logger.Error("Failed to refresh partitions after worker count change",
+			m.logger.Error("Failed to refresh partitions",
 				zap.Error(err),
 				zap.Int("workerCount", currentWorkerCount))
 		} else {
-			m.logger.Info("Successfully rebalanced partitions after worker count change",
-				zap.Int("newWorkerCount", currentWorkerCount))
+			m.logger.Info("Successfully rebalanced partitions",
+				zap.Int("workerCount", currentWorkerCount))
 
 			// Güncellenen worker sayısını kaydet
 			m.lastKnownWorkerCount = currentWorkerCount
 		}
 	}
+}
+
+// Bu worker'ın beklemediği partition'ları alıp alamayacağını kontrol eder
+func (m *manager) needsPartitionRetry(ctx context.Context) bool {
+	// Mevcut sahip olduğumuz partition sayısını al
+	m.mu.RLock()
+	currentPartitionCount := len(m.assignedPartitions)
+	m.mu.RUnlock()
+
+	// Expected partition sayısını hesapla
+	activeWorkers, err := m.getActiveWorkerCount(ctx)
+	if err != nil {
+		return false
+	}
+
+	if activeWorkers == 0 {
+		activeWorkers = 1
+	}
+
+	workerIndex, err := m.getWorkerIndex(ctx)
+	if err != nil {
+		return false
+	}
+
+	partitionsPerWorker := TotalPartitions / activeWorkers
+	extraPartitions := TotalPartitions % activeWorkers
+
+	expectedPartitionCount := partitionsPerWorker
+	if workerIndex < extraPartitions {
+		expectedPartitionCount++
+	}
+
+	// Eğer expected'den az partition'ımız varsa retry gerekir
+	return currentPartitionCount < expectedPartitionCount
 }
 
 func (m *manager) AcquirePartitions(ctx context.Context) ([]int, error) {

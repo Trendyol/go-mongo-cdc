@@ -2,6 +2,7 @@ package main
 
 import (
 	"context"
+
 	cdc "github.com/Trendyol/go-mongo-cdc"
 
 	"log"
@@ -48,8 +49,7 @@ func main() {
 			HeartbeatInterval:      5 * time.Second,
 			WorkerTimeout:          30 * time.Second,
 			PartitionDatabase:      "exampleDB",
-			RefreshInterval:        30 * time.Second,
-			RebalanceCheckInterval: 10 * time.Second, // Yeni eklenen: Change stream kullanmadan rebalance kontrolü
+			RebalanceCheckInterval: 10 * time.Second,
 		},
 		Logger: config.LoggerConfig{
 			Logger: logger,
