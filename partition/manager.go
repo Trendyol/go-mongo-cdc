@@ -15,10 +15,6 @@ import (
 	"go.uber.org/zap"
 )
 
-const (
-	TotalPartitions = 5
-)
-
 type Manager interface {
 	Initialize(ctx context.Context) error
 	AcquirePartitions(ctx context.Context) ([]int, error)
@@ -102,7 +98,7 @@ func (m *manager) Initialize(ctx context.Context) error {
 
 	m.logger.Info("Partition manager initialized",
 		zap.String("workerId", m.workerID),
-		zap.Int("totalPartitions", TotalPartitions))
+		zap.Int("totalPartitions", m.config.TotalPartition))
 
 	return nil
 }
@@ -304,8 +300,8 @@ func (m *manager) needsPartitionRetry(ctx context.Context) bool {
 		return false
 	}
 
-	partitionsPerWorker := TotalPartitions / activeWorkers
-	extraPartitions := TotalPartitions % activeWorkers
+	partitionsPerWorker := m.config.TotalPartition / activeWorkers
+	extraPartitions := m.config.TotalPartition % activeWorkers
 
 	expectedPartitionCount := partitionsPerWorker
 	if workerIndex < extraPartitions {
@@ -331,8 +327,8 @@ func (m *manager) AcquirePartitions(ctx context.Context) ([]int, error) {
 		activeWorkers = 1
 	}
 
-	partitionsPerWorker := TotalPartitions / activeWorkers
-	extraPartitions := TotalPartitions % activeWorkers
+	partitionsPerWorker := m.config.TotalPartition / activeWorkers
+	extraPartitions := m.config.TotalPartition % activeWorkers
 
 	workerIndex, err := m.getWorkerIndex(ctx)
 	if err != nil {
@@ -352,7 +348,7 @@ func (m *manager) AcquirePartitions(ctx context.Context) ([]int, error) {
 
 	// Calculate expected partitions for this worker
 	var expectedPartitions []int
-	for i := startPartition; i < endPartition && i < TotalPartitions; i++ {
+	for i := startPartition; i < endPartition && i < m.config.TotalPartition; i++ {
 		expectedPartitions = append(expectedPartitions, i)
 	}
 

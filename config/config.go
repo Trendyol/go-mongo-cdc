@@ -5,8 +5,10 @@ import (
 	"fmt"
 	"io"
 	"log/slog"
+	"net/url"
 	"os"
 	"path/filepath"
+	"strings"
 	"time"
 
 	"go.uber.org/zap"
@@ -46,6 +48,7 @@ type PartitionConfig struct {
 	WorkerTimeout          time.Duration `json:"workerTimeout" yaml:"workerTimeout"`
 	PartitionDatabase      string        `json:"partitionDatabase" yaml:"partitionDatabase"`
 	RebalanceCheckInterval time.Duration `json:"rebalanceCheckInterval" yaml:"rebalanceCheckInterval"`
+	TotalPartition         int           `json:"totalPartition" yaml:"totalPartition"`
 }
 
 func (c *Config) SetDefault() {
@@ -80,7 +83,9 @@ func (c *Config) SetDefault() {
 	if c.Partition.RebalanceCheckInterval == 0 {
 		c.Partition.RebalanceCheckInterval = 10 * time.Second
 	}
-
+	if c.Partition.TotalPartition == 0 {
+		c.Partition.TotalPartition = 10
+	}
 }
 
 func (c *Config) Validate() error {
@@ -98,13 +103,65 @@ func (c *Config) Validate() error {
 }
 
 func (c *Config) DSN() string {
-	auth := ""
+	var dsn strings.Builder
+
+	dsn.WriteString("mongodb://")
+
+	// Add authentication if provided
 	if c.Username != "" && c.Password != "" {
-		auth = fmt.Sprintf("%s:%s@", c.Username, c.Password)
+		// Use secure encoding for MongoDB credentials
+		authPart := encodeMongoDBCredentials(c.Username, c.Password)
+		dsn.WriteString(authPart)
 	}
 
-	return fmt.Sprintf("mongodb://%s%s:%d/%s?authSource=%s",
-		auth, c.Host, c.Port, c.Database, c.AuthDatabase)
+	// Handle IPv6 addresses
+	host := c.Host
+	if strings.Contains(host, ":") && !strings.HasPrefix(host, "[") {
+		host = fmt.Sprintf("[%s]", host)
+	}
+
+	dsn.WriteString(fmt.Sprintf("%s:%d", host, c.Port))
+
+	// Add database if specified
+	if c.Database != "" {
+		dsn.WriteString(fmt.Sprintf("/%s", c.Database))
+	}
+
+	separator := "?"
+
+	// Add authSource if specified
+	if c.AuthDatabase != "" {
+		if c.Database == "" {
+			dsn.WriteString("/")
+		}
+		dsn.WriteString(fmt.Sprintf("%sauthSource=%s", separator, c.AuthDatabase))
+		separator = "&" // Bir sonraki parametre için ayırıcıyı '&' yap
+	}
+
+	// maxPoolSize parametresini statik olarak ekle
+	if c.Database == "" && separator == "?" {
+		dsn.WriteString("/")
+	}
+	dsn.WriteString(fmt.Sprintf("%smaxPoolSize=350", separator))
+
+	return dsn.String()
+}
+
+// encodeMongoDBCredentials securely encodes username and password for MongoDB connection strings
+func encodeMongoDBCredentials(username, password string) string {
+	// Use multiple encoding strategies for maximum compatibility
+	encodedUsername := url.QueryEscape(username)
+	encodedPassword := url.QueryEscape(password)
+
+	// Additional validation - ensure @ character is properly encoded
+	if strings.Contains(username, "@") && !strings.Contains(encodedUsername, "%40") {
+		encodedUsername = strings.ReplaceAll(encodedUsername, "@", "%40")
+	}
+	if strings.Contains(password, "@") && !strings.Contains(encodedPassword, "%40") {
+		encodedPassword = strings.ReplaceAll(encodedPassword, "@", "%40")
+	}
+
+	return fmt.Sprintf("%s:%s@", encodedUsername, encodedPassword)
 }
 
 func (c *Config) Print() {

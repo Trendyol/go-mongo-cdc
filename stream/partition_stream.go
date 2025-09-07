@@ -423,7 +423,7 @@ func (ps *partitionStream) createPipeline(partitionID int) []bson.D {
 					{Key: "$eq", Value: bson.A{
 						bson.D{{Key: "$mod", Value: bson.A{
 							ps.createHashExpression("$documentKey._id"),
-							partition.TotalPartitions,
+							ps.cfg.Partition.TotalPartition,
 						}}},
 						partitionID,
 					}},
@@ -439,7 +439,7 @@ func (ps *partitionStream) createDocumentFilter(partitionID int) bson.D {
 			{Key: "$eq", Value: bson.A{
 				bson.D{{Key: "$mod", Value: bson.A{
 					ps.createHashExpression("$_id"),
-					partition.TotalPartitions,
+					ps.cfg.Partition.TotalPartition,
 				}}},
 				partitionID,
 			}},
