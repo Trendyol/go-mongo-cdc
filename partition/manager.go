@@ -3,6 +3,7 @@ package partition
 import (
 	"context"
 	"fmt"
+	"strings"
 	"sync"
 	"time"
 
@@ -15,16 +16,13 @@ import (
 )
 
 const (
-	TotalPartitions = 100
+	TotalPartitions = 5
 )
 
 type Manager interface {
 	Initialize(ctx context.Context) error
 	AcquirePartitions(ctx context.Context) ([]int, error)
 	ReleasePartitions(ctx context.Context) error
-	RefreshPartitions(ctx context.Context) error
-	SetPartitionsChangedCallback(callback func(newPartitions []int))
-	//GetAssignedPartitions() []int
 	Stop(ctx context.Context) error
 }
 
@@ -56,11 +54,8 @@ type manager struct {
 	stopCh chan struct{}
 	wg     sync.WaitGroup
 
-	// Worker change monitoring
-	workerChangeStream connection.ChangeStream
-
-	// Callback for partition changes to manage streams
-	onPartitionsChanged func(newPartitions []int)
+	// Worker change monitoring - simplified without change stream
+	lastKnownWorkerCount int
 }
 
 func NewManager(workerID string, client connection.Client, cfg config.PartitionConfig, logger *zap.Logger) Manager {
@@ -89,11 +84,16 @@ func (m *manager) Initialize(ctx context.Context) error {
 
 	m.isRunning = true
 
+	// Initialize with current worker count
+	if activeWorkers, err := m.getActiveWorkerCount(context.Background()); err == nil {
+		m.lastKnownWorkerCount = activeWorkers
+	}
+
 	m.wg.Add(1)
 	go m.heartbeatLoop()
 
 	m.wg.Add(1)
-	go m.monitorWorkerChanges()
+	go m.smartRebalanceMonitor()
 
 	m.logger.Info("Partition manager initialized",
 		zap.String("workerId", m.workerID),
@@ -217,95 +217,55 @@ func (m *manager) updatePartitionHeartbeats(ctx context.Context) error {
 	return err
 }
 
-// TODO: burası degisiklikleri 5 saniye falan gec dinliyor bu neden arastırılacak
-func (m *manager) monitorWorkerChanges() {
+func (m *manager) smartRebalanceMonitor() {
 	defer m.wg.Done()
 
-	m.logger.Info("Starting worker change monitoring")
+	m.logger.Info("Starting smart rebalance monitoring")
 
-	pipeline := []bson.D{
-		{
-			{Key: "$match", Value: bson.D{
-				{Key: "operationType", Value: bson.D{
-					{Key: "$in", Value: []string{"insert", "delete"}},
-				}},
-			}},
-		},
-	}
-
-	var retryCount int
-	maxRetries := 5
+	// Configurable rebalance check interval
+	checkInterval := m.config.RebalanceCheckInterval
+	ticker := time.NewTicker(checkInterval)
+	defer ticker.Stop()
 
 	for {
 		select {
 		case <-m.stopCh:
-			m.logger.Info("Stopping worker change monitoring")
-			if m.workerChangeStream != nil {
-				ctx, cancel := context.WithTimeout(context.Background(), 5*time.Second)
-				m.workerChangeStream.Close(ctx)
-				cancel()
-			}
+			m.logger.Info("Stopping smart rebalance monitoring")
 			return
-		default:
-			changeStream, err := m.workersCol.Watch(context.Background(), pipeline)
-			if err != nil {
-				retryCount++
-				m.logger.Error("Failed to create worker change stream",
-					zap.Error(err),
-					zap.Int("retryCount", retryCount))
+		case <-ticker.C:
+			m.checkForWorkerChangesAndRebalance()
+		}
+	}
+}
 
-				if retryCount >= maxRetries {
-					m.logger.Fatal("Max retries reached for worker change stream")
-					return
-				}
+func (m *manager) checkForWorkerChangesAndRebalance() {
+	ctx, cancel := context.WithTimeout(context.Background(), 15*time.Second)
+	defer cancel()
 
-				time.Sleep(time.Duration(retryCount) * 2 * time.Second)
-				continue
-			}
+	// Mevcut aktif worker sayısını kontrol et
+	currentWorkerCount, err := m.getActiveWorkerCount(ctx)
+	if err != nil {
+		m.logger.Error("Failed to get current worker count", zap.Error(err))
+		return
+	}
 
-			m.workerChangeStream = changeStream
-			retryCount = 0
+	// Worker sayısında değişiklik var mı kontrol et
+	if currentWorkerCount != m.lastKnownWorkerCount {
+		m.logger.Info("Worker count change detected",
+			zap.Int("previousCount", m.lastKnownWorkerCount),
+			zap.Int("currentCount", currentWorkerCount))
 
-			m.logger.Info("Worker change stream created successfully")
+		// Rebalance işlemini tetikle
+		if _, err := m.AcquirePartitions(ctx); err != nil {
+			m.logger.Error("Failed to refresh partitions after worker count change",
+				zap.Error(err),
+				zap.Int("workerCount", currentWorkerCount))
+		} else {
+			m.logger.Info("Successfully rebalanced partitions after worker count change",
+				zap.Int("newWorkerCount", currentWorkerCount))
 
-			for changeStream.Next(context.Background()) {
-				var changeDoc bson.M
-				if err := changeStream.Decode(&changeDoc); err != nil {
-					m.logger.Error("Failed to decode worker change document", zap.Error(err))
-					continue
-				}
-
-				operationType := changeDoc["operationType"].(string)
-				m.logger.Debug("Worker change detected",
-					zap.String("operation", operationType))
-
-				// TODO: buna gerek var mı?
-				// Wait for the change to be fully propagated and new worker to be ready
-				//time.Sleep(50 * time.Millisecond)
-
-				ctx, cancel := context.WithTimeout(context.Background(), 15*time.Second)
-				err := m.RefreshPartitions(ctx)
-				cancel()
-
-				if err != nil {
-					m.logger.Error("Failed to refresh partitions after worker change",
-						zap.Error(err),
-						zap.String("operation", operationType))
-				} else {
-					m.logger.Info("Successfully refreshed partitions after worker change",
-						zap.String("operation", operationType))
-				}
-			}
-
-			if err := changeStream.Err(); err != nil {
-				m.logger.Error("Worker change stream error", zap.Error(err))
-			}
-
-			changeStream.Close(context.Background())
-			m.workerChangeStream = nil
-
-			m.logger.Debug("Worker change stream closed, will retry")
-			time.Sleep(5 * time.Second)
+			// Güncellenen worker sayısını kaydet
+			m.lastKnownWorkerCount = currentWorkerCount
 		}
 	}
 }
@@ -344,16 +304,56 @@ func (m *manager) AcquirePartitions(ctx context.Context) ([]int, error) {
 		endPartition += extraPartitions
 	}
 
-	var acquiredPartitions []int
-
+	// Calculate expected partitions for this worker
+	var expectedPartitions []int
 	for i := startPartition; i < endPartition && i < TotalPartitions; i++ {
-		if err := m.acquirePartition(ctx, i); err != nil {
-			m.logger.Warn("Failed to acquire partition",
-				zap.Int("partition", i),
+		expectedPartitions = append(expectedPartitions, i)
+	}
+
+	// Get current assigned partitions
+	m.mu.RLock()
+	currentPartitions := make([]int, len(m.assignedPartitions))
+	copy(currentPartitions, m.assignedPartitions)
+	m.mu.RUnlock()
+
+	// Release partitions that are no longer assigned to this worker
+	var partitionsToRelease []int
+	for _, current := range currentPartitions {
+		shouldKeep := false
+		for _, expected := range expectedPartitions {
+			if current == expected {
+				shouldKeep = true
+				break
+			}
+		}
+		if !shouldKeep {
+			partitionsToRelease = append(partitionsToRelease, current)
+		}
+	}
+
+	if len(partitionsToRelease) > 0 {
+		m.logger.Info("Releasing partitions no longer assigned to this worker",
+			zap.Ints("partitionsToRelease", partitionsToRelease))
+
+		for _, partitionID := range partitionsToRelease {
+			if err := m.releasePartition(ctx, partitionID); err != nil {
+				m.logger.Error("Failed to release partition",
+					zap.Int("partition", partitionID),
+					zap.Error(err))
+			}
+		}
+	}
+
+	// Acquire new partitions
+	var acquiredPartitions []int
+	for _, partitionID := range expectedPartitions {
+		if err := m.acquirePartition(ctx, partitionID); err != nil {
+			m.logger.Info("Failed to acquire partition",
+				zap.Int("partition", partitionID),
 				zap.Error(err))
 			continue
 		}
-		acquiredPartitions = append(acquiredPartitions, i)
+		acquiredPartitions = append(acquiredPartitions, partitionID)
 	}
 
 	m.mu.Lock()
@@ -368,7 +368,11 @@ func (m *manager) AcquirePartitions(ctx context.Context) ([]int, error) {
 		zap.Int("count", len(acquiredPartitions)),
 		zap.Ints("partitions", acquiredPartitions),
 		zap.Int("workerIndex", workerIndex),
-		zap.Int("activeWorkers", activeWorkers))
+		zap.Int("activeWorkers", activeWorkers),
+		zap.Int("startPartition", startPartition),
+		zap.Int("endPartition", endPartition),
+		zap.Int("partitionsPerWorker", partitionsPerWorker),
+		zap.Int("extraPartitions", extraPartitions))
 
 	return acquiredPartitions, nil
 }
@@ -463,12 +467,68 @@ func (m *manager) acquirePartition(ctx context.Context, partitionID int) error {
 		LastHeartbeat: time.Now(),
 	}
 
-	filter := bson.M{"_id": partitionID}
-	update := bson.M{"$set": assignment}
-	opts := options.Update().SetUpsert(true)
+	cutoff := time.Now().Add(-m.config.WorkerTimeout)
 
-	_, err := m.partitionsCol.UpdateOne(ctx, filter, update, opts)
-	return err
+	// 1. Aşama: Mevcut document'ı conditional update et (timeout olmuş veya zaten bizim)
+	filter := bson.M{
+		"_id": partitionID,
+		"$or": []bson.M{
+			{"lastHeartbeat": bson.M{"$lt": cutoff}}, // Timeout olmuş
+			{"workerId": m.workerID},                 // Zaten bizim
+		},
+	}
+
+	update := bson.M{"$set": assignment}
+	result, err := m.partitionsCol.UpdateOne(ctx, filter, update)
+	if err != nil {
+		return fmt.Errorf("failed to update existing partition: %w", err)
+	}
+
+	if result.MatchedCount() > 0 {
+		return nil // Başarıyla güncellendi
+	}
+
+	// 2. Aşama: Yeni partition oluşturmaya çalış (ilk defa assign ediliyor)
+	_, err = m.partitionsCol.InsertOne(ctx, assignment)
+	if err != nil {
+		if isDuplicateKeyError(err) {
+			// Race condition: partition zaten var ve aktif owner tarafından sahiplenilmiş
+			return fmt.Errorf("partition %d is already owned by another active worker", partitionID)
+		}
+		return fmt.Errorf("failed to insert new partition assignment: %w", err)
+	}
+
+	return nil // Başarıyla oluşturuldu
+}
+
+func (m *manager) releasePartition(ctx context.Context, partitionID int) error {
+	filter := bson.M{
+		"_id":      partitionID,
+		"workerId": m.workerID, // Only release if we own it
+	}
+
+	result, err := m.partitionsCol.DeleteOne(ctx, filter)
+	if err != nil {
+		return fmt.Errorf("failed to release partition %d: %w", partitionID, err)
+	}
+
+	if result.DeletedCount() == 0 {
+		m.logger.Warn("Partition was not owned by this worker during release",
+			zap.Int("partition", partitionID),
+			zap.String("workerId", m.workerID))
+	} else {
+		m.logger.Debug("Successfully released partition",
+			zap.Int("partition", partitionID),
+			zap.String("workerId", m.workerID))
+	}
+
+	return nil
+}
+
+func isDuplicateKeyError(err error) bool {
+	return err != nil && (err.Error() == "E11000" ||
+		strings.Contains(err.Error(), "E11000") ||
+		strings.Contains(err.Error(), "duplicate key error"))
 }
 
 func (m *manager) updateWorkerPartitions(ctx context.Context, partitions []int) error {
@@ -482,24 +542,6 @@ func (m *manager) updateWorkerPartitions(ctx context.Context, partitions []int) 
 
 	_, err := m.workersCol.UpdateOne(ctx, filter, update)
 	return err
-}
-
-func (m *manager) RefreshPartitions(ctx context.Context) error {
-	newPartitions, err := m.AcquirePartitions(ctx)
-	if err != nil {
-		return err
-	}
-
-	// Notify about partition changes to manage streams
-	if m.onPartitionsChanged != nil {
-		m.onPartitionsChanged(newPartitions)
-	}
-
-	return nil
-}
-
-func (m *manager) SetPartitionsChangedCallback(callback func(newPartitions []int)) {
-	m.onPartitionsChanged = callback
 }
 
 func (m *manager) ReleasePartitions(ctx context.Context) error {
@@ -525,15 +567,6 @@ func (m *manager) ReleasePartitions(ctx context.Context) error {
 	return m.updateWorkerPartitions(ctx, []int{})
 }
 
-/*func (m *manager) GetAssignedPartitions() []int {
-	m.mu.RLock()
-	defer m.mu.RUnlock()
-
-	result := make([]int, len(m.assignedPartitions))
-	copy(result, m.assignedPartitions)
-	return result
-}*/
-
 func (m *manager) Stop(ctx context.Context) error {
 	m.mu.Lock()
 	if !m.isRunning {
@@ -553,7 +586,7 @@ func (m *manager) Stop(ctx context.Context) error {
 
 	select {
 	case <-done:
-	case <-time.After(10 * time.Second):
+	case <-time.After(2 * time.Second):
 		m.logger.Warn("Timeout waiting for heartbeat loop to stop")
 	}
 

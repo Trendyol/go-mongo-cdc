@@ -101,50 +101,6 @@ func (ps *partitionStream) Start(ctx context.Context) error {
 		return fmt.Errorf("failed to initialize partition manager: %w", err)
 	}
 
-	//TODO: burası daha iyi nasıl yapılabilir?
-	ps.partitionManager.SetPartitionsChangedCallback(func(newPartitions []int) {
-		ps.streamsMutex.Lock()
-		defer ps.streamsMutex.Unlock()
-
-		// Stop streams for partitions we no longer own
-		for partitionID, worker := range ps.activeStreams {
-			found := false
-			for _, p := range newPartitions {
-				if p == partitionID {
-					found = true
-					break
-				}
-			}
-
-			if !found {
-				ps.logger.Info("Stopping stream for partition", zap.Int("partitionId", partitionID))
-				worker.cancel()
-				delete(ps.activeStreams, partitionID)
-			}
-		}
-
-		// Start streams for new partitions
-		for _, partitionID := range newPartitions {
-			if _, exists := ps.activeStreams[partitionID]; !exists {
-				ps.logger.Info("Starting stream for partition", zap.Int("partitionId", partitionID))
-
-				worker := &streamWorker{
-					partitionID: partitionID,
-				}
-				worker.ctx, worker.cancel = context.WithCancel(ps.ctx)
-
-				ps.activeStreams[partitionID] = worker
-
-				ps.wg.Add(1)
-				go ps.runPartitionStream(worker)
-			}
-		}
-
-		ps.logger.Debug("Active partitions updated",
-			zap.Int("count", len(ps.activeStreams)),
-			zap.Ints("partitions", newPartitions))
-	})
-
 	// Initial partition assignment
 	if err := ps.refreshPartitions(); err != nil {
 		ps.logger.Error("Failed to acquire initial partitions", zap.Error(err))
