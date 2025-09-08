@@ -50,6 +50,7 @@ func main() {
 			WorkerTimeout:          30 * time.Second,
 			PartitionDatabase:      "exampleDB",
 			RebalanceCheckInterval: 10 * time.Second,
+			RuntimeFiltering:       true, // MongoDB CPU yükünü azaltmak için runtime filtreleme aktif
 		},
 		Logger: config.LoggerConfig{
 			Logger: logger,

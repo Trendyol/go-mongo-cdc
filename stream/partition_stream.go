@@ -4,6 +4,8 @@ import (
 	"context"
 	"errors"
 	"fmt"
+	"hash/fnv"
+	"strconv"
 	"sync"
 	"time"
 
@@ -345,7 +347,13 @@ func (ps *partitionStream) bootstrapPartition(worker *streamWorker) error {
 
 	bootstrapLastID, _ := ps.checkpointManager.GetBootstrapProgress(ps.ctx, worker.partitionID)
 
-	filter := ps.createDocumentFilter(worker.partitionID)
+	var filter bson.D
+	if ps.cfg.Partition.RuntimeFiltering {
+		filter = bson.D{}
+	} else {
+		filter = ps.createDocumentFilter(worker.partitionID)
+	}
+
 	if bootstrapLastID != nil {
 		filter = append(filter, bson.E{Key: "_id", Value: bson.M{"$gt": bootstrapLastID}})
 	}
@@ -362,6 +370,13 @@ func (ps *partitionStream) bootstrapPartition(worker *streamWorker) error {
 		if err := cursor.Decode(&document); err != nil {
 			ps.logger.Error("Error decoding document", zap.Error(err))
 			continue
+		}
+
+		if ps.cfg.Partition.RuntimeFiltering {
+			calculatedPartition := ps.calculateRuntimePartition(document["_id"])
+			if calculatedPartition != worker.partitionID {
+				continue
+			}
 		}
 
 		syntheticEvent := message.ChangeEvent{
@@ -409,7 +424,7 @@ func (ps *partitionStream) bootstrapPartition(worker *streamWorker) error {
 }
 
 func (ps *partitionStream) createPipeline(partitionID int) []bson.D {
-	return []bson.D{
+	pipeline := []bson.D{
 		{
 			{Key: "$match", Value: bson.D{
 				{Key: "operationType", Value: bson.D{
@@ -417,7 +432,10 @@ func (ps *partitionStream) createPipeline(partitionID int) []bson.D {
 				}},
 			}},
 		},
-		{
+	}
+
+	if !ps.cfg.Partition.RuntimeFiltering {
+		pipeline = append(pipeline, bson.D{
 			{Key: "$match", Value: bson.D{
 				{Key: "$expr", Value: bson.D{
 					{Key: "$eq", Value: bson.A{
@@ -429,8 +447,10 @@ func (ps *partitionStream) createPipeline(partitionID int) []bson.D {
 					}},
 				}},
 			}},
-		},
+		})
 	}
+
+	return pipeline
 }
 
 func (ps *partitionStream) createDocumentFilter(partitionID int) bson.D {
@@ -566,8 +586,75 @@ func (ps *partitionStream) createSingleHexCharToInt(charExpr bson.D) bson.D {
 	}
 }
 
+func (ps *partitionStream) calculateRuntimePartition(documentID interface{}) int {
+	var hashValue uint64
+
+	switch id := documentID.(type) {
+	case int:
+		hashValue = uint64(id)
+	case int32:
+		hashValue = uint64(id)
+	case int64:
+		hashValue = uint64(id)
+	case float64:
+		hashValue = uint64(id)
+	case string:
+		if numVal, err := strconv.ParseFloat(id, 64); err == nil {
+			hashValue = uint64(numVal)
+		} else {
+			hashValue = ps.calculateStringHash(id)
+		}
+	case primitive.ObjectID:
+		hashValue = ps.calculateStringHash(id.Hex())
+	default:
+		idStr := fmt.Sprintf("%v", id)
+		hashValue = ps.calculateStringHash(idStr)
+	}
+
+	return int(hashValue % uint64(ps.cfg.Partition.TotalPartition))
+}
+
+func (ps *partitionStream) calculateStringHash(s string) uint64 {
+	if len(s) < 3 {
+		h := fnv.New64a()
+		h.Write([]byte(s))
+		return h.Sum64()
+	}
+
+	lastThreeChars := s[len(s)-3:]
+	var hashValue uint64
+
+	for i, char := range lastThreeChars {
+		charValue := ps.hexCharToInt(byte(char))
+		multiplier := uint64(1)
+		for j := 0; j < 2-i; j++ {
+			multiplier *= 16
+		}
+		hashValue += uint64(charValue) * multiplier
+	}
+
+	return hashValue
+}
+
+func (ps *partitionStream) hexCharToInt(char byte) int {
+	switch {
+	case char >= '0' && char <= '9':
+		return int(char - '0')
+	case char >= 'a' && char <= 'f':
+		return int(char - 'a' + 10)
+	case char >= 'A' && char <= 'F':
+		return int(char - 'A' + 10)
+	default:
+		return 0
+	}
+}
+
 func (ps *partitionStream) processEvent(worker *streamWorker, event message.ChangeEvent, resumeToken []byte) error {
 	startTime := time.Now()
+
+	if !ps.shouldProcessEvent(event, worker.partitionID) {
+		return nil
+	}
 
 	msg, err := message.NewMessage(event)
 	if err != nil {
@@ -629,6 +716,15 @@ func (ps *partitionStream) processEvent(worker *streamWorker, event message.Chan
 	}
 
 	return ps.listener(listenerCtx)
+}
+
+func (ps *partitionStream) shouldProcessEvent(event message.ChangeEvent, partitionID int) bool {
+	if !ps.cfg.Partition.RuntimeFiltering {
+		return true
+	}
+
+	calculatedPartition := ps.calculateRuntimePartition(event.DocumentKey.ID)
+	return calculatedPartition == partitionID
 }
 
 func (ps *partitionStream) updateMetrics(opType message.OperationType) {
