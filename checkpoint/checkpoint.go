@@ -16,6 +16,7 @@ import (
 type Manager interface {
 	SaveResumeToken(ctx context.Context, partitionID int, token []byte, clusterTime *primitive.Timestamp) error
 	GetResumeToken(ctx context.Context, partitionID int) ([]byte, *primitive.Timestamp, error)
+	ClearResumeToken(ctx context.Context, partitionID int) error
 	SaveBootstrapProgress(ctx context.Context, partitionID int, lastID interface{}) error
 	GetBootstrapProgress(ctx context.Context, partitionID int) (interface{}, error)
 	ClearBootstrapProgress(ctx context.Context, partitionID int) error
@@ -181,6 +182,38 @@ func (m *manager) ClearBootstrapProgress(ctx context.Context, partitionID int) e
 
 	_, err := m.collection.UpdateOne(ctx, filter, update)
 	return err
+}
+
+func (m *manager) ClearResumeToken(ctx context.Context, partitionID int) error {
+	checkpointID := m.getCheckpointID(partitionID)
+	filter := bson.M{"_id": checkpointID}
+
+	update := bson.M{
+		"$unset": bson.M{
+			"resumeToken":     "",
+			"lastClusterTime": "",
+		},
+		"$set": bson.M{
+			"updatedAt": time.Now(),
+		},
+	}
+
+	result, err := m.collection.UpdateOne(ctx, filter, update)
+	if err != nil {
+		m.logger.Error("Failed to clear resume token",
+			zap.Int("partitionId", partitionID),
+			zap.String("checkpointId", checkpointID),
+			zap.Error(err))
+		return err
+	}
+
+	if result.MatchedCount() > 0 {
+		m.logger.Info("Resume token cleared successfully",
+			zap.Int("partitionId", partitionID),
+			zap.String("checkpointId", checkpointID))
+	}
+
+	return nil
 }
 
 func (m *manager) SaveBootstrapClusterTime(ctx context.Context, partitionID int, clusterTime primitive.Timestamp) error {
