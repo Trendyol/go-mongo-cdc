@@ -49,6 +49,7 @@ type PartitionConfig struct {
 	PartitionDatabase      string        `json:"partitionDatabase" yaml:"partitionDatabase"`
 	RebalanceCheckInterval time.Duration `json:"rebalanceCheckInterval" yaml:"rebalanceCheckInterval"`
 	TotalPartition         int           `json:"totalPartition" yaml:"totalPartition"`
+	RuntimeFiltering       bool          `json:"runtimeFiltering" yaml:"runtimeFiltering"`
 }
 
 func (c *Config) SetDefault() {

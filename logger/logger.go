@@ -34,6 +34,38 @@ func InitLogger(customLogger *zap.Logger) *zap.Logger {
 	return logger
 }
 
+func InitLoggerWithLevel(customLogger *zap.Logger, level slog.Level) *zap.Logger {
+	if customLogger != nil {
+		defaultLogger = customLogger
+		return customLogger
+	}
+
+	config := zap.NewProductionConfig()
+
+	var zapLevel zap.AtomicLevel
+	switch level {
+	case slog.LevelDebug:
+		zapLevel = zap.NewAtomicLevelAt(zap.DebugLevel)
+	case slog.LevelInfo:
+		zapLevel = zap.NewAtomicLevelAt(zap.InfoLevel)
+	case slog.LevelWarn:
+		zapLevel = zap.NewAtomicLevelAt(zap.WarnLevel)
+	case slog.LevelError:
+		zapLevel = zap.NewAtomicLevelAt(zap.ErrorLevel)
+	default:
+		zapLevel = zap.NewAtomicLevelAt(zap.InfoLevel)
+	}
+
+	config.Level = zapLevel
+	logger, err := config.Build()
+	if err != nil {
+		panic(err)
+	}
+
+	defaultLogger = logger
+	return logger
+}
+
 func GetLogger() *zap.Logger {
 	if defaultLogger == nil {
 		return InitLogger(nil)

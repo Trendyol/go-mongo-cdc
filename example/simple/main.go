@@ -5,6 +5,7 @@ import (
 
 	cdc "github.com/Trendyol/go-mongo-cdc"
 
+	"fmt"
 	"log"
 	"strings"
 	"time"
@@ -50,6 +51,7 @@ func main() {
 			WorkerTimeout:          30 * time.Second,
 			PartitionDatabase:      "exampleDB",
 			RebalanceCheckInterval: 10 * time.Second,
+			RuntimeFiltering:       true, // MongoDB CPU yükünü azaltmak için runtime filtreleme aktif
 		},
 		Logger: config.LoggerConfig{
 			Logger: logger,
@@ -75,21 +77,14 @@ func (l *CDCListener) ProcessChangeEvent(lc *stream.ListenerContext) error {
 	switch lc.Message.OperationType {
 	case message.OperationInsert, message.OperationUpdate, message.OperationReplace:
 		if lc.Message.FullDocument != nil {
-			l.logger.Info("Document changed",
-				zap.String("operation", string(lc.Message.OperationType)),
-				zap.Any("document", lc.Message.FullDocument),
-				zap.Int("partitionId", lc.PartitionID),
-			)
+			l.logger.Info(fmt.Sprintf("Document changed - operation: %s, document: %v, partitionId: %d", string(lc.Message.OperationType), lc.Message.FullDocument, lc.PartitionID))
 		}
 	case message.OperationDelete:
-		l.logger.Info("Document deleted",
-			zap.Any("documentId", lc.Message.DocumentID),
-			zap.Int("partitionId", lc.PartitionID),
-		)
+		l.logger.Info(fmt.Sprintf("Document deleted - documentId: %v, partitionId: %d", lc.Message.DocumentID, lc.PartitionID))
 	}
 
 	if err := lc.Ack(); err != nil {
-		l.logger.Error("Failed to acknowledge message", zap.Error(err))
+		l.logger.Error(fmt.Sprintf("Failed to acknowledge message: %v", err))
 		return err
 	}
 	return nil

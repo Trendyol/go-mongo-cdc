@@ -159,6 +159,12 @@ connector, err := cdc.NewConnectorWithConfigFile(
 | `WorkerTimeout` | duration | Worker timeout duration | 30s |
 | `PartitionDatabase` | string | Partition database | cdc_partitions |
 | `RefreshInterval` | duration | Partition refresh interval | 30s |
+| `RuntimeFiltering` | bool | MongoDB CPU yükünü azaltmak için runtime filtreleme | false |
+
+**RuntimeFiltering Açıklaması:**
+- `false` (varsayılan): MongoDB seviyesinde partition filtreleme yapılır (daha az network trafiği, daha fazla MongoDB CPU kullanımı)
+- `true`: Runtime'da partition filtreleme yapılır (daha fazla network trafiği, daha az MongoDB CPU kullanımı)
+- Çok sayıda change stream (50+) kullanıyorsanız `true` yapmanız önerilir
 
 ## 🏗️ Architecture
 

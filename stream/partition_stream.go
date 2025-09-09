@@ -4,6 +4,8 @@ import (
 	"context"
 	"errors"
 	"fmt"
+	"hash/fnv"
+	"strconv"
 	"sync"
 	"time"
 
@@ -106,7 +108,7 @@ func (ps *partitionStream) Start(ctx context.Context) error {
 
 	// Initial partition assignment
 	if err := ps.refreshPartitions(); err != nil {
-		ps.logger.Error("Failed to acquire initial partitions", zap.Error(err))
+		ps.logger.Error(fmt.Sprintf("Failed to acquire initial partitions: %v", err))
 		return err
 	}
 
@@ -163,7 +165,7 @@ func (ps *partitionStream) updateStreams(newPartitions []int) {
 		}
 
 		if !found {
-			ps.logger.Info("Stopping stream for partition", zap.Int("partitionId", partitionID))
+			ps.logger.Info(fmt.Sprintf("Stopping stream for partition %d", partitionID))
 			worker.cancel()
 			delete(ps.activeStreams, partitionID)
 		}
@@ -172,7 +174,7 @@ func (ps *partitionStream) updateStreams(newPartitions []int) {
 	// Start streams for new partitions
 	for _, partitionID := range newPartitions {
 		if _, exists := ps.activeStreams[partitionID]; !exists {
-			ps.logger.Info("Starting stream for partition", zap.Int("partitionId", partitionID))
+			ps.logger.Info(fmt.Sprintf("Starting stream for partition %d", partitionID))
 
 			worker := &streamWorker{
 				partitionID: partitionID,
@@ -186,9 +188,7 @@ func (ps *partitionStream) updateStreams(newPartitions []int) {
 		}
 	}
 
-	ps.logger.Debug("Active partitions updated",
-		zap.Int("count", len(ps.activeStreams)),
-		zap.Ints("partitions", newPartitions))
+	ps.logger.Debug(fmt.Sprintf("Active partitions updated - count: %d, partitions: %v", len(ps.activeStreams), newPartitions))
 }
 
 func (ps *partitionStream) runPartitionStream(worker *streamWorker) {
@@ -201,20 +201,16 @@ func (ps *partitionStream) runPartitionStream(worker *streamWorker) {
 		default:
 			err := ps.processPartitionStream(worker)
 			if err == nil {
-				ps.logger.Info("Partition stream completed normally",
-					zap.Int("partitionId", worker.partitionID))
+				ps.logger.Info(fmt.Sprintf("Partition stream completed normally - partitionId: %d", worker.partitionID))
 				return
 			}
 
 			if errors.Is(err, context.Canceled) {
-				ps.logger.Info("Partition stream cancelled",
-					zap.Int("partitionId", worker.partitionID))
+				ps.logger.Info(fmt.Sprintf("Partition stream cancelled - partitionId: %d", worker.partitionID))
 				return
 			}
 
-			ps.logger.Error("Partition stream error, retrying",
-				zap.Int("partitionId", worker.partitionID),
-				zap.Error(err))
+			ps.logger.Error(fmt.Sprintf("Partition stream error, retrying - partitionId: %d, error: %v", worker.partitionID, err))
 
 			time.Sleep(5 * time.Second)
 		}
@@ -229,8 +225,7 @@ func (ps *partitionStream) processPartitionStream(worker *streamWorker) error {
 
 	shouldBootstrap := false
 	if resumeToken == nil && startAtOperationTime == nil {
-		ps.logger.Debug("No resume token or cluster time found, starting bootstrap",
-			zap.Int("partitionId", worker.partitionID))
+		ps.logger.Debug(fmt.Sprintf("No resume token or cluster time found, starting bootstrap - partitionId: %d", worker.partitionID))
 		shouldBootstrap = true
 
 		opTime, err := ps.getServerOperationTime(worker.ctx)
@@ -246,9 +241,7 @@ func (ps *partitionStream) processPartitionStream(worker *streamWorker) error {
 
 		if startAtOperationTime != nil {
 			if err := ps.checkpointManager.SaveBootstrapClusterTime(worker.ctx, worker.partitionID, *startAtOperationTime); err != nil {
-				ps.logger.Warn("Failed to save bootstrap cluster time",
-					zap.Int("partitionId", worker.partitionID),
-					zap.Error(err))
+				ps.logger.Warn(fmt.Sprintf("Failed to save bootstrap cluster time - partitionId: %d, error: %v", worker.partitionID, err))
 			}
 		}
 	}
@@ -258,12 +251,10 @@ func (ps *partitionStream) processPartitionStream(worker *streamWorker) error {
 
 	if resumeToken != nil {
 		opts.SetResumeAfter(bson.Raw(resumeToken))
-		ps.logger.Info("Resuming from token", zap.Int("partitionId", worker.partitionID))
+		ps.logger.Info(fmt.Sprintf("Resuming from token - partitionId: %d", worker.partitionID))
 	} else if startAtOperationTime != nil {
 		opts.SetStartAtOperationTime(startAtOperationTime)
-		ps.logger.Debug("Starting from operation time",
-			zap.Int("partitionId", worker.partitionID),
-			zap.Any("operationTime", startAtOperationTime))
+		ps.logger.Debug(fmt.Sprintf("Starting from operation time - partitionId: %d, operationTime: %v", worker.partitionID, startAtOperationTime))
 	}
 
 	changeStream, err := ps.collection.Watch(worker.ctx, pipeline, opts)
@@ -282,18 +273,13 @@ func (ps *partitionStream) processPartitionStream(worker *streamWorker) error {
 	for changeStream.Next(worker.ctx) {
 		var event message.ChangeEvent
 		if err := changeStream.Decode(&event); err != nil {
-			ps.logger.Error("Error decoding change event",
-				zap.Int("partitionId", worker.partitionID),
-				zap.Error(err))
+			ps.logger.Error(fmt.Sprintf("Error decoding change event - partitionId: %d, error: %v", worker.partitionID, err))
 			continue
 		}
 
 		currentToken := changeStream.ResumeToken()
 		if err := ps.processEvent(worker, event, currentToken); err != nil {
-			ps.logger.Error("Error processing event",
-				zap.Int("partitionId", worker.partitionID),
-				zap.String("operationType", event.OperationType),
-				zap.Error(err))
+			ps.logger.Error(fmt.Sprintf("Error processing event - partitionId: %d, operationType: %s, error: %v", worker.partitionID, event.OperationType, err))
 			continue
 		}
 	}
@@ -318,9 +304,7 @@ func (ps *partitionStream) prepareStreamStart(partitionID int) ([]byte, *primiti
 	}
 
 	if bootstrapLastID != nil {
-		ps.logger.Info("Found incomplete bootstrap, will continue",
-			zap.Int("partitionId", partitionID),
-			zap.Any("lastId", bootstrapLastID))
+		ps.logger.Info(fmt.Sprintf("Found incomplete bootstrap, will continue - partitionId: %d, lastId: %v", partitionID, bootstrapLastID))
 		return nil, nil, nil
 	}
 
@@ -341,11 +325,17 @@ func (ps *partitionStream) getServerOperationTime(ctx context.Context) (*primiti
 }
 
 func (ps *partitionStream) bootstrapPartition(worker *streamWorker) error {
-	ps.logger.Debug("Starting bootstrap for partition", zap.Int("partitionId", worker.partitionID))
+	ps.logger.Debug(fmt.Sprintf("Starting bootstrap for partition %d", worker.partitionID))
 
 	bootstrapLastID, _ := ps.checkpointManager.GetBootstrapProgress(ps.ctx, worker.partitionID)
 
-	filter := ps.createDocumentFilter(worker.partitionID)
+	var filter bson.D
+	if ps.cfg.Partition.RuntimeFiltering {
+		filter = bson.D{}
+	} else {
+		filter = ps.createDocumentFilter(worker.partitionID)
+	}
+
 	if bootstrapLastID != nil {
 		filter = append(filter, bson.E{Key: "_id", Value: bson.M{"$gt": bootstrapLastID}})
 	}
@@ -360,8 +350,15 @@ func (ps *partitionStream) bootstrapPartition(worker *streamWorker) error {
 	for cursor.Next(worker.ctx) {
 		var document bson.M
 		if err := cursor.Decode(&document); err != nil {
-			ps.logger.Error("Error decoding document", zap.Error(err))
+			ps.logger.Error(fmt.Sprintf("Error decoding document: %v", err))
 			continue
+		}
+
+		if ps.cfg.Partition.RuntimeFiltering {
+			calculatedPartition := ps.calculateRuntimePartition(document["_id"])
+			if calculatedPartition != worker.partitionID {
+				continue
+			}
 		}
 
 		syntheticEvent := message.ChangeEvent{
@@ -378,21 +375,17 @@ func (ps *partitionStream) bootstrapPartition(worker *streamWorker) error {
 		}
 
 		if err := ps.processEvent(worker, syntheticEvent, nil); err != nil {
-			ps.logger.Error("Error processing synthetic event",
-				zap.Any("documentId", document["_id"]),
-				zap.Error(err))
+			ps.logger.Error(fmt.Sprintf("Error processing synthetic event - documentId: %v, error: %v", document["_id"], err))
 			continue
 		}
 
 		processedCount++
 
 		if processedCount%1000 == 0 {
-			ps.logger.Info("Bootstrap progress",
-				zap.Int("partitionId", worker.partitionID),
-				zap.Int("processed", processedCount))
+			ps.logger.Info(fmt.Sprintf("Bootstrap progress - partitionId: %d, processed: %d", worker.partitionID, processedCount))
 
 			if err := ps.checkpointManager.SaveBootstrapProgress(worker.ctx, worker.partitionID, document["_id"]); err != nil {
-				ps.logger.Error("Failed to save bootstrap progress", zap.Error(err))
+				ps.logger.Error(fmt.Sprintf("Failed to save bootstrap progress: %v", err))
 			}
 		}
 	}
@@ -401,15 +394,13 @@ func (ps *partitionStream) bootstrapPartition(worker *streamWorker) error {
 		return err
 	}
 
-	ps.logger.Debug("Bootstrap completed",
-		zap.Int("partitionId", worker.partitionID),
-		zap.Int("totalProcessed", processedCount))
+	ps.logger.Debug(fmt.Sprintf("Bootstrap completed - partitionId: %d, totalProcessed: %d", worker.partitionID, processedCount))
 
 	return ps.checkpointManager.ClearBootstrapProgress(worker.ctx, worker.partitionID)
 }
 
 func (ps *partitionStream) createPipeline(partitionID int) []bson.D {
-	return []bson.D{
+	pipeline := []bson.D{
 		{
 			{Key: "$match", Value: bson.D{
 				{Key: "operationType", Value: bson.D{
@@ -417,7 +408,10 @@ func (ps *partitionStream) createPipeline(partitionID int) []bson.D {
 				}},
 			}},
 		},
-		{
+	}
+
+	if !ps.cfg.Partition.RuntimeFiltering {
+		pipeline = append(pipeline, bson.D{
 			{Key: "$match", Value: bson.D{
 				{Key: "$expr", Value: bson.D{
 					{Key: "$eq", Value: bson.A{
@@ -429,8 +423,10 @@ func (ps *partitionStream) createPipeline(partitionID int) []bson.D {
 					}},
 				}},
 			}},
-		},
+		})
 	}
+
+	return pipeline
 }
 
 func (ps *partitionStream) createDocumentFilter(partitionID int) bson.D {
@@ -566,8 +562,75 @@ func (ps *partitionStream) createSingleHexCharToInt(charExpr bson.D) bson.D {
 	}
 }
 
+func (ps *partitionStream) calculateRuntimePartition(documentID interface{}) int {
+	var hashValue uint64
+
+	switch id := documentID.(type) {
+	case int:
+		hashValue = uint64(id)
+	case int32:
+		hashValue = uint64(id)
+	case int64:
+		hashValue = uint64(id)
+	case float64:
+		hashValue = uint64(id)
+	case string:
+		if numVal, err := strconv.ParseFloat(id, 64); err == nil {
+			hashValue = uint64(numVal)
+		} else {
+			hashValue = ps.calculateStringHash(id)
+		}
+	case primitive.ObjectID:
+		hashValue = ps.calculateStringHash(id.Hex())
+	default:
+		idStr := fmt.Sprintf("%v", id)
+		hashValue = ps.calculateStringHash(idStr)
+	}
+
+	return int(hashValue % uint64(ps.cfg.Partition.TotalPartition))
+}
+
+func (ps *partitionStream) calculateStringHash(s string) uint64 {
+	if len(s) < 3 {
+		h := fnv.New64a()
+		h.Write([]byte(s))
+		return h.Sum64()
+	}
+
+	lastThreeChars := s[len(s)-3:]
+	var hashValue uint64
+
+	for i, char := range lastThreeChars {
+		charValue := ps.hexCharToInt(byte(char))
+		multiplier := uint64(1)
+		for j := 0; j < 2-i; j++ {
+			multiplier *= 16
+		}
+		hashValue += uint64(charValue) * multiplier
+	}
+
+	return hashValue
+}
+
+func (ps *partitionStream) hexCharToInt(char byte) int {
+	switch {
+	case char >= '0' && char <= '9':
+		return int(char - '0')
+	case char >= 'a' && char <= 'f':
+		return int(char - 'a' + 10)
+	case char >= 'A' && char <= 'F':
+		return int(char - 'A' + 10)
+	default:
+		return 0
+	}
+}
+
 func (ps *partitionStream) processEvent(worker *streamWorker, event message.ChangeEvent, resumeToken []byte) error {
 	startTime := time.Now()
+
+	if !ps.shouldProcessEvent(event, worker.partitionID) {
+		return nil
+	}
 
 	msg, err := message.NewMessage(event)
 	if err != nil {
@@ -631,6 +694,15 @@ func (ps *partitionStream) processEvent(worker *streamWorker, event message.Chan
 	return ps.listener(listenerCtx)
 }
 
+func (ps *partitionStream) shouldProcessEvent(event message.ChangeEvent, partitionID int) bool {
+	if !ps.cfg.Partition.RuntimeFiltering {
+		return true
+	}
+
+	calculatedPartition := ps.calculateRuntimePartition(event.DocumentKey.ID)
+	return calculatedPartition == partitionID
+}
+
 func (ps *partitionStream) updateMetrics(opType message.OperationType) {
 	switch opType {
 	case message.OperationInsert:
@@ -662,9 +734,7 @@ func (ps *partitionStream) periodicTokenSave(worker *streamWorker, ticker *time.
 					token,
 					clusterTime,
 				); err != nil {
-					ps.logger.Error("Failed to save resume token periodically",
-						zap.Int("partitionId", worker.partitionID),
-						zap.Error(err))
+					ps.logger.Error(fmt.Sprintf("Failed to save resume token periodically - partitionId: %d, error: %v", worker.partitionID, err))
 				}
 			}
 		}
@@ -680,7 +750,7 @@ func (ps *partitionStream) Stop(ctx context.Context) error {
 
 	ps.streamsMutex.Lock()
 	for partitionID, worker := range ps.activeStreams {
-		ps.logger.Info("Stopping stream worker", zap.Int("partitionId", partitionID))
+		ps.logger.Info(fmt.Sprintf("Stopping stream worker %d", partitionID))
 		worker.cancel()
 	}
 	ps.streamsMutex.Unlock()
@@ -699,7 +769,7 @@ func (ps *partitionStream) Stop(ctx context.Context) error {
 	}
 
 	if err := ps.partitionManager.Stop(ctx); err != nil {
-		ps.logger.Error("Failed to stop partition manager", zap.Error(err))
+		ps.logger.Error(fmt.Sprintf("Failed to stop partition manager: %v", err))
 		return err
 	}
 
