@@ -96,9 +96,7 @@ func (m *manager) Initialize(ctx context.Context) error {
 	m.wg.Add(1)
 	go m.monitorWorkerChanges()
 
-	m.logger.Info("Partition manager initialized",
-		zap.String("workerId", m.workerID),
-		zap.Int("totalPartitions", m.config.TotalPartition))
+	m.logger.Info(fmt.Sprintf("Partition manager initialized - workerId: %s, totalPartitions: %d", m.workerID, m.config.TotalPartition))
 
 	return nil
 }
@@ -162,11 +160,11 @@ func (m *manager) heartbeatLoop() {
 			ctx, cancel := context.WithTimeout(context.Background(), 5*time.Second)
 
 			if err := m.sendHeartbeat(ctx); err != nil {
-				m.logger.Error("Failed to send heartbeat", zap.Error(err))
+				m.logger.Error(fmt.Sprintf("Failed to send heartbeat: %v", err))
 			}
 
 			if err := m.updatePartitionHeartbeats(ctx); err != nil {
-				m.logger.Error("Failed to update partition heartbeats", zap.Error(err))
+				m.logger.Error(fmt.Sprintf("Failed to update partition heartbeats: %v", err))
 			}
 
 			cancel()
@@ -246,7 +244,7 @@ func (m *manager) checkForWorkerChangesAndRebalance() {
 	// Mevcut aktif worker sayısını kontrol et
 	currentWorkerCount, err := m.getActiveWorkerCount(ctx)
 	if err != nil {
-		m.logger.Error("Failed to get current worker count", zap.Error(err))
+		m.logger.Error(fmt.Sprintf("Failed to get current worker count: %v", err))
 		return
 	}
 
@@ -255,22 +253,16 @@ func (m *manager) checkForWorkerChangesAndRebalance() {
 
 	if needsRebalance {
 		if currentWorkerCount != m.lastKnownWorkerCount {
-			m.logger.Info("Worker count change detected",
-				zap.Int("previousCount", m.lastKnownWorkerCount),
-				zap.Int("currentCount", currentWorkerCount))
+			m.logger.Info(fmt.Sprintf("Worker count change detected - previousCount: %d, currentCount: %d", m.lastKnownWorkerCount, currentWorkerCount))
 		} else {
-			m.logger.Debug("Retrying partition acquisition",
-				zap.Int("workerCount", currentWorkerCount))
+			m.logger.Debug(fmt.Sprintf("Retrying partition acquisition - workerCount: %d", currentWorkerCount))
 		}
 
 		// Rebalance işlemini tetikle
 		if err := m.RefreshPartitions(ctx); err != nil {
-			m.logger.Error("Failed to refresh partitions",
-				zap.Error(err),
-				zap.Int("workerCount", currentWorkerCount))
+			m.logger.Error(fmt.Sprintf("Failed to refresh partitions - workerCount: %d, error: %v", currentWorkerCount, err))
 		} else {
-			m.logger.Info("Successfully rebalanced partitions",
-				zap.Int("workerCount", currentWorkerCount))
+			m.logger.Info(fmt.Sprintf("Successfully rebalanced partitions - workerCount: %d", currentWorkerCount))
 
 			// Güncellenen worker sayısını kaydet
 			m.lastKnownWorkerCount = currentWorkerCount
@@ -314,7 +306,7 @@ func (m *manager) needsPartitionRetry(ctx context.Context) bool {
 
 func (m *manager) AcquirePartitions(ctx context.Context) ([]int, error) {
 	if err := m.cleanupDeadWorkers(ctx); err != nil {
-		m.logger.Error("Failed to cleanup dead workers", zap.Error(err))
+		m.logger.Error(fmt.Sprintf("Failed to cleanup dead workers: %v", err))
 	}
 
 	activeWorkers, err := m.getActiveWorkerCount(ctx)
@@ -355,9 +347,7 @@ func (m *manager) AcquirePartitions(ctx context.Context) ([]int, error) {
 	var acquiredPartitions []int
 	for _, partitionID := range expectedPartitions {
 		if err := m.acquirePartition(ctx, partitionID); err != nil {
-			m.logger.Info("Failed to acquire partition",
-				zap.Int("partition", partitionID),
-				zap.Error(err))
+			m.logger.Info(fmt.Sprintf("Failed to acquire partition %d: %v", partitionID, err))
 			continue
 		}
 		acquiredPartitions = append(acquiredPartitions, partitionID)
@@ -368,18 +358,10 @@ func (m *manager) AcquirePartitions(ctx context.Context) ([]int, error) {
 	m.mu.Unlock()
 
 	if err := m.updateWorkerPartitions(ctx, acquiredPartitions); err != nil {
-		m.logger.Error("Failed to update worker partitions", zap.Error(err))
+		m.logger.Error(fmt.Sprintf("Failed to update worker partitions: %v", err))
 	}
 
-	m.logger.Info("Acquired partitions",
-		zap.Int("count", len(acquiredPartitions)),
-		zap.Ints("partitions", acquiredPartitions),
-		zap.Int("workerIndex", workerIndex),
-		zap.Int("activeWorkers", activeWorkers),
-		zap.Int("startPartition", startPartition),
-		zap.Int("endPartition", endPartition),
-		zap.Int("partitionsPerWorker", partitionsPerWorker),
-		zap.Int("extraPartitions", extraPartitions))
+	m.logger.Info(fmt.Sprintf("Acquired partitions - count: %d, partitions: %v, workerIndex: %d, activeWorkers: %d, startPartition: %d, endPartition: %d, partitionsPerWorker: %d, extraPartitions: %d", len(acquiredPartitions), acquiredPartitions, workerIndex, activeWorkers, startPartition, endPartition, partitionsPerWorker, extraPartitions))
 
 	return acquiredPartitions, nil
 }
@@ -409,16 +391,16 @@ func (m *manager) cleanupDeadWorkers(ctx context.Context) error {
 		partitionFilter := bson.M{"workerId": bson.M{"$in": deadWorkerIDs}}
 		_, err = m.partitionsCol.DeleteMany(ctx, partitionFilter)
 		if err != nil {
-			m.logger.Error("Failed to release dead worker partitions", zap.Error(err))
+			m.logger.Error(fmt.Sprintf("Failed to release dead worker partitions: %v", err))
 		}
 
 		workerFilter := bson.M{"_id": bson.M{"$in": deadWorkerIDs}}
 		_, err = m.workersCol.DeleteMany(ctx, workerFilter)
 		if err != nil {
-			m.logger.Error("Failed to delete dead workers", zap.Error(err))
+			m.logger.Error(fmt.Sprintf("Failed to delete dead workers: %v", err))
 		}
 
-		m.logger.Info("Cleaned up dead workers", zap.Strings("workerIds", deadWorkerIDs))
+		m.logger.Info(fmt.Sprintf("Cleaned up dead workers - workerIds: %v", deadWorkerIDs))
 	}
 
 	return nil
@@ -520,13 +502,9 @@ func (m *manager) releasePartition(ctx context.Context, partitionID int) error {
 	}
 
 	if result.DeletedCount() == 0 {
-		m.logger.Warn("Partition was not owned by this worker during release",
-			zap.Int("partition", partitionID),
-			zap.String("workerId", m.workerID))
+		m.logger.Warn(fmt.Sprintf("Partition was not owned by this worker during release - partition: %d, workerId: %s", partitionID, m.workerID))
 	} else {
-		m.logger.Debug("Successfully released partition",
-			zap.Int("partition", partitionID),
-			zap.String("workerId", m.workerID))
+		m.logger.Debug(fmt.Sprintf("Successfully released partition %d - workerId: %s", partitionID, m.workerID))
 	}
 
 	return nil
@@ -580,14 +558,11 @@ func (m *manager) RefreshPartitions(ctx context.Context) error {
 	}
 
 	if len(partitionsToRelease) > 0 {
-		m.logger.Info("Releasing partitions from MongoDB",
-			zap.Ints("partitionsToRelease", partitionsToRelease))
+		m.logger.Info(fmt.Sprintf("Releasing partitions from MongoDB - partitionsToRelease: %v", partitionsToRelease))
 
 		for _, partitionID := range partitionsToRelease {
 			if err := m.releasePartition(ctx, partitionID); err != nil {
-				m.logger.Error("Failed to release partition from MongoDB",
-					zap.Int("partition", partitionID),
-					zap.Error(err))
+				m.logger.Error(fmt.Sprintf("Failed to release partition from MongoDB - partition: %d, error: %v", partitionID, err))
 			}
 		}
 	}
@@ -651,13 +626,13 @@ func (m *manager) Stop(ctx context.Context) error {
 	}
 
 	if err := m.ReleasePartitions(ctx); err != nil {
-		m.logger.Error("Failed to release partitions during stop", zap.Error(err))
+		m.logger.Error(fmt.Sprintf("Failed to release partitions during stop: %v", err))
 	}
 
 	//TODO: ReleasePartitions icerisinde worker'in partitionlarını empty slice yapıyoruz zaten hemen sonrasında siliyoruz gerek var mı?
 	filter := bson.M{"_id": m.workerID}
 	if _, err := m.workersCol.DeleteOne(ctx, filter); err != nil {
-		m.logger.Error("Failed to unregister worker", zap.Error(err))
+		m.logger.Error(fmt.Sprintf("Failed to unregister worker: %v", err))
 	}
 
 	m.logger.Info("Partition manager stopped")

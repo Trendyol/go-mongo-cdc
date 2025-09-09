@@ -84,16 +84,11 @@ func (m *manager) SaveResumeToken(ctx context.Context, partitionID int, token []
 	_, err := m.collection.UpdateOne(ctx, filter, update, opts)
 
 	if err != nil {
-		m.logger.Error("Failed to save resume token",
-			zap.Int("partitionId", partitionID),
-			zap.String("checkpointId", checkpointID),
-			zap.Error(err))
+		m.logger.Error(fmt.Sprintf("Failed to save resume token - partitionId: %d, checkpointId: %s, error: %v", partitionID, checkpointID, err))
 		return err
 	}
 
-	m.logger.Debug("Resume token saved",
-		zap.Int("partitionId", partitionID),
-		zap.String("checkpointId", checkpointID))
+	m.logger.Debug(fmt.Sprintf("Resume token saved - partitionId: %d, checkpointId: %s", partitionID, checkpointID))
 
 	return nil
 }
@@ -136,10 +131,7 @@ func (m *manager) SaveBootstrapProgress(ctx context.Context, partitionID int, la
 	_, err := m.collection.UpdateOne(ctx, filter, update, opts)
 
 	if err != nil {
-		m.logger.Error("Failed to save bootstrap progress",
-			zap.Int("partitionId", partitionID),
-			zap.Any("lastId", lastID),
-			zap.Error(err))
+		m.logger.Error(fmt.Sprintf("Failed to save bootstrap progress - partitionId: %d, lastId: %v, error: %v", partitionID, lastID, err))
 	}
 
 	return err

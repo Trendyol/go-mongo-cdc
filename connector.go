@@ -68,7 +68,7 @@ func NewConnector(ctx context.Context, cfg config.Config, listenerFunc stream.Li
 	}
 	cfg.Print()
 
-	zapLogger := logger.InitLogger(cfg.Logger.Logger)
+	zapLogger := logger.InitLoggerWithLevel(cfg.Logger.Logger, cfg.Logger.LogLevel)
 
 	mongoClient, err := connection.NewConnection(ctx, cfg.DSN())
 	if err != nil {
@@ -95,10 +95,10 @@ func NewConnector(ctx context.Context, cfg config.Config, listenerFunc stream.Li
 }
 
 func (c *connector) Start(ctx context.Context) {
-	c.logger.Info("Starting MongoDB change stream connector", zap.String("workerId", c.workerID))
+	c.logger.Info(fmt.Sprintf("Starting MongoDB change stream connector - workerId: %s", c.workerID))
 
 	if err := c.stream.Start(ctx); err != nil {
-		c.logger.Fatal("Failed to start partition stream", zap.Error(err))
+		c.logger.Fatal(fmt.Sprintf("Failed to start partition stream: %v", err))
 	}
 
 	signal.Notify(c.cancelCh, syscall.SIGTERM, syscall.SIGINT, syscall.SIGABRT, syscall.SIGQUIT)
@@ -128,12 +128,12 @@ func (c *connector) Close() {
 	defer cancel()
 
 	if err := c.stream.Stop(closeCtx); err != nil {
-		c.logger.Error("Failed to stop stream", zap.Error(err))
+		c.logger.Error(fmt.Sprintf("Failed to stop stream: %v", err))
 	}
 
 	c.logger.Info("Closing mongo client")
 	if err := c.mongoClient.Close(closeCtx); err != nil {
-		c.logger.Error("Failed to close mongo client", zap.Error(err))
+		c.logger.Error(fmt.Sprintf("Failed to close mongo client: %v", err))
 	}
 
 	c.logger.Info("Closed connections")
