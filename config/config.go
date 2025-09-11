@@ -39,8 +39,11 @@ type LoggerConfig struct {
 }
 
 type CheckpointConfig struct {
-	Collection   string        `json:"collection" yaml:"collection"`
-	SaveInterval time.Duration `json:"saveInterval" yaml:"saveInterval"`
+	Collection            string        `json:"collection" yaml:"collection"`
+	SaveInterval          time.Duration `json:"saveInterval" yaml:"saveInterval"`
+	BootstrapSaveCount    int           `json:"bootstrapSaveCount" yaml:"bootstrapSaveCount"`
+	BootstrapSaveInterval time.Duration `json:"bootstrapSaveInterval" yaml:"bootstrapSaveInterval"`
+	SaveTimeout           time.Duration `json:"saveTimeout" yaml:"saveTimeout"`
 }
 
 type PartitionConfig struct {
@@ -70,6 +73,15 @@ func (c *Config) SetDefault() {
 	}
 	if c.Checkpoint.SaveInterval == 0 {
 		c.Checkpoint.SaveInterval = 30 * time.Second
+	}
+	if c.Checkpoint.BootstrapSaveCount == 0 {
+		c.Checkpoint.BootstrapSaveCount = 5000
+	}
+	if c.Checkpoint.SaveTimeout == 0 {
+		c.Checkpoint.SaveTimeout = 10 * time.Second
+	}
+	if c.Checkpoint.BootstrapSaveInterval == 0 {
+		c.Checkpoint.BootstrapSaveInterval = 30 * time.Second
 	}
 
 	if c.Partition.HeartbeatInterval == 0 {
@@ -143,7 +155,7 @@ func (c *Config) DSN() string {
 	if c.Database == "" && separator == "?" {
 		dsn.WriteString("/")
 	}
-	dsn.WriteString(fmt.Sprintf("%smaxPoolSize=350", separator))
+	dsn.WriteString(fmt.Sprintf("%smaxPoolSize=20&minPoolSize=2", separator))
 
 	return dsn.String()
 }
