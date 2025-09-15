@@ -3,6 +3,7 @@ package cdc
 import (
 	"context"
 	"fmt"
+	"golang.org/x/sync/errgroup"
 	"os"
 	"os/signal"
 	"strings"
@@ -77,7 +78,6 @@ func NewConnector(ctx context.Context, cfg config.Config, listenerFunc stream.Li
 
 	m := metric.NewMetric(cfg.Database, cfg.Collection)
 
-	// Generate unique worker ID
 	workerID := generateWorkerID()
 
 	partitionStream := stream.NewPartitionStream(mongoClient, cfg, m, listenerFunc, zapLogger, workerID)
@@ -97,55 +97,67 @@ func NewConnector(ctx context.Context, cfg config.Config, listenerFunc stream.Li
 func (c *connector) Start(ctx context.Context) {
 	c.logger.Info(fmt.Sprintf("Starting MongoDB change stream connector - workerId: %s", c.workerID))
 
-	if err := c.stream.Start(ctx); err != nil {
-		c.logger.Fatal(fmt.Sprintf("Failed to start partition stream: %v", err))
+	g, gCtx := errgroup.WithContext(ctx)
+
+	g.Go(func() error {
+		if err := c.stream.Start(gCtx); err != nil {
+			c.logger.Error(fmt.Sprintf("Failed to start partition stream: %v", err))
+			return err
+		}
+		return nil
+	})
+
+	g.Go(func() error {
+		signal.Notify(c.cancelCh, syscall.SIGTERM, syscall.SIGINT, syscall.SIGABRT, syscall.SIGQUIT)
+		select {
+		case <-c.cancelCh:
+			c.logger.Info("Shutdown signal received")
+			return nil
+		case <-gCtx.Done():
+			c.logger.Info(fmt.Sprintf("Context cancelled: %v", gCtx.Err()))
+			return gCtx.Err()
+		}
+	})
+
+	if err := g.Wait(); err != nil && err != context.Canceled {
+		c.logger.Error(fmt.Sprintf("Connector shutting down due to an error: %v", err))
+	} else {
+		c.logger.Info("Connector shutting down gracefully")
 	}
 
-	signal.Notify(c.cancelCh, syscall.SIGTERM, syscall.SIGINT, syscall.SIGABRT, syscall.SIGQUIT)
-
-	<-c.cancelCh
-	c.logger.Info("Shutdown signal received")
+	c.Close()
 }
 
 func (c *connector) Close() {
-	c.mu.Lock()
-	defer c.mu.Unlock()
+	c.once.Do(func() {
+		c.mu.Lock()
+		defer c.mu.Unlock()
 
-	c.logger.Info("Closing connections")
+		c.logger.Info("Closing connections")
 
-	if c.closed {
-		c.logger.Info("Already closed, skipping cleanup")
-		return
-	}
+		if c.closed {
+			c.logger.Info("Already closed, skipping cleanup")
+			return
+		}
 
-	c.closed = true
+		c.closed = true
 
-	if !isClosed(c.cancelCh) {
-		close(c.cancelCh)
-	}
+		signal.Stop(c.cancelCh)
 
-	closeCtx, cancel := context.WithTimeout(context.Background(), 30*time.Second)
-	defer cancel()
+		closeCtx, cancel := context.WithTimeout(context.Background(), 30*time.Second)
+		defer cancel()
 
-	if err := c.stream.Stop(closeCtx); err != nil {
-		c.logger.Error(fmt.Sprintf("Failed to stop stream: %v", err))
-	}
+		if err := c.stream.Stop(closeCtx); err != nil {
+			c.logger.Error(fmt.Sprintf("Failed to stop stream: %v", err))
+		}
 
-	c.logger.Info("Closing mongo client")
-	if err := c.mongoClient.Close(closeCtx); err != nil {
-		c.logger.Error(fmt.Sprintf("Failed to close mongo client: %v", err))
-	}
+		c.logger.Info("Closing mongo client")
+		if err := c.mongoClient.Close(closeCtx); err != nil {
+			c.logger.Error(fmt.Sprintf("Failed to close mongo client: %v", err))
+		}
 
-	c.logger.Info("Closed connections")
-}
-
-func isClosed[T any](ch <-chan T) bool {
-	select {
-	case <-ch:
-		return true
-	default:
-		return false
-	}
+		c.logger.Info("Closed connections")
+	})
 }
 
 func generateWorkerID() string {
