@@ -29,10 +29,8 @@ type CheckpointInfo struct {
 	LastClusterTime primitive.Timestamp `bson:"lastClusterTime,omitempty"`
 	LastRun         time.Time           `bson:"lastRun"`
 	UpdatedAt       time.Time           `bson:"updatedAt"`
-
-	// Bootstrap fields
-	BootstrapLastID interface{} `bson:"bootstrapLastId,omitempty"`
-	IsBootstrapping bool        `bson:"isBootstrapping"`
+	BootstrapLastID interface{}         `bson:"bootstrapLastId,omitempty"`
+	IsBootstrapping bool                `bson:"isBootstrapping"`
 }
 
 type manager struct {
