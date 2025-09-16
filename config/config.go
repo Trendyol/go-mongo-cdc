@@ -39,8 +39,11 @@ type LoggerConfig struct {
 }
 
 type CheckpointConfig struct {
-	Collection   string        `json:"collection" yaml:"collection"`
-	SaveInterval time.Duration `json:"saveInterval" yaml:"saveInterval"`
+	Collection            string        `json:"collection" yaml:"collection"`
+	SaveInterval          time.Duration `json:"saveInterval" yaml:"saveInterval"`
+	BootstrapSaveCount    int           `json:"bootstrapSaveCount" yaml:"bootstrapSaveCount"`
+	BootstrapSaveInterval time.Duration `json:"bootstrapSaveInterval" yaml:"bootstrapSaveInterval"`
+	SaveTimeout           time.Duration `json:"saveTimeout" yaml:"saveTimeout"`
 }
 
 type PartitionConfig struct {
@@ -69,6 +72,15 @@ func (c *Config) SetDefault() {
 	}
 	if c.Checkpoint.SaveInterval == 0 {
 		c.Checkpoint.SaveInterval = 30 * time.Second
+	}
+	if c.Checkpoint.BootstrapSaveCount == 0 {
+		c.Checkpoint.BootstrapSaveCount = 5000
+	}
+	if c.Checkpoint.SaveTimeout == 0 {
+		c.Checkpoint.SaveTimeout = 10 * time.Second
+	}
+	if c.Checkpoint.BootstrapSaveInterval == 0 {
+		c.Checkpoint.BootstrapSaveInterval = 30 * time.Second
 	}
 
 	if c.Partition.HeartbeatInterval == 0 {
@@ -102,19 +114,17 @@ func (c *Config) Validate() error {
 	return nil
 }
 
+// TODO: bu kod refctor edilecek
 func (c *Config) DSN() string {
 	var dsn strings.Builder
 
 	dsn.WriteString("mongodb://")
 
-	// Add authentication if provided
 	if c.Username != "" && c.Password != "" {
-		// Use secure encoding for MongoDB credentials
 		authPart := encodeMongoDBCredentials(c.Username, c.Password)
 		dsn.WriteString(authPart)
 	}
 
-	// Handle IPv6 addresses
 	host := c.Host
 	if strings.Contains(host, ":") && !strings.HasPrefix(host, "[") {
 		host = fmt.Sprintf("[%s]", host)
@@ -122,38 +132,32 @@ func (c *Config) DSN() string {
 
 	dsn.WriteString(fmt.Sprintf("%s:%d", host, c.Port))
 
-	// Add database if specified
 	if c.Database != "" {
 		dsn.WriteString(fmt.Sprintf("/%s", c.Database))
 	}
 
 	separator := "?"
 
-	// Add authSource if specified
 	if c.AuthDatabase != "" {
 		if c.Database == "" {
 			dsn.WriteString("/")
 		}
 		dsn.WriteString(fmt.Sprintf("%sauthSource=%s", separator, c.AuthDatabase))
-		separator = "&" // Bir sonraki parametre için ayırıcıyı '&' yap
+		separator = "&"
 	}
 
-	// maxPoolSize parametresini statik olarak ekle
 	if c.Database == "" && separator == "?" {
 		dsn.WriteString("/")
 	}
-	dsn.WriteString(fmt.Sprintf("%smaxPoolSize=350", separator))
+	dsn.WriteString(fmt.Sprintf("%smaxPoolSize=20&minPoolSize=2", separator))
 
 	return dsn.String()
 }
 
-// encodeMongoDBCredentials securely encodes username and password for MongoDB connection strings
 func encodeMongoDBCredentials(username, password string) string {
-	// Use multiple encoding strategies for maximum compatibility
 	encodedUsername := url.QueryEscape(username)
 	encodedPassword := url.QueryEscape(password)
 
-	// Additional validation - ensure @ character is properly encoded
 	if strings.Contains(username, "@") && !strings.Contains(encodedUsername, "%40") {
 		encodedUsername = strings.ReplaceAll(encodedUsername, "@", "%40")
 	}
