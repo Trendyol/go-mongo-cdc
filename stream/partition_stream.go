@@ -145,6 +145,14 @@ func (ps *partitionStream) checkReplicaSetStatus(ctx context.Context) error {
 }
 
 func (ps *partitionStream) initializePartitions() error {
+	// Wait a bit to allow other workers to register
+	select {
+	case <-ps.ctx.Done():
+		return ps.ctx.Err()
+	case <-time.After(3 * time.Second):
+		ps.logger.Debug("Initial partition acquisition delay completed")
+	}
+
 	partitions, err := ps.partitionManager.AcquirePartitions(ps.ctx)
 	if err != nil {
 		return err
@@ -372,14 +380,52 @@ func (ps *partitionStream) bootstrapPartition(worker *streamWorker) error {
 	filter := ps.createDocumentFilter(worker.partitionID)
 
 	if bootstrapLastID != nil {
-		filter = append(filter, bson.E{Key: "_id", Value: bson.M{"$gt": bootstrapLastID}})
-		ps.logger.Info(fmt.Sprintf("Resuming bootstrap from saved progress - partitionId: %d, lastId: %v", worker.partitionID, bootstrapLastID))
-	} else {
+		comparisonFilter, err := ps.createTypeSafeGreaterThanFilter("_id", bootstrapLastID)
+		if err != nil {
+			ps.logger.Warn(fmt.Sprintf("Failed to create type-safe filter, falling back to fresh bootstrap - partitionId: %d, lastId: %v, error: %v", worker.partitionID, bootstrapLastID, err))
+			bootstrapLastID = nil
+		} else {
+			filter = append(filter, comparisonFilter...)
+			ps.logger.Info(fmt.Sprintf("Resuming bootstrap from saved progress - partitionId: %d, lastId: %v (type: %T)", worker.partitionID, bootstrapLastID, bootstrapLastID))
+		}
+	}
+
+	if bootstrapLastID == nil {
 		ps.logger.Info(fmt.Sprintf("Starting fresh bootstrap - partitionId: %d", worker.partitionID))
 	}
 
-	opts := options.Find().SetSort(bson.D{{Key: "_id", Value: 1}})
-	cursor, err := ps.collection.Find(worker.ctx, filter, opts)
+	var cursor connection.Cursor
+	useNumericStringSorting := false
+
+	if bootstrapLastID != nil {
+		if lastIDStr, ok := bootstrapLastID.(string); ok && ps.isNumericString(lastIDStr) {
+			useNumericStringSorting = true
+			ps.logger.Info(fmt.Sprintf("Resuming with numeric string ID '%s' - using mathematical sorting", lastIDStr))
+		}
+	} else {
+		isNumericStringCollection, err := ps.detectNumericStringCollection(worker.ctx, filter)
+		if err != nil {
+			ps.logger.Warn(fmt.Sprintf("Failed to detect ID type, using default sorting - partitionId: %d, error: %v", worker.partitionID, err))
+		} else if isNumericStringCollection {
+			useNumericStringSorting = true
+			ps.logger.Info("Detected numeric string IDs in collection - using mathematical sorting for fresh bootstrap")
+		}
+	}
+
+	if useNumericStringSorting {
+		// Use collation for numeric string sorting
+		opts := options.Find().
+			SetSort(bson.D{{Key: "_id", Value: 1}}).
+			SetCollation(&options.Collation{
+				Locale:          "en",
+				NumericOrdering: true,
+			})
+		cursor, err = ps.collection.Find(worker.ctx, filter, opts)
+		ps.logger.Debug("Using collation-based numeric string sorting")
+	} else {
+		opts := options.Find().SetSort(bson.D{{Key: "_id", Value: 1}})
+		cursor, err = ps.collection.Find(worker.ctx, filter, opts)
+	}
 	if err != nil {
 		return err
 	}
@@ -704,6 +750,157 @@ func (ps *partitionStream) createOptimizedStringHash(idField string) bson.D {
 			{Key: "lang", Value: "js"},
 		}},
 	}
+}
+
+func (ps *partitionStream) createTypeSafeGreaterThanFilter(fieldName string, lastValue interface{}) (bson.D, error) {
+	if lastValue == nil {
+		return bson.D{}, fmt.Errorf("lastValue cannot be nil")
+	}
+
+	switch v := lastValue.(type) {
+	case primitive.ObjectID:
+		// ObjectIds have natural ordering and work well with $gt
+		return bson.D{
+			{Key: "$and", Value: bson.A{
+				bson.M{fieldName: bson.M{"$type": "objectId"}},
+				bson.M{fieldName: bson.M{"$gt": v}},
+			}},
+		}, nil
+
+	case int, int32, int64, float32, float64:
+		// Numeric types work well with $gt, but ensure type consistency
+		return bson.D{
+			{Key: "$and", Value: bson.A{
+				bson.M{fieldName: bson.M{"$type": bson.A{"int", "long", "double", "decimal"}}},
+				bson.M{fieldName: bson.M{"$gt": v}},
+			}},
+		}, nil
+
+	case string:
+		// For strings, use simple comparison
+		// The Find() operation will apply collation if needed for numeric strings
+		return bson.D{
+			{Key: "$and", Value: bson.A{
+				bson.M{fieldName: bson.M{"$type": "string"}},
+				bson.M{fieldName: bson.M{"$gt": v}},
+			}},
+		}, nil
+
+	case primitive.Binary:
+		// UUID/Binary data - use $gt with same type and subtype
+		return bson.D{
+			{Key: "$and", Value: bson.A{
+				bson.M{fieldName: bson.M{"$type": "binData"}},
+				bson.M{fieldName: bson.M{"$gt": v}},
+			}},
+		}, nil
+
+	case primitive.DateTime:
+		// DateTime types should be compared as dates
+		return bson.D{
+			{Key: "$and", Value: bson.A{
+				bson.M{fieldName: bson.M{"$type": "date"}},
+				bson.M{fieldName: bson.M{"$gt": v}},
+			}},
+		}, nil
+
+	default:
+		// return nil, fmt.Errorf("unsupported _id type for comparison: %T", v)
+
+		// For any other complex type, convert to string representation for comparison
+		// This handles UUID strings, complex objects, etc.
+		valueStr := fmt.Sprintf("%v", v)
+		ps.logger.Info(fmt.Sprintf("Using string-based comparison for complex type %T (value: %s)", v, valueStr))
+
+		return bson.D{
+			{Key: "$or", Value: bson.A{
+				// Either the field is not a string and we can't compare it safely (skip it)
+				bson.M{fieldName: bson.M{"$not": bson.M{"$type": "string"}}},
+				// Or it's a string and greater than our string representation
+				bson.M{
+					"$and": bson.A{
+						bson.M{fieldName: bson.M{"$type": "string"}},
+						bson.M{fieldName: bson.M{"$gt": valueStr}},
+					},
+				},
+				// Or it's the same complex type but not the exact same value
+				bson.M{fieldName: bson.M{"$ne": v}},
+			}},
+		}, nil
+	}
+}
+
+func (ps *partitionStream) isNumericString(s string) bool {
+	if len(s) == 0 {
+		return false
+	}
+	for _, char := range s {
+		if char < '0' || char > '9' {
+			return false
+		}
+	}
+	return true
+}
+
+func (ps *partitionStream) stringToFloat(s string) float64 {
+	result := 0.0
+	for _, char := range s {
+		if char >= '0' && char <= '9' {
+			result = result*10 + float64(char-'0')
+		}
+	}
+	return result
+}
+
+func (ps *partitionStream) detectNumericStringCollection(ctx context.Context, filter bson.D) (bool, error) {
+	const sampleSize = 10
+	const minSamplesForConfidence = 3
+
+	ps.logger.Debug(fmt.Sprintf("Detecting collection ID type with sample size %d for partition...", sampleSize))
+
+	opts := options.Find().SetLimit(sampleSize)
+	cursor, err := ps.collection.Find(ctx, filter, opts)
+	if err != nil {
+		return false, fmt.Errorf("koleksiyonu örneklemek için sorgu başarısız oldu: %w", err)
+	}
+	defer cursor.Close(ctx)
+
+	var docsChecked int
+	for cursor.Next(ctx) {
+		var doc struct {
+			ID interface{} `bson:"_id"`
+		}
+
+		if err := cursor.Decode(&doc); err != nil {
+			ps.logger.Warn(fmt.Sprintf("failed to decode, r: %v", err))
+			continue
+		}
+		docsChecked++
+
+		idStr, ok := doc.ID.(string)
+		if !ok {
+			ps.logger.Info(fmt.Sprintf("found different type than a string (tip: %T)", doc.ID))
+			return false, nil
+		}
+
+		if !ps.isNumericString(idStr) {
+			ps.logger.Info(fmt.Sprintf("found different type than a numeric string ('%s')", idStr))
+			return false, nil
+		}
+	}
+
+	if err := cursor.Err(); err != nil {
+		return false, fmt.Errorf("failed at cursor: %w", err)
+	}
+
+	if docsChecked < minSamplesForConfidence {
+		ps.logger.Info(fmt.Sprintf("%d documents were found in the sample, which is below the safe decision threshold of %d. The default sorting will be used.", docsChecked, minSamplesForConfidence))
+		return false, nil
+	}
+
+	ps.logger.Info(fmt.Sprintf("All %d documents in the sample were verified as numeric strings. Mathematical sorting will be used.", docsChecked))
+
+	return true, nil
 }
 
 func (ps *partitionStream) isResumeTokenError(err error) bool {

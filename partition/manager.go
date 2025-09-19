@@ -161,8 +161,15 @@ func (m *manager) registerWorker(ctx context.Context) error {
 	update := bson.M{"$set": worker}
 	opts := options.Update().SetUpsert(true)
 
-	_, err := m.workersCol.UpdateOne(ctx, filter, update, opts)
-	return err
+	result, err := m.workersCol.UpdateOne(ctx, filter, update, opts)
+	if err != nil {
+		return err
+	}
+
+	m.logger.Debug(fmt.Sprintf("Worker registered - workerId: %s, matched: %d, modified: %d, upserted: %v",
+		m.workerID, result.MatchedCount(), result.ModifiedCount(), result.UpsertedID() != nil))
+
+	return nil
 }
 
 func (m *manager) heartbeatLoop() {
@@ -287,10 +294,13 @@ func (m *manager) checkForWorkerChangesAndRebalance() {
 func (m *manager) needsPartitionRetry(ctx context.Context) bool {
 	m.mu.RLock()
 	currentPartitionCount := len(m.assignedPartitions)
+	currentPartitions := make([]int, len(m.assignedPartitions))
+	copy(currentPartitions, m.assignedPartitions)
 	m.mu.RUnlock()
 
 	activeWorkers, err := m.getActiveWorkerCount(ctx)
 	if err != nil {
+		m.logger.Warn(fmt.Sprintf("Failed to get active worker count for retry check: %v", err))
 		return false
 	}
 
@@ -300,6 +310,7 @@ func (m *manager) needsPartitionRetry(ctx context.Context) bool {
 
 	workerIndex, err := m.getWorkerIndex(ctx)
 	if err != nil {
+		m.logger.Warn(fmt.Sprintf("Failed to get worker index for retry check: %v", err))
 		return false
 	}
 
@@ -311,10 +322,19 @@ func (m *manager) needsPartitionRetry(ctx context.Context) bool {
 		expectedPartitionCount++
 	}
 
-	return currentPartitionCount < expectedPartitionCount
+	needsRetry := currentPartitionCount < expectedPartitionCount
+
+	if needsRetry {
+		m.logger.Debug(fmt.Sprintf("Partition retry needed - workerId: %s, current: %d (partitions: %v), expected: %d, workerIndex: %d, activeWorkers: %d",
+			m.workerID, currentPartitionCount, currentPartitions, expectedPartitionCount, workerIndex, activeWorkers))
+	}
+
+	return needsRetry
 }
 
 func (m *manager) AcquirePartitions(ctx context.Context) ([]int, error) {
+	m.logger.Debug(fmt.Sprintf("Starting partition acquisition - workerId: %s", m.workerID))
+
 	if err := m.cleanupDeadWorkers(ctx); err != nil {
 		m.logger.Error(fmt.Sprintf("Failed to cleanup dead workers: %v", err))
 	}
@@ -333,6 +353,8 @@ func (m *manager) AcquirePartitions(ctx context.Context) ([]int, error) {
 	if err != nil {
 		return nil, fmt.Errorf("failed to get worker index: %w", err)
 	}
+
+	m.logger.Debug(fmt.Sprintf("Partition acquisition context - workerId: %s, activeWorkers: %d, workerIndex: %d", m.workerID, activeWorkers, workerIndex))
 
 	partitionsPerWorker := m.config.TotalPartition / activeWorkers
 	extraPartitions := m.config.TotalPartition % activeWorkers
@@ -366,7 +388,7 @@ func (m *manager) AcquirePartitions(ctx context.Context) ([]int, error) {
 			continue
 		}
 		acquiredPartitions = append(acquiredPartitions, partitionID)
-		m.logger.Debug(fmt.Sprintf("Successfully acquired partition %d", partitionID))
+		m.logger.Debug(fmt.Sprintf("Successfully acquired partition %d - workerId: %s", partitionID, m.workerID))
 	}
 
 	if len(failedPartitions) > 0 {
@@ -409,19 +431,27 @@ func (m *manager) cleanupDeadWorkers(ctx context.Context) error {
 	}
 
 	if len(deadWorkerIDs) > 0 {
+		m.logger.Info(fmt.Sprintf("Found dead workers, cleaning up - workerIds: %v, cutoff: %v", deadWorkerIDs, cutoff))
+
 		partitionFilter := bson.M{"workerId": bson.M{"$in": deadWorkerIDs}}
-		_, err = m.partitionsCol.DeleteMany(ctx, partitionFilter)
+		partitionResult, err := m.partitionsCol.DeleteMany(ctx, partitionFilter)
 		if err != nil {
 			m.logger.Error(fmt.Sprintf("Failed to release dead worker partitions: %v", err))
+		} else {
+			m.logger.Debug(fmt.Sprintf("Released %d partitions from dead workers", partitionResult.DeletedCount()))
 		}
 
 		workerFilter := bson.M{"_id": bson.M{"$in": deadWorkerIDs}}
-		_, err = m.workersCol.DeleteMany(ctx, workerFilter)
+		workerResult, err := m.workersCol.DeleteMany(ctx, workerFilter)
 		if err != nil {
 			m.logger.Error(fmt.Sprintf("Failed to delete dead workers: %v", err))
+		} else {
+			m.logger.Debug(fmt.Sprintf("Deleted %d dead workers", workerResult.DeletedCount()))
 		}
 
 		m.logger.Info(fmt.Sprintf("Cleaned up dead workers - workerIds: %v", deadWorkerIDs))
+	} else {
+		m.logger.Debug(fmt.Sprintf("No dead workers found - cutoff: %v", cutoff))
 	}
 
 	return nil
@@ -446,27 +476,55 @@ func (m *manager) getWorkerIndex(ctx context.Context) (int, error) {
 	filter := bson.M{"lastHeartbeat": bson.M{"$gte": cutoff}}
 	opts := options.Find().SetSort(bson.D{{Key: "_id", Value: 1}})
 
-	cursor, err := m.workersCol.Find(ctx, filter, opts)
-	if err != nil {
-		return -1, err
-	}
-	defer cursor.Close(ctx)
+	// Retry mechanism to handle eventual consistency
+	maxRetries := 3
+	retryDelay := 1 * time.Second
 
-	index := 0
-	for cursor.Next(ctx) {
-		var worker WorkerInfo
-		if err := cursor.Decode(&worker); err != nil {
-			continue
+	for attempt := 1; attempt <= maxRetries; attempt++ {
+		cursor, err := m.workersCol.Find(ctx, filter, opts)
+		if err != nil {
+			return -1, err
 		}
 
-		if worker.ID == m.workerID {
-			return index, nil
+		var allWorkers []string
+		index := 0
+		found := false
+
+		for cursor.Next(ctx) {
+			var worker WorkerInfo
+			if err := cursor.Decode(&worker); err != nil {
+				continue
+			}
+
+			allWorkers = append(allWorkers, worker.ID)
+			if worker.ID == m.workerID {
+				found = true
+				cursor.Close(ctx)
+				m.logger.Debug(fmt.Sprintf("Worker index calculation - myWorkerId: %s, myIndex: %d, allActiveWorkers: %v, attempt: %d", m.workerID, index, allWorkers, attempt))
+				return index, nil
+			}
+			index++
 		}
-		index++
+		cursor.Close(ctx)
+
+		if found {
+			break
+		}
+
+		m.logger.Warn(fmt.Sprintf("Worker not found in active workers list - myWorkerId: %s, allActiveWorkers: %v, attempt: %d/%d", m.workerID, allWorkers, attempt, maxRetries))
+
+		if attempt < maxRetries {
+			// Force a heartbeat update before retry
+			if heartbeatErr := m.sendHeartbeat(ctx); heartbeatErr != nil {
+				m.logger.Error(fmt.Sprintf("Failed to send heartbeat during worker index retry: %v", heartbeatErr))
+			}
+			time.Sleep(retryDelay)
+		}
 	}
 
+	m.logger.Error(fmt.Sprintf("Worker not found in active workers list after %d attempts - myWorkerId: %s", maxRetries, m.workerID))
 	//TODO: worker not found ise panic?
-	return -1, fmt.Errorf("worker not found in active workers list")
+	return -1, fmt.Errorf("worker not found in active workers list after %d attempts", maxRetries)
 }
 
 func (m *manager) acquirePartition(ctx context.Context, partitionID int) error {
@@ -558,8 +616,14 @@ func (m *manager) updateWorkerPartitions(ctx context.Context, partitions []int) 
 		},
 	}
 
-	_, err := m.workersCol.UpdateOne(ctx, filter, update)
-	return err
+	result, err := m.workersCol.UpdateOne(ctx, filter, update)
+	if err != nil {
+		m.logger.Error(fmt.Sprintf("Failed to update worker partitions - workerId: %s, partitions: %v, error: %v", m.workerID, partitions, err))
+		return err
+	}
+
+	m.logger.Debug(fmt.Sprintf("Updated worker partitions - workerId: %s, partitions: %v, matched: %d, modified: %d", m.workerID, partitions, result.MatchedCount(), result.ModifiedCount()))
+	return nil
 }
 
 func (m *manager) RefreshPartitions(ctx context.Context) error {
