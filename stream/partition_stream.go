@@ -4,6 +4,7 @@ import (
 	"context"
 	"errors"
 	"fmt"
+	"strings"
 	"sync"
 	"time"
 
@@ -500,7 +501,19 @@ func (ps *partitionStream) runChangeStream(worker *streamWorker, resumeToken []b
 
 	changeStream, err := ps.collection.Watch(worker.ctx, pipeline, opts)
 	if err != nil {
-		return fmt.Errorf("failed to start change stream for partition %d: %w", worker.partitionID, err)
+		if ps.isResumeTokenError(err) && resumeToken != nil {
+			ps.logger.Warn("Resume token expired or invalid, clearing and starting from current time",
+				zap.Int("partitionId", worker.partitionID),
+				zap.Error(err))
+
+			if clearErr := ps.checkpointManager.ClearResumeToken(worker.ctx, worker.partitionID); clearErr != nil {
+				ps.logger.Error("Failed to clear invalid resume token", zap.Error(clearErr))
+			}
+
+			return ps.runChangeStream(worker, nil, startAtOperationTime)
+		}
+
+		return err
 	}
 	defer changeStream.Close(worker.ctx)
 
@@ -631,7 +644,7 @@ func (ps *partitionStream) createHashExpression(idField string) bson.D {
 				{Key: "$cond", Value: bson.D{
 					{Key: "if", Value: ps.createIsNumericStringCheck(idField)},
 					{Key: "then", Value: bson.D{{Key: "$toDouble", Value: idField}}},
-					{Key: "else", Value: ps.createStringHashExpression(idField)},
+					{Key: "else", Value: ps.createOptimizedStringHash(idField)},
 				}},
 			}},
 		}},
@@ -650,89 +663,59 @@ func (ps *partitionStream) createIsNumericStringCheck(idField string) bson.D {
 	}
 }
 
-func (ps *partitionStream) createStringHashExpression(idField string) bson.D {
-	// Hash using last 3 characters for better distribution with 1000 partitions
+func (ps *partitionStream) createOptimizedStringHash(idField string) bson.D {
 	return bson.D{
-		{Key: "$add", Value: bson.A{
-			bson.D{{Key: "$multiply", Value: bson.A{
-				ps.createSingleHexCharToInt(bson.D{
-					{Key: "$substr", Value: bson.A{
-						bson.D{{Key: "$toString", Value: idField}},
-						bson.D{{Key: "$max", Value: bson.A{
-							0,
-							bson.D{{Key: "$subtract", Value: bson.A{
-								bson.D{{Key: "$strLenCP", Value: bson.D{{Key: "$toString", Value: idField}}}},
-								3,
-							}}},
-						}}},
-						1,
-					}},
-				}),
-				256, // 16^2
-			}}},
-			bson.D{{Key: "$multiply", Value: bson.A{
-				ps.createSingleHexCharToInt(bson.D{
-					{Key: "$substr", Value: bson.A{
-						bson.D{{Key: "$toString", Value: idField}},
-						bson.D{{Key: "$max", Value: bson.A{
-							0,
-							bson.D{{Key: "$subtract", Value: bson.A{
-								bson.D{{Key: "$strLenCP", Value: bson.D{{Key: "$toString", Value: idField}}}},
-								2,
-							}}},
-						}}},
-						1,
-					}},
-				}),
-				16,
-			}}},
-			ps.createSingleHexCharToInt(bson.D{
-				{Key: "$substr", Value: bson.A{
-					bson.D{{Key: "$toString", Value: idField}},
-					bson.D{{Key: "$max", Value: bson.A{
-						0,
-						bson.D{{Key: "$subtract", Value: bson.A{
-							bson.D{{Key: "$strLenCP", Value: bson.D{{Key: "$toString", Value: idField}}}},
-							1,
-						}}},
-					}}},
-					1,
-				}},
-			}),
+		{Key: "$function", Value: bson.D{
+			{Key: "body", Value: `
+				function(docId) {
+					if (docId === null || docId === undefined) return 0;
+					
+					const str = docId.toString();
+					let hash1 = 5381;  // DJB2 hash
+					let hash2 = 0;     // Polynomial rolling hash
+					let hash3 = 0;     // Position-weighted hash
+					
+					const len = str.length;
+					
+					for (let i = 0; i < len; i++) {
+						const char = str.charCodeAt(i);
+						
+						hash1 = ((hash1 << 5) + hash1) + char;
+						
+						hash2 = (hash2 * 31 + char) % 2147483647;
+						
+						hash3 += char * (i * 37 + 1);
+					}
+					
+					let finalHash = (hash1 * 7) + (hash2 * 3) + (hash3 * 11);
+					
+					finalHash += len * 17;
+					
+					if (len > 0) {
+						finalHash += str.charCodeAt(0) * 101;
+					}
+					if (len > 1) {
+						finalHash += str.charCodeAt(len - 1) * 103;
+					}
+					return Math.abs(finalHash) || 1;
+				}
+			`},
+			{Key: "args", Value: bson.A{idField}},
+			{Key: "lang", Value: "js"},
 		}},
 	}
 }
 
-func (ps *partitionStream) createSingleHexCharToInt(charExpr bson.D) bson.D {
-	return bson.D{
-		{Key: "$switch", Value: bson.D{
-			{Key: "branches", Value: bson.A{
-				bson.D{{Key: "case", Value: bson.D{{Key: "$eq", Value: bson.A{charExpr, "0"}}}}, {Key: "then", Value: 0}},
-				bson.D{{Key: "case", Value: bson.D{{Key: "$eq", Value: bson.A{charExpr, "1"}}}}, {Key: "then", Value: 1}},
-				bson.D{{Key: "case", Value: bson.D{{Key: "$eq", Value: bson.A{charExpr, "2"}}}}, {Key: "then", Value: 2}},
-				bson.D{{Key: "case", Value: bson.D{{Key: "$eq", Value: bson.A{charExpr, "3"}}}}, {Key: "then", Value: 3}},
-				bson.D{{Key: "case", Value: bson.D{{Key: "$eq", Value: bson.A{charExpr, "4"}}}}, {Key: "then", Value: 4}},
-				bson.D{{Key: "case", Value: bson.D{{Key: "$eq", Value: bson.A{charExpr, "5"}}}}, {Key: "then", Value: 5}},
-				bson.D{{Key: "case", Value: bson.D{{Key: "$eq", Value: bson.A{charExpr, "6"}}}}, {Key: "then", Value: 6}},
-				bson.D{{Key: "case", Value: bson.D{{Key: "$eq", Value: bson.A{charExpr, "7"}}}}, {Key: "then", Value: 7}},
-				bson.D{{Key: "case", Value: bson.D{{Key: "$eq", Value: bson.A{charExpr, "8"}}}}, {Key: "then", Value: 8}},
-				bson.D{{Key: "case", Value: bson.D{{Key: "$eq", Value: bson.A{charExpr, "9"}}}}, {Key: "then", Value: 9}},
-				bson.D{{Key: "case", Value: bson.D{{Key: "$eq", Value: bson.A{charExpr, "a"}}}}, {Key: "then", Value: 10}},
-				bson.D{{Key: "case", Value: bson.D{{Key: "$eq", Value: bson.A{charExpr, "b"}}}}, {Key: "then", Value: 11}},
-				bson.D{{Key: "case", Value: bson.D{{Key: "$eq", Value: bson.A{charExpr, "c"}}}}, {Key: "then", Value: 12}},
-				bson.D{{Key: "case", Value: bson.D{{Key: "$eq", Value: bson.A{charExpr, "d"}}}}, {Key: "then", Value: 13}},
-				bson.D{{Key: "case", Value: bson.D{{Key: "$eq", Value: bson.A{charExpr, "e"}}}}, {Key: "then", Value: 14}},
-				bson.D{{Key: "case", Value: bson.D{{Key: "$eq", Value: bson.A{charExpr, "f"}}}}, {Key: "then", Value: 15}},
-				bson.D{{Key: "case", Value: bson.D{{Key: "$eq", Value: bson.A{charExpr, "A"}}}}, {Key: "then", Value: 10}},
-				bson.D{{Key: "case", Value: bson.D{{Key: "$eq", Value: bson.A{charExpr, "B"}}}}, {Key: "then", Value: 11}},
-				bson.D{{Key: "case", Value: bson.D{{Key: "$eq", Value: bson.A{charExpr, "C"}}}}, {Key: "then", Value: 12}},
-				bson.D{{Key: "case", Value: bson.D{{Key: "$eq", Value: bson.A{charExpr, "D"}}}}, {Key: "then", Value: 13}},
-				bson.D{{Key: "case", Value: bson.D{{Key: "$eq", Value: bson.A{charExpr, "E"}}}}, {Key: "then", Value: 14}},
-				bson.D{{Key: "case", Value: bson.D{{Key: "$eq", Value: bson.A{charExpr, "F"}}}}, {Key: "then", Value: 15}},
-			}},
-			{Key: "default", Value: 0},
-		}},
+func (ps *partitionStream) isResumeTokenError(err error) bool {
+	if err == nil {
+		return false
 	}
+
+	errorStr := err.Error()
+	return strings.Contains(errorStr, "resume token was not found") ||
+		strings.Contains(errorStr, "ChangeStreamFatalError") ||
+		strings.Contains(errorStr, "cannot resume stream") ||
+		strings.Contains(errorStr, "resume token") && strings.Contains(errorStr, "invalid")
 }
 
 func (ps *partitionStream) processEvent(worker *streamWorker, event message.ChangeEvent, resumeToken []byte) error {
@@ -744,34 +727,6 @@ func (ps *partitionStream) processEvent(worker *streamWorker, event message.Chan
 	}
 
 	ps.updateMetrics(msg.OperationType)
-
-	/*// Double-check partition assignment during event processing
-	ps.streamsMutex.RLock()
-	isStillAssigned := false
-	for partitionID := range ps.activeStreams {
-		if partitionID == worker.partitionID {
-			isStillAssigned = true
-			break
-		}
-	}
-	ps.streamsMutex.RUnlock()
-
-	if !isStillAssigned {
-		ps.logger.Warn("Received event for unassigned partition - this should not happen!",
-			zap.Int("partitionId", worker.partitionID),
-			zap.String("operation", string(msg.OperationType)),
-			zap.Any("documentId", msg.DocumentID),
-			zap.Ints("activePartitions", func() []int {
-				ps.streamsMutex.RLock()
-				defer ps.streamsMutex.RUnlock()
-				partitions := make([]int, 0, len(ps.activeStreams))
-				for pid := range ps.activeStreams {
-					partitions = append(partitions, pid)
-				}
-				return partitions
-			}()))
-		return nil
-	}*/
 
 	listenerCtx := &ListenerContext{
 		Message:     msg,

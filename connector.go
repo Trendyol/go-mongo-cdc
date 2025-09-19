@@ -28,7 +28,6 @@ type Connector interface {
 type connector struct {
 	stream             stream.PartitionStream
 	prometheusRegistry metric.Registry
-	cfg                *config.Config
 	mongoClient        connection.Client
 	logger             *zap.Logger
 	cancelCh           chan os.Signal

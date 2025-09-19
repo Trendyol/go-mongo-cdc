@@ -19,6 +19,8 @@ Go MongoDB CDC is a high-performance library that captures and processes real-ti
 - **Scalable Partition System**: Intelligent partition management that distributes workload across multiple workers
 - **Automatic Failover**: Automatic partition transfer and load balancing between workers
 - **Resume Token Support**: Ability to resume from where it left off after system interruptions
+- **Smart Resume Token Recovery**: Automatic handling of expired/invalid resume tokens with graceful fallback
+- **Universal Hash Distribution**: Advanced multi-hash algorithm ensuring optimal distribution for any ID pattern
 - **Bootstrap Mode**: Full collection scanning feature for processing existing data for the first time
 - **Prometheus Metrics**: Detailed performance and system metrics
 - **Flexible Configuration**: Easy configuration with YAML and JSON files
@@ -30,6 +32,15 @@ Go MongoDB CDC is a high-performance library that captures and processes real-ti
 ```bash
 go get github.com/Trendyol/go-mongo-cdc
 ```
+
+## 🔄 Recent Improvements
+
+### Enhanced Reliability & Performance
+
+- **Universal Hash Algorithm**: Completely redesigned partitioning system using multi-hash approach for optimal distribution across all ID patterns
+- **Smart Resume Token Recovery**: Automatic detection and recovery from expired resume tokens without manual intervention
+- **Zero-Downtime Error Handling**: Graceful fallback to current operation time when resume tokens become invalid
+- **Improved Troubleshooting**: Enhanced error messages and automatic resolution for common issues
 
 ## ⚡ Quick Start
 
@@ -160,6 +171,22 @@ connector, err := cdc.NewConnectorWithConfigFile(
 | `PartitionDatabase` | string | Partition database | cdc_partitions |
 | `RefreshInterval` | duration | Partition refresh interval | 30s |
 
+### Enhanced Partitioning
+
+The system uses a universal multi-hash algorithm that ensures optimal distribution for any string pattern:
+- **Triple-hash approach**: Combines DJB2, polynomial rolling, and position-weighted hashing
+- **Pattern-agnostic**: Works effectively with any ID format (UUIDs, incremental IDs, custom formats)
+- **Anti-collision**: Multiple hash functions minimize clustering even for similar inputs
+- **High entropy**: Incorporates string length, position weights, and boundary characters
+
+### Resume Token Management
+
+Robust handling of resume token lifecycle with automatic recovery:
+- **Automatic Expiry Detection**: Detects expired or invalid resume tokens
+- **Graceful Fallback**: Automatically starts from current operation time when resume fails
+- **Zero Downtime Recovery**: Seamless continuation without manual intervention
+- **Smart Cleanup**: Removes invalid tokens from checkpoint storage
+
 ## 🏗️ Architecture
 
 Go MongoDB CDC consists of the following core components:
@@ -232,19 +259,22 @@ graph TB
 ### Components
 
 1. **Connector**: Main component that manages the entire system
-2. **Partition Manager**: Manages partition distribution between workers
-3. **Stream Manager**: Manages MongoDB Change Streams
-4. **Checkpoint Manager**: Stores resume tokens and progress state
-5. **Metric System**: Provides Prometheus metrics
+2. **Partition Manager**: Manages partition distribution between workers with automatic failover
+3. **Stream Manager**: Manages MongoDB Change Streams with resume token recovery
+4. **Checkpoint Manager**: Stores resume tokens and progress state with automatic cleanup
+5. **Hash Engine**: Universal multi-hash algorithm for optimal data distribution
+6. **Recovery System**: Automatic detection and handling of invalid resume tokens
+7. **Metric System**: Provides Prometheus metrics for monitoring and alerting
 
 ### Partition System
 
-The system divides the data load into 10 partitions. Each partition is determined based on the hash value of document IDs. This enables:
+The system divides the data load into 10 partitions using an advanced universal hash algorithm. Each partition is determined based on the multi-hash value of document IDs. This enables:
 
-- Parallel processing capability
-- Automatic load balancing
-- Failover between workers
-- Scalable performance
+- **Optimal Distribution**: Works with any ID pattern (UUIDs, incremental, custom formats)
+- **Parallel Processing**: True parallel capability across multiple workers
+- **Automatic Load Balancing**: Even distribution regardless of ID patterns
+- **Failover Between Workers**: Seamless worker replacement
+- **Scalable Performance**: Linear performance scaling with worker count
 
 ### Bootstrap Process
 
@@ -371,9 +401,19 @@ go test ./... -bench . -benchmem
    - Check MongoDB connection
    - Verify worker timeout settings
 
-3. **High Memory Usage**
+3. **"Resume token was not found" Error**
+   - **Automatic Recovery**: The system now automatically handles this error
+   - **No Action Required**: Invalid tokens are cleared and stream resumes from current time
+   - **Monitoring**: Check logs for "Resume token expired or invalid" warnings
+
+4. **High Memory Usage**
    - Normal during bootstrap process
    - Lower the `saveInterval` value
+
+5. **Poor Partition Distribution**
+   - **Automatic Optimization**: New universal hash algorithm provides better distribution
+   - **Works with any ID pattern**: UUIDs, incremental IDs, colon-separated IDs
+   - **No Configuration Needed**: Optimal distribution is automatic
 
 ## 📄 API Reference
 
