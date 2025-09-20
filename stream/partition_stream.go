@@ -103,7 +103,7 @@ func NewPartitionStream(
 func (ps *partitionStream) Start(ctx context.Context) error {
 	ps.ctx, ps.cancel = context.WithCancel(ctx)
 
-	if err := ps.checkReplicaSetStatus(ps.ctx); err != nil {
+	if err := ps.ensureReplicaSetOrSharded(ps.ctx); err != nil {
 		return err
 	}
 
@@ -111,9 +111,9 @@ func (ps *partitionStream) Start(ctx context.Context) error {
 		return fmt.Errorf("failed to initialize partition manager: %w", err)
 	}
 
-	ps.partitionManager.SetPartitionsChangedCallback(ps.updateStreams)
+	ps.partitionManager.SetPartitionsChangedCallback(ps.reconcilePartitionAssignments)
 
-	if err := ps.initializePartitions(); err != nil {
+	if err := ps.acquireAndStartInitialPartitions(); err != nil {
 		ps.logger.Error(fmt.Sprintf("Failed to acquire initial partitions: %v", err))
 		return err
 	}
@@ -121,7 +121,7 @@ func (ps *partitionStream) Start(ctx context.Context) error {
 	return nil
 }
 
-func (ps *partitionStream) checkReplicaSetStatus(ctx context.Context) error {
+func (ps *partitionStream) ensureReplicaSetOrSharded(ctx context.Context) error {
 	result := ps.database.RunCommand(ctx, bson.D{{Key: "isMaster", Value: 1}})
 
 	var isMaster bson.M
@@ -145,17 +145,17 @@ func (ps *partitionStream) checkReplicaSetStatus(ctx context.Context) error {
 	)
 }
 
-func (ps *partitionStream) initializePartitions() error {
+func (ps *partitionStream) acquireAndStartInitialPartitions() error {
 	partitions, err := ps.partitionManager.AcquirePartitions(ps.ctx)
 	if err != nil {
 		return err
 	}
 
-	ps.updateStreams(partitions)
+	ps.reconcilePartitionAssignments(partitions)
 	return nil
 }
 
-func (ps *partitionStream) updateStreams(newPartitions []int) {
+func (ps *partitionStream) reconcilePartitionAssignments(newPartitions []int) {
 	ps.streamsMutex.Lock()
 	defer ps.streamsMutex.Unlock()
 
@@ -187,14 +187,14 @@ func (ps *partitionStream) updateStreams(newPartitions []int) {
 			ps.activeStreams[partitionID] = worker
 
 			ps.wg.Add(1)
-			go ps.runPartitionStream(worker)
+			go ps.managePartitionWorkerLifecycle(worker)
 		}
 	}
 
 	ps.logger.Debug(fmt.Sprintf("Active partitions updated - count: %d, partitions: %v", len(ps.activeStreams), newPartitions))
 }
 
-func (ps *partitionStream) runPartitionStream(worker *streamWorker) {
+func (ps *partitionStream) managePartitionWorkerLifecycle(worker *streamWorker) {
 	defer ps.wg.Done()
 
 	select {
@@ -211,7 +211,7 @@ func (ps *partitionStream) runPartitionStream(worker *streamWorker) {
 		case <-worker.ctx.Done():
 			return
 		default:
-			err := ps.processPartitionStream(worker)
+			err := ps.startOrResumePartitionStream(worker)
 			if err == nil {
 				ps.logger.Debug(fmt.Sprintf("Partition stream completed normally - partitionId: %d", worker.partitionID))
 				return
@@ -231,27 +231,27 @@ func (ps *partitionStream) runPartitionStream(worker *streamWorker) {
 	}
 }
 
-func (ps *partitionStream) processPartitionStream(worker *streamWorker) error {
+func (ps *partitionStream) startOrResumePartitionStream(worker *streamWorker) error {
 	if !ps.verifyPartitionOwnership(worker.ctx, worker.partitionID) {
 		ps.logger.Warn(fmt.Sprintf("Partition ownership verification failed at start - partitionId: %d", worker.partitionID))
 		return fmt.Errorf("partition %d not owned by this worker", worker.partitionID)
 	}
 
-	startInfo, err := ps.getStreamStartInfo(worker.partitionID)
+	startInfo, err := ps.determineStreamStartState(worker.partitionID)
 	if err != nil {
 		return fmt.Errorf("failed to prepare stream start: %w", err)
 	}
 
 	if startInfo.shouldBootstrap {
 		ps.logger.Info(fmt.Sprintf("Starting bootstrap flow for partition %d", worker.partitionID))
-		return ps.runBootstrapFlow(worker)
+		return ps.executeFullBootstrapFlow(worker)
 	}
 
 	ps.logger.Info(fmt.Sprintf("Starting change stream for partition %d", worker.partitionID))
-	return ps.runChangeStream(worker, startInfo.resumeToken, startInfo.startAtOperationTime)
+	return ps.startAndManageChangeStream(worker, startInfo.resumeToken, startInfo.startAtOperationTime)
 }
 
-func (ps *partitionStream) getStreamStartInfo(partitionID int) (*streamStartInfo, error) {
+func (ps *partitionStream) determineStreamStartState(partitionID int) (*streamStartInfo, error) {
 	ctx, cancel := context.WithTimeout(context.Background(), 10*time.Second)
 	defer cancel()
 
@@ -280,19 +280,19 @@ func (ps *partitionStream) getStreamStartInfo(partitionID int) (*streamStartInfo
 	}, nil
 }
 
-func (ps *partitionStream) runBootstrapFlow(worker *streamWorker) error {
+func (ps *partitionStream) executeFullBootstrapFlow(worker *streamWorker) error {
 	if !ps.verifyPartitionOwnership(worker.ctx, worker.partitionID) {
 		ps.logger.Warn(fmt.Sprintf("Partition ownership verification failed before bootstrap - partitionId: %d", worker.partitionID))
 		return fmt.Errorf("partition %d not owned by this worker during bootstrap verification", worker.partitionID)
 	}
 
-	opTime, err := ps.getServerOperationTime(worker.ctx)
+	opTime, err := ps.fetchCurrentDbOperationTime(worker.ctx)
 	if err != nil {
 		ps.logger.Warn(fmt.Sprintf("Could not get server operation time before bootstrap - partitionId: %d, error: %v", worker.partitionID, err))
 		//TODO: opTime şart burayı duzelt
 	}
 
-	if err := ps.bootstrapPartitionWithRetry(worker); err != nil {
+	if err := ps.runBootstrapWithRetries(worker); err != nil {
 		return fmt.Errorf("bootstrap failed after retries for partition %d: %w", worker.partitionID, err)
 	}
 
@@ -304,10 +304,10 @@ func (ps *partitionStream) runBootstrapFlow(worker *streamWorker) error {
 
 	ps.logger.Info(fmt.Sprintf("Bootstrap completed, transitioning to change stream for partition %d", worker.partitionID))
 
-	return ps.runChangeStream(worker, nil, opTime)
+	return ps.startAndManageChangeStream(worker, nil, opTime)
 }
 
-func (ps *partitionStream) getServerOperationTime(ctx context.Context) (*primitive.Timestamp, error) {
+func (ps *partitionStream) fetchCurrentDbOperationTime(ctx context.Context) (*primitive.Timestamp, error) {
 	result := ps.database.RunCommand(ctx, bson.D{{Key: "isMaster", Value: 1}})
 	var isMaster bson.M
 	if err := result.Decode(&isMaster); err != nil {
@@ -320,7 +320,7 @@ func (ps *partitionStream) getServerOperationTime(ctx context.Context) (*primiti
 	return nil, nil
 }
 
-func (ps *partitionStream) bootstrapPartitionWithRetry(worker *streamWorker) error {
+func (ps *partitionStream) runBootstrapWithRetries(worker *streamWorker) error {
 	maxRetries := 3
 	retryDelay := 5 * time.Second
 
@@ -361,18 +361,18 @@ func (ps *partitionStream) bootstrapPartitionWithRetry(worker *streamWorker) err
 func (ps *partitionStream) bootstrapPartition(worker *streamWorker) error {
 	ps.logger.Debug(fmt.Sprintf("Starting bootstrap for partition %d", worker.partitionID))
 
-	bootstrapLastID, filter := ps.prepareBootstrapProgress(worker.partitionID)
+	bootstrapLastID, filter := ps.loadBootstrapStateAndCreateFilter(worker.partitionID)
 
-	cursor, err := ps.createBootstrapCursor(worker, filter, bootstrapLastID)
+	cursor, err := ps.queryDocumentsForBootstrap(worker, filter, bootstrapLastID)
 	if err != nil {
 		return err
 	}
 	defer cursor.Close(worker.ctx)
 
-	return ps.processBootstrapDocuments(worker, cursor)
+	return ps.iterateAndProcessBootstrapCursor(worker, cursor)
 }
 
-func (ps *partitionStream) prepareBootstrapProgress(partitionID int) (interface{}, bson.D) {
+func (ps *partitionStream) loadBootstrapStateAndCreateFilter(partitionID int) (interface{}, bson.D) {
 	ctx, cancel := context.WithTimeout(context.Background(), 10*time.Second)
 	defer cancel()
 
@@ -382,9 +382,9 @@ func (ps *partitionStream) prepareBootstrapProgress(partitionID int) (interface{
 		//TODO: bu durumda devam mı etmeli?
 	}
 
-	filter := ps.createBootstrapFilter(partitionID)
+	filter := ps.buildBootstrapPartitionFilter(partitionID)
 	if bootstrapLastID != nil {
-		comparisonFilter := ps.createTypeSafeGreaterThanFilter("_id", bootstrapLastID)
+		comparisonFilter := ps.buildResumeAfterIdFilter("_id", bootstrapLastID)
 		filter = append(filter, comparisonFilter...)
 		ps.logger.Info(fmt.Sprintf("Resuming bootstrap from saved progress - partitionId: %d, lastId: %v (type: %T)", partitionID, bootstrapLastID, bootstrapLastID))
 	} else {
@@ -394,7 +394,7 @@ func (ps *partitionStream) prepareBootstrapProgress(partitionID int) (interface{
 	return bootstrapLastID, filter
 }
 
-func (ps *partitionStream) createBootstrapCursor(worker *streamWorker, filter bson.D, bootstrapLastID interface{}) (connection.Cursor, error) {
+func (ps *partitionStream) queryDocumentsForBootstrap(worker *streamWorker, filter bson.D, bootstrapLastID interface{}) (connection.Cursor, error) {
 	useNumericStringSorting := ps.shouldUseNumericStringSorting(worker, bootstrapLastID)
 
 	opts := options.Find().SetSort(bson.D{{Key: "_id", Value: 1}})
@@ -466,7 +466,7 @@ func (ps *partitionStream) isNumericString(s string) bool {
 	return true
 }
 
-func (ps *partitionStream) processBootstrapDocuments(worker *streamWorker, cursor connection.Cursor) error {
+func (ps *partitionStream) iterateAndProcessBootstrapCursor(worker *streamWorker, cursor connection.Cursor) error {
 	processState := &bootstrapProcessState{
 		processedCount:     0,
 		lastProcessedID:    nil,
@@ -474,10 +474,10 @@ func (ps *partitionStream) processBootstrapDocuments(worker *streamWorker, curso
 		bootstrapCompleted: false,
 	}
 
-	defer ps.handleBootstrapInterruption(worker, processState)
+	defer ps.saveFinalBootstrapProgressOnInterruption(worker, processState)
 
 	for cursor.Next(worker.ctx) {
-		if err := ps.processBootstrapDocument(worker, cursor, processState); err != nil {
+		if err := ps.dispatchBootstrapDocumentToListener(worker, cursor, processState); err != nil {
 			return err
 		}
 	}
@@ -486,7 +486,7 @@ func (ps *partitionStream) processBootstrapDocuments(worker *streamWorker, curso
 		return err
 	}
 
-	return ps.completeBootstrap(worker, processState)
+	return ps.finalizeBootstrapAndClearCheckpoint(worker, processState)
 }
 
 type bootstrapProcessState struct {
@@ -496,7 +496,7 @@ type bootstrapProcessState struct {
 	bootstrapCompleted bool
 }
 
-func (ps *partitionStream) handleBootstrapInterruption(worker *streamWorker, state *bootstrapProcessState) {
+func (ps *partitionStream) saveFinalBootstrapProgressOnInterruption(worker *streamWorker, state *bootstrapProcessState) {
 	if !state.bootstrapCompleted && state.lastProcessedID != nil {
 		ctx, cancel := context.WithTimeout(context.Background(), ps.cfg.Checkpoint.SaveTimeout)
 		defer cancel()
@@ -508,7 +508,7 @@ func (ps *partitionStream) handleBootstrapInterruption(worker *streamWorker, sta
 	}
 }
 
-func (ps *partitionStream) processBootstrapDocument(worker *streamWorker, cursor connection.Cursor, state *bootstrapProcessState) error {
+func (ps *partitionStream) dispatchBootstrapDocumentToListener(worker *streamWorker, cursor connection.Cursor, state *bootstrapProcessState) error {
 	if state.processedCount > 0 && state.processedCount%1000 == 0 {
 		if !ps.verifyPartitionOwnership(worker.ctx, worker.partitionID) {
 			ps.logger.Warn(fmt.Sprintf("Partition ownership lost during bootstrap - partitionId: %d, processed: %d", worker.partitionID, state.processedCount))
@@ -522,7 +522,7 @@ func (ps *partitionStream) processBootstrapDocument(worker *streamWorker, cursor
 		return nil
 	}
 
-	syntheticEvent := ps.createSyntheticEvent(document)
+	syntheticEvent := ps.createInsertEventFromDocument(document)
 	if err := ps.processEvent(worker, syntheticEvent, nil); err != nil {
 		ps.logger.Error(fmt.Sprintf("Error processing synthetic event - documentId: %v, error: %v", document["_id"], err))
 		return nil
@@ -531,10 +531,10 @@ func (ps *partitionStream) processBootstrapDocument(worker *streamWorker, cursor
 	state.processedCount++
 	state.lastProcessedID = document["_id"]
 
-	return ps.handleBootstrapCheckpoint(worker, document, state)
+	return ps.saveBootstrapProgressIfNeeded(worker, document, state)
 }
 
-func (ps *partitionStream) createSyntheticEvent(document bson.M) message.ChangeEvent {
+func (ps *partitionStream) createInsertEventFromDocument(document bson.M) message.ChangeEvent {
 	return message.ChangeEvent{
 		OperationType: "insert",
 		DocumentKey: message.DocumentKey{
@@ -549,8 +549,8 @@ func (ps *partitionStream) createSyntheticEvent(document bson.M) message.ChangeE
 	}
 }
 
-func (ps *partitionStream) handleBootstrapCheckpoint(worker *streamWorker, document bson.M, state *bootstrapProcessState) error {
-	shouldSaveCheckpoint := ps.shouldSaveBootstrapCheckpoint(worker, state)
+func (ps *partitionStream) saveBootstrapProgressIfNeeded(worker *streamWorker, document bson.M, state *bootstrapProcessState) error {
+	shouldSaveCheckpoint := ps.shouldSaveBootstrapProgress(worker, state)
 	if !shouldSaveCheckpoint {
 		return nil
 	}
@@ -560,10 +560,10 @@ func (ps *partitionStream) handleBootstrapCheckpoint(worker *streamWorker, docum
 		return fmt.Errorf("partition %d ownership lost before checkpoint", worker.partitionID)
 	}
 
-	return ps.saveBootstrapCheckpoint(worker, document, state)
+	return ps.saveBootstrapProgress(worker, document, state)
 }
 
-func (ps *partitionStream) shouldSaveBootstrapCheckpoint(worker *streamWorker, state *bootstrapProcessState) bool {
+func (ps *partitionStream) shouldSaveBootstrapProgress(worker *streamWorker, state *bootstrapProcessState) bool {
 	timeSinceLastCheckpoint := time.Since(state.lastCheckpointTime)
 
 	if state.processedCount%ps.cfg.Checkpoint.BootstrapSaveCount == 0 {
@@ -579,7 +579,7 @@ func (ps *partitionStream) shouldSaveBootstrapCheckpoint(worker *streamWorker, s
 	return false
 }
 
-func (ps *partitionStream) saveBootstrapCheckpoint(worker *streamWorker, document bson.M, state *bootstrapProcessState) error {
+func (ps *partitionStream) saveBootstrapProgress(worker *streamWorker, document bson.M, state *bootstrapProcessState) error {
 	saveCtx, saveCancel := context.WithTimeout(context.Background(), ps.cfg.Checkpoint.SaveTimeout)
 	defer saveCancel()
 
@@ -593,7 +593,7 @@ func (ps *partitionStream) saveBootstrapCheckpoint(worker *streamWorker, documen
 	return nil
 }
 
-func (ps *partitionStream) completeBootstrap(worker *streamWorker, state *bootstrapProcessState) error {
+func (ps *partitionStream) finalizeBootstrapAndClearCheckpoint(worker *streamWorker, state *bootstrapProcessState) error {
 	ps.logger.Debug(fmt.Sprintf("Bootstrap completed - partitionId: %d, totalProcessed: %d", worker.partitionID, state.processedCount))
 	state.bootstrapCompleted = true
 
@@ -606,13 +606,13 @@ func (ps *partitionStream) completeBootstrap(worker *streamWorker, state *bootst
 	return nil
 }
 
-func (ps *partitionStream) runChangeStream(worker *streamWorker, resumeToken []byte, startAtOperationTime *primitive.Timestamp) error {
+func (ps *partitionStream) startAndManageChangeStream(worker *streamWorker, resumeToken []byte, startAtOperationTime *primitive.Timestamp) error {
 	if !ps.verifyPartitionOwnership(worker.ctx, worker.partitionID) {
 		ps.logger.Warn(fmt.Sprintf("Partition ownership verification failed before change stream - partitionId: %d", worker.partitionID))
 		return fmt.Errorf("partition %d not owned by this worker before change stream", worker.partitionID)
 	}
 
-	pipeline := ps.createChangeStreamPipeline(worker.partitionID)
+	pipeline := ps.buildPartitionedChangeStreamPipeline(worker.partitionID)
 	opts := options.ChangeStream().SetFullDocument(options.UpdateLookup)
 
 	if resumeToken != nil {
@@ -625,7 +625,7 @@ func (ps *partitionStream) runChangeStream(worker *streamWorker, resumeToken []b
 
 	changeStream, err := ps.collection.Watch(worker.ctx, pipeline, opts)
 	if err != nil {
-		if ps.isResumeTokenError(err) && resumeToken != nil {
+		if ps.isUnrecoverableResumeError(err) && resumeToken != nil {
 			ps.logger.Warn("Resume token expired or invalid, clearing and starting from current time",
 				zap.Int("partitionId", worker.partitionID),
 				zap.Error(err))
@@ -634,7 +634,7 @@ func (ps *partitionStream) runChangeStream(worker *streamWorker, resumeToken []b
 				ps.logger.Error("Failed to clear invalid resume token", zap.Error(clearErr))
 			}
 
-			return ps.runChangeStream(worker, nil, startAtOperationTime)
+			return ps.startAndManageChangeStream(worker, nil, startAtOperationTime)
 		}
 
 		return err
@@ -645,7 +645,7 @@ func (ps *partitionStream) runChangeStream(worker *streamWorker, resumeToken []b
 
 	tokenSaveTicker := time.NewTicker(ps.cfg.Checkpoint.SaveInterval)
 	defer tokenSaveTicker.Stop()
-	go ps.periodicTokenSave(worker, tokenSaveTicker)
+	go ps.startPeriodicTokenSaver(worker, tokenSaveTicker)
 
 	//TODO: her eventi isler islemez kaydediyoruz su an yapı degisince ise yarayacak
 	//defer ps.saveFinalTokenOnExit(worker)
@@ -714,7 +714,7 @@ func (ps *partitionStream) verifyPartitionOwnership(ctx context.Context, partiti
 	return false
 }
 
-func (ps *partitionStream) createChangeStreamPipeline(partitionID int) []bson.D {
+func (ps *partitionStream) buildPartitionedChangeStreamPipeline(partitionID int) []bson.D {
 	return []bson.D{
 		{
 			{Key: "$match", Value: bson.D{
@@ -728,7 +728,7 @@ func (ps *partitionStream) createChangeStreamPipeline(partitionID int) []bson.D 
 				{Key: "$expr", Value: bson.D{
 					{Key: "$eq", Value: bson.A{
 						bson.D{{Key: "$mod", Value: bson.A{
-							ps.createHashExpression("$documentKey._id"),
+							ps.buildPartitioningHashExpression("$documentKey._id"),
 							ps.cfg.Partition.TotalPartition,
 						}}},
 						partitionID,
@@ -739,12 +739,12 @@ func (ps *partitionStream) createChangeStreamPipeline(partitionID int) []bson.D 
 	}
 }
 
-func (ps *partitionStream) createBootstrapFilter(partitionID int) bson.D {
+func (ps *partitionStream) buildBootstrapPartitionFilter(partitionID int) bson.D {
 	return bson.D{
 		{Key: "$expr", Value: bson.D{
 			{Key: "$eq", Value: bson.A{
 				bson.D{{Key: "$mod", Value: bson.A{
-					ps.createHashExpression("$_id"),
+					ps.buildPartitioningHashExpression("$_id"),
 					ps.cfg.Partition.TotalPartition,
 				}}},
 				partitionID,
@@ -753,7 +753,7 @@ func (ps *partitionStream) createBootstrapFilter(partitionID int) bson.D {
 	}
 }
 
-func (ps *partitionStream) createHashExpression(idField string) bson.D {
+func (ps *partitionStream) buildPartitioningHashExpression(idField string) bson.D {
 	return bson.D{
 		{Key: "$cond", Value: bson.D{
 			{Key: "if", Value: bson.D{
@@ -768,7 +768,7 @@ func (ps *partitionStream) createHashExpression(idField string) bson.D {
 				{Key: "$cond", Value: bson.D{
 					{Key: "if", Value: ps.createIsNumericStringCheck(idField)},
 					{Key: "then", Value: bson.D{{Key: "$toDouble", Value: idField}}},
-					{Key: "else", Value: ps.createOptimizedStringHash(idField)},
+					{Key: "else", Value: ps.buildStringDistributionHash(idField)},
 				}},
 			}},
 		}},
@@ -787,7 +787,15 @@ func (ps *partitionStream) createIsNumericStringCheck(idField string) bson.D {
 	}
 }
 
-func (ps *partitionStream) createOptimizedStringHash(idField string) bson.D {
+/*
+ * This function calculates a compound hash for a given _id.
+ * Standard hashing methods in MongoDB can lead to poor distribution for certain
+ * string patterns (e.g., sequential or timestamp-based strings).
+ * This implementation combines three different hashing algorithms (DJB2, polynomial, position-weighted)
+ * to ensure a more uniform distribution of documents across partitions,
+ * minimizing hotspots. It's designed to be fast and produce a wide range of hash values.
+ */
+func (ps *partitionStream) buildStringDistributionHash(idField string) bson.D {
 	return bson.D{
 		{Key: "$function", Value: bson.D{
 			{Key: "body", Value: `
@@ -830,7 +838,7 @@ func (ps *partitionStream) createOptimizedStringHash(idField string) bson.D {
 	}
 }
 
-func (ps *partitionStream) createTypeSafeGreaterThanFilter(fieldName string, lastValue interface{}) bson.D {
+func (ps *partitionStream) buildResumeAfterIdFilter(fieldName string, lastValue interface{}) bson.D {
 	switch v := lastValue.(type) {
 	case primitive.ObjectID:
 		// ObjectIds have natural ordering and work well with $gt
@@ -904,7 +912,7 @@ func (ps *partitionStream) createTypeSafeGreaterThanFilter(fieldName string, las
 	}
 }
 
-func (ps *partitionStream) isResumeTokenError(err error) bool {
+func (ps *partitionStream) isUnrecoverableResumeError(err error) bool {
 	if err == nil {
 		return false
 	}
@@ -966,7 +974,7 @@ func (ps *partitionStream) updateMetrics(opType message.OperationType) {
 	}
 }
 
-func (ps *partitionStream) periodicTokenSave(worker *streamWorker, ticker *time.Ticker) {
+func (ps *partitionStream) startPeriodicTokenSaver(worker *streamWorker, ticker *time.Ticker) {
 	for {
 		select {
 		case <-worker.ctx.Done():

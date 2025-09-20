@@ -581,6 +581,12 @@ func (m *manager) acquirePartition(ctx context.Context, partitionID int) error {
 	return nil
 }
 
+func isDuplicateKeyError(err error) bool {
+	return err != nil && (err.Error() == "E11000" ||
+		strings.Contains(err.Error(), "E11000") ||
+		strings.Contains(err.Error(), "duplicate key error"))
+}
+
 func (m *manager) releasePartition(ctx context.Context, partitionID int) error {
 	filter := bson.M{
 		"_id":      partitionID,
@@ -599,12 +605,6 @@ func (m *manager) releasePartition(ctx context.Context, partitionID int) error {
 	}
 
 	return nil
-}
-
-func isDuplicateKeyError(err error) bool {
-	return err != nil && (err.Error() == "E11000" ||
-		strings.Contains(err.Error(), "E11000") ||
-		strings.Contains(err.Error(), "duplicate key error"))
 }
 
 func (m *manager) updateWorkerPartitions(ctx context.Context, partitions []int) error {
