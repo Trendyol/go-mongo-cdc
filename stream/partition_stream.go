@@ -16,6 +16,7 @@ import (
 	"github.com/Trendyol/go-mongo-cdc/partition"
 	"go.mongodb.org/mongo-driver/bson"
 	"go.mongodb.org/mongo-driver/bson/primitive"
+	"go.mongodb.org/mongo-driver/mongo"
 	"go.mongodb.org/mongo-driver/mongo/options"
 	"go.uber.org/zap"
 )
@@ -102,7 +103,7 @@ func NewPartitionStream(
 func (ps *partitionStream) Start(ctx context.Context) error {
 	ps.ctx, ps.cancel = context.WithCancel(ctx)
 
-	if err := ps.checkReplicaSetStatus(ps.ctx); err != nil {
+	if err := ps.ensureReplicaSetOrSharded(ps.ctx); err != nil {
 		return err
 	}
 
@@ -110,9 +111,9 @@ func (ps *partitionStream) Start(ctx context.Context) error {
 		return fmt.Errorf("failed to initialize partition manager: %w", err)
 	}
 
-	ps.partitionManager.SetPartitionsChangedCallback(ps.updateStreams)
+	ps.partitionManager.SetPartitionsChangedCallback(ps.reconcilePartitionAssignments)
 
-	if err := ps.initializePartitions(); err != nil {
+	if err := ps.acquireAndStartInitialPartitions(); err != nil {
 		ps.logger.Error(fmt.Sprintf("Failed to acquire initial partitions: %v", err))
 		return err
 	}
@@ -120,7 +121,7 @@ func (ps *partitionStream) Start(ctx context.Context) error {
 	return nil
 }
 
-func (ps *partitionStream) checkReplicaSetStatus(ctx context.Context) error {
+func (ps *partitionStream) ensureReplicaSetOrSharded(ctx context.Context) error {
 	result := ps.database.RunCommand(ctx, bson.D{{Key: "isMaster", Value: 1}})
 
 	var isMaster bson.M
@@ -144,17 +145,17 @@ func (ps *partitionStream) checkReplicaSetStatus(ctx context.Context) error {
 	)
 }
 
-func (ps *partitionStream) initializePartitions() error {
+func (ps *partitionStream) acquireAndStartInitialPartitions() error {
 	partitions, err := ps.partitionManager.AcquirePartitions(ps.ctx)
 	if err != nil {
 		return err
 	}
 
-	ps.updateStreams(partitions)
+	ps.reconcilePartitionAssignments(partitions)
 	return nil
 }
 
-func (ps *partitionStream) updateStreams(newPartitions []int) {
+func (ps *partitionStream) reconcilePartitionAssignments(newPartitions []int) {
 	ps.streamsMutex.Lock()
 	defer ps.streamsMutex.Unlock()
 
@@ -186,14 +187,14 @@ func (ps *partitionStream) updateStreams(newPartitions []int) {
 			ps.activeStreams[partitionID] = worker
 
 			ps.wg.Add(1)
-			go ps.runPartitionStream(worker)
+			go ps.managePartitionWorkerLifecycle(worker)
 		}
 	}
 
 	ps.logger.Debug(fmt.Sprintf("Active partitions updated - count: %d, partitions: %v", len(ps.activeStreams), newPartitions))
 }
 
-func (ps *partitionStream) runPartitionStream(worker *streamWorker) {
+func (ps *partitionStream) managePartitionWorkerLifecycle(worker *streamWorker) {
 	defer ps.wg.Done()
 
 	select {
@@ -210,7 +211,7 @@ func (ps *partitionStream) runPartitionStream(worker *streamWorker) {
 		case <-worker.ctx.Done():
 			return
 		default:
-			err := ps.processPartitionStream(worker)
+			err := ps.startOrResumePartitionStream(worker)
 			if err == nil {
 				ps.logger.Debug(fmt.Sprintf("Partition stream completed normally - partitionId: %d", worker.partitionID))
 				return
@@ -230,27 +231,27 @@ func (ps *partitionStream) runPartitionStream(worker *streamWorker) {
 	}
 }
 
-func (ps *partitionStream) processPartitionStream(worker *streamWorker) error {
+func (ps *partitionStream) startOrResumePartitionStream(worker *streamWorker) error {
 	if !ps.verifyPartitionOwnership(worker.ctx, worker.partitionID) {
 		ps.logger.Warn(fmt.Sprintf("Partition ownership verification failed at start - partitionId: %d", worker.partitionID))
 		return fmt.Errorf("partition %d not owned by this worker", worker.partitionID)
 	}
 
-	startInfo, err := ps.getStreamStartInfo(worker.partitionID)
+	startInfo, err := ps.determineStreamStartState(worker.partitionID)
 	if err != nil {
 		return fmt.Errorf("failed to prepare stream start: %w", err)
 	}
 
 	if startInfo.shouldBootstrap {
 		ps.logger.Info(fmt.Sprintf("Starting bootstrap flow for partition %d", worker.partitionID))
-		return ps.runBootstrapFlow(worker)
+		return ps.executeFullBootstrapFlow(worker)
 	}
 
 	ps.logger.Info(fmt.Sprintf("Starting change stream for partition %d", worker.partitionID))
-	return ps.runChangeStream(worker, startInfo.resumeToken, startInfo.startAtOperationTime)
+	return ps.startAndManageChangeStream(worker, startInfo.resumeToken, startInfo.startAtOperationTime)
 }
 
-func (ps *partitionStream) getStreamStartInfo(partitionID int) (*streamStartInfo, error) {
+func (ps *partitionStream) determineStreamStartState(partitionID int) (*streamStartInfo, error) {
 	ctx, cancel := context.WithTimeout(context.Background(), 10*time.Second)
 	defer cancel()
 
@@ -279,19 +280,19 @@ func (ps *partitionStream) getStreamStartInfo(partitionID int) (*streamStartInfo
 	}, nil
 }
 
-func (ps *partitionStream) runBootstrapFlow(worker *streamWorker) error {
+func (ps *partitionStream) executeFullBootstrapFlow(worker *streamWorker) error {
 	if !ps.verifyPartitionOwnership(worker.ctx, worker.partitionID) {
 		ps.logger.Warn(fmt.Sprintf("Partition ownership verification failed before bootstrap - partitionId: %d", worker.partitionID))
 		return fmt.Errorf("partition %d not owned by this worker during bootstrap verification", worker.partitionID)
 	}
 
-	opTime, err := ps.getServerOperationTime(worker.ctx)
+	opTime, err := ps.fetchCurrentDbOperationTime(worker.ctx)
 	if err != nil {
 		ps.logger.Warn(fmt.Sprintf("Could not get server operation time before bootstrap - partitionId: %d, error: %v", worker.partitionID, err))
 		//TODO: opTime şart burayı duzelt
 	}
 
-	if err := ps.bootstrapPartitionWithRetry(worker); err != nil {
+	if err := ps.runBootstrapWithRetries(worker); err != nil {
 		return fmt.Errorf("bootstrap failed after retries for partition %d: %w", worker.partitionID, err)
 	}
 
@@ -303,10 +304,10 @@ func (ps *partitionStream) runBootstrapFlow(worker *streamWorker) error {
 
 	ps.logger.Info(fmt.Sprintf("Bootstrap completed, transitioning to change stream for partition %d", worker.partitionID))
 
-	return ps.runChangeStream(worker, nil, opTime)
+	return ps.startAndManageChangeStream(worker, nil, opTime)
 }
 
-func (ps *partitionStream) getServerOperationTime(ctx context.Context) (*primitive.Timestamp, error) {
+func (ps *partitionStream) fetchCurrentDbOperationTime(ctx context.Context) (*primitive.Timestamp, error) {
 	result := ps.database.RunCommand(ctx, bson.D{{Key: "isMaster", Value: 1}})
 	var isMaster bson.M
 	if err := result.Decode(&isMaster); err != nil {
@@ -319,7 +320,7 @@ func (ps *partitionStream) getServerOperationTime(ctx context.Context) (*primiti
 	return nil, nil
 }
 
-func (ps *partitionStream) bootstrapPartitionWithRetry(worker *streamWorker) error {
+func (ps *partitionStream) runBootstrapWithRetries(worker *streamWorker) error {
 	maxRetries := 3
 	retryDelay := 5 * time.Second
 
@@ -360,108 +361,124 @@ func (ps *partitionStream) bootstrapPartitionWithRetry(worker *streamWorker) err
 func (ps *partitionStream) bootstrapPartition(worker *streamWorker) error {
 	ps.logger.Debug(fmt.Sprintf("Starting bootstrap for partition %d", worker.partitionID))
 
-	ctx, cancel := context.WithTimeout(context.Background(), 10*time.Second)
-	defer cancel()
+	bootstrapLastID, filter := ps.loadBootstrapStateAndCreateFilter(worker.partitionID)
 
-	bootstrapLastID, err := ps.checkpointManager.GetBootstrapProgress(ctx, worker.partitionID)
-	if err != nil {
-		ps.logger.Error(fmt.Sprintf("Failed to get bootstrap progress - partitionId: %d, error: %v", worker.partitionID, err))
-		bootstrapLastID = nil
-	}
-
-	filter := ps.createDocumentFilter(worker.partitionID)
-
-	if bootstrapLastID != nil {
-		filter = append(filter, bson.E{Key: "_id", Value: bson.M{"$gt": bootstrapLastID}})
-		ps.logger.Info(fmt.Sprintf("Resuming bootstrap from saved progress - partitionId: %d, lastId: %v", worker.partitionID, bootstrapLastID))
-	} else {
-		ps.logger.Info(fmt.Sprintf("Starting fresh bootstrap - partitionId: %d", worker.partitionID))
-	}
-
-	opts := options.Find().SetSort(bson.D{{Key: "_id", Value: 1}})
-	cursor, err := ps.collection.Find(worker.ctx, filter, opts)
+	cursor, err := ps.queryDocumentsForBootstrap(worker, filter, bootstrapLastID)
 	if err != nil {
 		return err
 	}
 	defer cursor.Close(worker.ctx)
 
-	processedCount := 0
-	var lastProcessedID interface{}
-	lastCheckpointTime := time.Now()
+	return ps.iterateAndProcessBootstrapCursor(worker, cursor)
+}
 
-	bootstrapCompleted := false
-	defer func() {
-		if !bootstrapCompleted && lastProcessedID != nil {
-			ctx, cancel := context.WithTimeout(context.Background(), ps.cfg.Checkpoint.SaveTimeout)
-			defer cancel()
-			if err := ps.checkpointManager.SaveBootstrapProgress(ctx, worker.partitionID, lastProcessedID); err != nil {
-				ps.logger.Error(fmt.Sprintf("Failed to save final bootstrap progress on interruption - partitionId: %d, lastId: %v, error: %v", worker.partitionID, lastProcessedID, err))
-			} else {
-				ps.logger.Info(fmt.Sprintf("Saved bootstrap progress on interruption - partitionId: %d, lastId: %v, processed: %d", worker.partitionID, lastProcessedID, processedCount))
-			}
+func (ps *partitionStream) loadBootstrapStateAndCreateFilter(partitionID int) (interface{}, bson.D) {
+	ctx, cancel := context.WithTimeout(context.Background(), 10*time.Second)
+	defer cancel()
+
+	bootstrapLastID, err := ps.checkpointManager.GetBootstrapProgress(ctx, partitionID)
+	if err != nil {
+		ps.logger.Error(fmt.Sprintf("Failed to get bootstrap progress - partitionId: %d, error: %v", partitionID, err))
+		//TODO: bu durumda devam mı etmeli?
+	}
+
+	filter := ps.buildBootstrapPartitionFilter(partitionID)
+	if bootstrapLastID != nil {
+		comparisonFilter := ps.buildResumeAfterIdFilter("_id", bootstrapLastID)
+		filter = append(filter, comparisonFilter...)
+		ps.logger.Info(fmt.Sprintf("Resuming bootstrap from saved progress - partitionId: %d, lastId: %v (type: %T)", partitionID, bootstrapLastID, bootstrapLastID))
+	} else {
+		ps.logger.Info(fmt.Sprintf("Starting fresh bootstrap - partitionId: %d", partitionID))
+	}
+
+	return bootstrapLastID, filter
+}
+
+func (ps *partitionStream) queryDocumentsForBootstrap(worker *streamWorker, filter bson.D, bootstrapLastID interface{}) (connection.Cursor, error) {
+	useNumericStringSorting := ps.shouldUseNumericStringSorting(worker, bootstrapLastID)
+
+	opts := options.Find().SetSort(bson.D{{Key: "_id", Value: 1}})
+
+	if useNumericStringSorting {
+		opts.SetCollation(&options.Collation{
+			Locale:          "en",
+			NumericOrdering: true,
+		})
+		ps.logger.Debug("Using collation-based numeric string sorting")
+	}
+
+	return ps.collection.Find(worker.ctx, filter, opts)
+}
+
+func (ps *partitionStream) shouldUseNumericStringSorting(worker *streamWorker, bootstrapLastID interface{}) bool {
+	if bootstrapLastID != nil {
+		if lastIDStr, ok := bootstrapLastID.(string); ok && ps.isNumericString(lastIDStr) {
+			ps.logger.Info(fmt.Sprintf("Resuming with numeric string ID '%s' - using mathematical sorting", lastIDStr))
+			return true
 		}
-	}()
+		return false
+	}
+
+	isNumericStringCollection, err := ps.detectNumericStringCollection(worker.ctx)
+	if err != nil {
+		ps.logger.Warn(fmt.Sprintf("Failed to detect ID type, using default sorting - partitionId: %d, error: %v", worker.partitionID, err))
+		return false
+	}
+
+	if isNumericStringCollection {
+		ps.logger.Info("Detected numeric string IDs in collection - using mathematical sorting for fresh bootstrap")
+		return true
+	}
+
+	return false
+}
+
+func (ps *partitionStream) detectNumericStringCollection(ctx context.Context) (bool, error) {
+	var doc struct {
+		ID interface{} `bson:"_id"`
+	}
+
+	err := ps.collection.FindOne(ctx, bson.D{}).Decode(&doc)
+	if err != nil {
+		if err == mongo.ErrNoDocuments {
+			return false, nil
+		}
+		return false, fmt.Errorf("failed to sample document: %w", err)
+	}
+
+	idStr, ok := doc.ID.(string)
+	if !ok {
+		return false, nil
+	}
+
+	return ps.isNumericString(idStr), nil
+}
+
+func (ps *partitionStream) isNumericString(s string) bool {
+	if len(s) == 0 {
+		return false
+	}
+	for _, char := range s {
+		if char < '0' || char > '9' {
+			return false
+		}
+	}
+	return true
+}
+
+func (ps *partitionStream) iterateAndProcessBootstrapCursor(worker *streamWorker, cursor connection.Cursor) error {
+	processState := &bootstrapProcessState{
+		processedCount:     0,
+		lastProcessedID:    nil,
+		lastCheckpointTime: time.Now(),
+		bootstrapCompleted: false,
+	}
+
+	defer ps.saveFinalBootstrapProgressOnInterruption(worker, processState)
 
 	for cursor.Next(worker.ctx) {
-		if processedCount > 0 && processedCount%1000 == 0 {
-			if !ps.verifyPartitionOwnership(worker.ctx, worker.partitionID) {
-				ps.logger.Warn(fmt.Sprintf("Partition ownership lost during bootstrap - partitionId: %d, processed: %d", worker.partitionID, processedCount))
-				return fmt.Errorf("partition %d ownership lost during bootstrap", worker.partitionID)
-			}
-		}
-
-		var document bson.M
-		if err := cursor.Decode(&document); err != nil {
-			ps.logger.Error(fmt.Sprintf("Error decoding document: %v", err))
-			continue
-		}
-
-		syntheticEvent := message.ChangeEvent{
-			OperationType: "insert",
-			DocumentKey: message.DocumentKey{
-				ID: document["_id"],
-			},
-			FullDocument: document,
-			Namespace: message.Namespace{
-				Database:   ps.cfg.Database,
-				Collection: ps.cfg.Collection,
-			},
-			ClusterTime: primitive.Timestamp{T: uint32(time.Now().Unix()), I: 1},
-		}
-
-		if err := ps.processEvent(worker, syntheticEvent, nil); err != nil {
-			ps.logger.Error(fmt.Sprintf("Error processing synthetic event - documentId: %v, error: %v", document["_id"], err))
-			continue
-		}
-
-		processedCount++
-		lastProcessedID = document["_id"]
-
-		shouldSaveCheckpoint := false
-		timeSinceLastCheckpoint := time.Since(lastCheckpointTime)
-
-		if processedCount%ps.cfg.Checkpoint.BootstrapSaveCount == 0 {
-			shouldSaveCheckpoint = true
-			ps.logger.Debug(fmt.Sprintf("Bootstrap progress (count-based) - partitionId: %d, processed: %d", worker.partitionID, processedCount))
-		} else if timeSinceLastCheckpoint >= ps.cfg.Checkpoint.BootstrapSaveInterval {
-			shouldSaveCheckpoint = true
-			ps.logger.Debug(fmt.Sprintf("Bootstrap progress (time-based) - partitionId: %d, processed: %d, elapsed: %v", worker.partitionID, processedCount, timeSinceLastCheckpoint))
-		}
-
-		if shouldSaveCheckpoint {
-			if !ps.verifyPartitionOwnership(worker.ctx, worker.partitionID) {
-				ps.logger.Warn(fmt.Sprintf("Partition ownership lost before checkpoint save - partitionId: %d, processed: %d", worker.partitionID, processedCount))
-				return fmt.Errorf("partition %d ownership lost before checkpoint", worker.partitionID)
-			}
-
-			saveCtx, saveCancel := context.WithTimeout(context.Background(), ps.cfg.Checkpoint.SaveTimeout)
-			if err := ps.checkpointManager.SaveBootstrapProgress(saveCtx, worker.partitionID, document["_id"]); err != nil {
-				ps.logger.Error(fmt.Sprintf("Failed to save bootstrap progress - partitionId: %d, documentId: %v, error: %v", worker.partitionID, document["_id"], err))
-			} else {
-				ps.logger.Debug(fmt.Sprintf("Saved bootstrap progress - partitionId: %d, documentId: %v, processed: %d", worker.partitionID, document["_id"], processedCount))
-				lastCheckpointTime = time.Now()
-			}
-			saveCancel()
+		if err := ps.dispatchBootstrapDocumentToListener(worker, cursor, processState); err != nil {
+			return err
 		}
 	}
 
@@ -469,9 +486,112 @@ func (ps *partitionStream) bootstrapPartition(worker *streamWorker) error {
 		return err
 	}
 
-	ps.logger.Debug(fmt.Sprintf("Bootstrap completed - partitionId: %d, totalProcessed: %d", worker.partitionID, processedCount))
+	return ps.finalizeBootstrapAndClearCheckpoint(worker, processState)
+}
 
-	bootstrapCompleted = true
+type bootstrapProcessState struct {
+	processedCount     int
+	lastProcessedID    interface{}
+	lastCheckpointTime time.Time
+	bootstrapCompleted bool
+}
+
+func (ps *partitionStream) saveFinalBootstrapProgressOnInterruption(worker *streamWorker, state *bootstrapProcessState) {
+	if !state.bootstrapCompleted && state.lastProcessedID != nil {
+		ctx, cancel := context.WithTimeout(context.Background(), ps.cfg.Checkpoint.SaveTimeout)
+		defer cancel()
+		if err := ps.checkpointManager.SaveBootstrapProgress(ctx, worker.partitionID, state.lastProcessedID); err != nil {
+			ps.logger.Error(fmt.Sprintf("Failed to save final bootstrap progress on interruption - partitionId: %d, lastId: %v, error: %v", worker.partitionID, state.lastProcessedID, err))
+		} else {
+			ps.logger.Info(fmt.Sprintf("Saved bootstrap progress on interruption - partitionId: %d, lastId: %v, processed: %d", worker.partitionID, state.lastProcessedID, state.processedCount))
+		}
+	}
+}
+
+func (ps *partitionStream) dispatchBootstrapDocumentToListener(worker *streamWorker, cursor connection.Cursor, state *bootstrapProcessState) error {
+	if state.processedCount > 0 && state.processedCount%1000 == 0 {
+		if !ps.verifyPartitionOwnership(worker.ctx, worker.partitionID) {
+			ps.logger.Warn(fmt.Sprintf("Partition ownership lost during bootstrap - partitionId: %d, processed: %d", worker.partitionID, state.processedCount))
+			return fmt.Errorf("partition %d ownership lost during bootstrap", worker.partitionID)
+		}
+	}
+
+	var document bson.M
+	if err := cursor.Decode(&document); err != nil {
+		ps.logger.Error(fmt.Sprintf("Error decoding document: %v", err))
+		return nil
+	}
+
+	syntheticEvent := ps.createInsertEventFromDocument(document)
+	if err := ps.processEvent(worker, syntheticEvent, nil); err != nil {
+		ps.logger.Error(fmt.Sprintf("Error processing synthetic event - documentId: %v, error: %v", document["_id"], err))
+		return nil
+	}
+
+	state.processedCount++
+	state.lastProcessedID = document["_id"]
+
+	if ps.shouldSaveBootstrapProgress(worker, state) {
+		if !ps.verifyPartitionOwnership(worker.ctx, worker.partitionID) {
+			ps.logger.Warn(fmt.Sprintf("Partition ownership lost before checkpoint save - partitionId: %d, processed: %d", worker.partitionID, state.processedCount))
+			return fmt.Errorf("partition %d ownership lost before checkpoint", worker.partitionID)
+		}
+
+		return ps.saveBootstrapProgress(worker, document, state)
+	}
+
+	return nil
+}
+
+func (ps *partitionStream) createInsertEventFromDocument(document bson.M) message.ChangeEvent {
+	return message.ChangeEvent{
+		OperationType: "insert",
+		DocumentKey: message.DocumentKey{
+			ID: document["_id"],
+		},
+		FullDocument: document,
+		Namespace: message.Namespace{
+			Database:   ps.cfg.Database,
+			Collection: ps.cfg.Collection,
+		},
+		ClusterTime: primitive.Timestamp{T: uint32(time.Now().Unix()), I: 1},
+	}
+}
+
+func (ps *partitionStream) shouldSaveBootstrapProgress(worker *streamWorker, state *bootstrapProcessState) bool {
+	timeSinceLastCheckpoint := time.Since(state.lastCheckpointTime)
+
+	if state.processedCount%ps.cfg.Checkpoint.BootstrapSaveCount == 0 {
+		ps.logger.Debug(fmt.Sprintf("Bootstrap progress (count-based) - partitionId: %d, processed: %d", worker.partitionID, state.processedCount))
+		return true
+	}
+
+	if timeSinceLastCheckpoint >= ps.cfg.Checkpoint.BootstrapSaveInterval {
+		ps.logger.Debug(fmt.Sprintf("Bootstrap progress (time-based) - partitionId: %d, processed: %d, elapsed: %v", worker.partitionID, state.processedCount, timeSinceLastCheckpoint))
+		return true
+	}
+
+	return false
+}
+
+func (ps *partitionStream) saveBootstrapProgress(worker *streamWorker, document bson.M, state *bootstrapProcessState) error {
+	saveCtx, saveCancel := context.WithTimeout(context.Background(), ps.cfg.Checkpoint.SaveTimeout)
+	defer saveCancel()
+
+	if err := ps.checkpointManager.SaveBootstrapProgress(saveCtx, worker.partitionID, document["_id"]); err != nil {
+		ps.logger.Error(fmt.Sprintf("Failed to save bootstrap progress - partitionId: %d, documentId: %v, error: %v", worker.partitionID, document["_id"], err))
+		return nil
+	}
+
+	ps.logger.Debug(fmt.Sprintf("Saved bootstrap progress - partitionId: %d, documentId: %v, processed: %d", worker.partitionID, document["_id"], state.processedCount))
+	state.lastCheckpointTime = time.Now()
+
+	return nil
+}
+
+func (ps *partitionStream) finalizeBootstrapAndClearCheckpoint(worker *streamWorker, state *bootstrapProcessState) error {
+	ps.logger.Debug(fmt.Sprintf("Bootstrap completed - partitionId: %d, totalProcessed: %d", worker.partitionID, state.processedCount))
+	state.bootstrapCompleted = true
 
 	if err := ps.checkpointManager.ClearBootstrapProgress(worker.ctx, worker.partitionID); err != nil {
 		ps.logger.Error(fmt.Sprintf("Failed to clear bootstrap progress - partitionId: %d, error: %v", worker.partitionID, err))
@@ -482,13 +602,13 @@ func (ps *partitionStream) bootstrapPartition(worker *streamWorker) error {
 	return nil
 }
 
-func (ps *partitionStream) runChangeStream(worker *streamWorker, resumeToken []byte, startAtOperationTime *primitive.Timestamp) error {
+func (ps *partitionStream) startAndManageChangeStream(worker *streamWorker, resumeToken []byte, startAtOperationTime *primitive.Timestamp) error {
 	if !ps.verifyPartitionOwnership(worker.ctx, worker.partitionID) {
 		ps.logger.Warn(fmt.Sprintf("Partition ownership verification failed before change stream - partitionId: %d", worker.partitionID))
 		return fmt.Errorf("partition %d not owned by this worker before change stream", worker.partitionID)
 	}
 
-	pipeline := ps.createPipeline(worker.partitionID)
+	pipeline := ps.buildPartitionedChangeStreamPipeline(worker.partitionID)
 	opts := options.ChangeStream().SetFullDocument(options.UpdateLookup)
 
 	if resumeToken != nil {
@@ -501,7 +621,7 @@ func (ps *partitionStream) runChangeStream(worker *streamWorker, resumeToken []b
 
 	changeStream, err := ps.collection.Watch(worker.ctx, pipeline, opts)
 	if err != nil {
-		if ps.isResumeTokenError(err) && resumeToken != nil {
+		if ps.isUnrecoverableResumeError(err) && resumeToken != nil {
 			ps.logger.Warn("Resume token expired or invalid, clearing and starting from current time",
 				zap.Int("partitionId", worker.partitionID),
 				zap.Error(err))
@@ -510,7 +630,7 @@ func (ps *partitionStream) runChangeStream(worker *streamWorker, resumeToken []b
 				ps.logger.Error("Failed to clear invalid resume token", zap.Error(clearErr))
 			}
 
-			return ps.runChangeStream(worker, nil, startAtOperationTime)
+			return ps.startAndManageChangeStream(worker, nil, startAtOperationTime)
 		}
 
 		return err
@@ -521,7 +641,7 @@ func (ps *partitionStream) runChangeStream(worker *streamWorker, resumeToken []b
 
 	tokenSaveTicker := time.NewTicker(ps.cfg.Checkpoint.SaveInterval)
 	defer tokenSaveTicker.Stop()
-	go ps.periodicTokenSave(worker, tokenSaveTicker)
+	go ps.startPeriodicTokenSaver(worker, tokenSaveTicker)
 
 	//TODO: her eventi isler islemez kaydediyoruz su an yapı degisince ise yarayacak
 	//defer ps.saveFinalTokenOnExit(worker)
@@ -590,7 +710,7 @@ func (ps *partitionStream) verifyPartitionOwnership(ctx context.Context, partiti
 	return false
 }
 
-func (ps *partitionStream) createPipeline(partitionID int) []bson.D {
+func (ps *partitionStream) buildPartitionedChangeStreamPipeline(partitionID int) []bson.D {
 	return []bson.D{
 		{
 			{Key: "$match", Value: bson.D{
@@ -604,7 +724,7 @@ func (ps *partitionStream) createPipeline(partitionID int) []bson.D {
 				{Key: "$expr", Value: bson.D{
 					{Key: "$eq", Value: bson.A{
 						bson.D{{Key: "$mod", Value: bson.A{
-							ps.createHashExpression("$documentKey._id"),
+							ps.buildPartitioningHashExpression("$documentKey._id"),
 							ps.cfg.Partition.TotalPartition,
 						}}},
 						partitionID,
@@ -615,12 +735,12 @@ func (ps *partitionStream) createPipeline(partitionID int) []bson.D {
 	}
 }
 
-func (ps *partitionStream) createDocumentFilter(partitionID int) bson.D {
+func (ps *partitionStream) buildBootstrapPartitionFilter(partitionID int) bson.D {
 	return bson.D{
 		{Key: "$expr", Value: bson.D{
 			{Key: "$eq", Value: bson.A{
 				bson.D{{Key: "$mod", Value: bson.A{
-					ps.createHashExpression("$_id"),
+					ps.buildPartitioningHashExpression("$_id"),
 					ps.cfg.Partition.TotalPartition,
 				}}},
 				partitionID,
@@ -629,7 +749,7 @@ func (ps *partitionStream) createDocumentFilter(partitionID int) bson.D {
 	}
 }
 
-func (ps *partitionStream) createHashExpression(idField string) bson.D {
+func (ps *partitionStream) buildPartitioningHashExpression(idField string) bson.D {
 	return bson.D{
 		{Key: "$cond", Value: bson.D{
 			{Key: "if", Value: bson.D{
@@ -644,7 +764,7 @@ func (ps *partitionStream) createHashExpression(idField string) bson.D {
 				{Key: "$cond", Value: bson.D{
 					{Key: "if", Value: ps.createIsNumericStringCheck(idField)},
 					{Key: "then", Value: bson.D{{Key: "$toDouble", Value: idField}}},
-					{Key: "else", Value: ps.createOptimizedStringHash(idField)},
+					{Key: "else", Value: ps.buildStringDistributionHash(idField)},
 				}},
 			}},
 		}},
@@ -663,7 +783,15 @@ func (ps *partitionStream) createIsNumericStringCheck(idField string) bson.D {
 	}
 }
 
-func (ps *partitionStream) createOptimizedStringHash(idField string) bson.D {
+/*
+ * This function calculates a compound hash for a given _id.
+ * Standard hashing methods in MongoDB can lead to poor distribution for certain
+ * string patterns (e.g., sequential or timestamp-based strings).
+ * This implementation combines three different hashing algorithms (DJB2, polynomial, position-weighted)
+ * to ensure a more uniform distribution of documents across partitions,
+ * minimizing hotspots. It's designed to be fast and produce a wide range of hash values.
+ */
+func (ps *partitionStream) buildStringDistributionHash(idField string) bson.D {
 	return bson.D{
 		{Key: "$function", Value: bson.D{
 			{Key: "body", Value: `
@@ -706,7 +834,81 @@ func (ps *partitionStream) createOptimizedStringHash(idField string) bson.D {
 	}
 }
 
-func (ps *partitionStream) isResumeTokenError(err error) bool {
+func (ps *partitionStream) buildResumeAfterIdFilter(fieldName string, lastValue interface{}) bson.D {
+	switch v := lastValue.(type) {
+	case primitive.ObjectID:
+		// ObjectIds have natural ordering and work well with $gt
+		return bson.D{
+			{Key: "$and", Value: bson.A{
+				bson.M{fieldName: bson.M{"$type": "objectId"}},
+				bson.M{fieldName: bson.M{"$gt": v}},
+			}},
+		}
+
+	case int, int32, int64, float32, float64:
+		// Numeric types work well with $gt, but ensure type consistency
+		return bson.D{
+			{Key: "$and", Value: bson.A{
+				bson.M{fieldName: bson.M{"$type": bson.A{"int", "long", "double", "decimal"}}},
+				bson.M{fieldName: bson.M{"$gt": v}},
+			}},
+		}
+
+	case string:
+		// For strings, use simple comparison
+		// The Find() operation will apply collation if needed for numeric strings
+		return bson.D{
+			{Key: "$and", Value: bson.A{
+				bson.M{fieldName: bson.M{"$type": "string"}},
+				bson.M{fieldName: bson.M{"$gt": v}},
+			}},
+		}
+
+	case primitive.Binary:
+		// UUID/Binary data - use $gt with same type and subtype
+		return bson.D{
+			{Key: "$and", Value: bson.A{
+				bson.M{fieldName: bson.M{"$type": "binData"}},
+				bson.M{fieldName: bson.M{"$gt": v}},
+			}},
+		}
+
+	case primitive.DateTime:
+		// DateTime types should be compared as dates
+		return bson.D{
+			{Key: "$and", Value: bson.A{
+				bson.M{fieldName: bson.M{"$type": "date"}},
+				bson.M{fieldName: bson.M{"$gt": v}},
+			}},
+		}
+
+	default:
+		// return nil, fmt.Errorf("unsupported _id type for comparison: %T", v)
+
+		// For any other complex type, convert to string representation for comparison
+		// This handles UUID strings, complex objects, etc.
+		valueStr := fmt.Sprintf("%v", v)
+		ps.logger.Info(fmt.Sprintf("Using string-based comparison for complex type %T (value: %s)", v, valueStr))
+
+		return bson.D{
+			{Key: "$or", Value: bson.A{
+				// Either the field is not a string and we can't compare it safely (skip it)
+				bson.M{fieldName: bson.M{"$not": bson.M{"$type": "string"}}},
+				// Or it's a string and greater than our string representation
+				bson.M{
+					"$and": bson.A{
+						bson.M{fieldName: bson.M{"$type": "string"}},
+						bson.M{fieldName: bson.M{"$gt": valueStr}},
+					},
+				},
+				// Or it's the same complex type but not the exact same value
+				bson.M{fieldName: bson.M{"$ne": v}},
+			}},
+		}
+	}
+}
+
+func (ps *partitionStream) isUnrecoverableResumeError(err error) bool {
 	if err == nil {
 		return false
 	}
@@ -768,7 +970,7 @@ func (ps *partitionStream) updateMetrics(opType message.OperationType) {
 	}
 }
 
-func (ps *partitionStream) periodicTokenSave(worker *streamWorker, ticker *time.Ticker) {
+func (ps *partitionStream) startPeriodicTokenSaver(worker *streamWorker, ticker *time.Ticker) {
 	for {
 		select {
 		case <-worker.ctx.Done():
