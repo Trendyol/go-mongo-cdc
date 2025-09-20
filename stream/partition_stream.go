@@ -145,14 +145,6 @@ func (ps *partitionStream) checkReplicaSetStatus(ctx context.Context) error {
 }
 
 func (ps *partitionStream) initializePartitions() error {
-	// Wait a bit to allow other workers to register
-	select {
-	case <-ps.ctx.Done():
-		return ps.ctx.Err()
-	case <-time.After(3 * time.Second):
-		ps.logger.Debug("Initial partition acquisition delay completed")
-	}
-
 	partitions, err := ps.partitionManager.AcquirePartitions(ps.ctx)
 	if err != nil {
 		return err

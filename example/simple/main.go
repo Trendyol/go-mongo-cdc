@@ -23,7 +23,7 @@ type CDCListener struct {
 
 func main() {
 	loggerConfig := zap.NewDevelopmentConfig()
-	loggerConfig.Level = zap.NewAtomicLevelAt(zapcore.InfoLevel)
+	loggerConfig.Level = zap.NewAtomicLevelAt(zapcore.DebugLevel)
 	logger, _ := loggerConfig.Build()
 
 	defer func() {
@@ -50,7 +50,7 @@ func main() {
 			HeartbeatInterval:      5 * time.Second,
 			WorkerTimeout:          30 * time.Second,
 			PartitionDatabase:      "exampleDB",
-			RebalanceCheckInterval: 10 * time.Second,
+			RebalanceCheckInterval: 3 * time.Second,
 		},
 		Logger: config.LoggerConfig{
 			Logger: logger,
@@ -76,7 +76,7 @@ func (l *CDCListener) ProcessChangeEvent(lc *stream.ListenerContext) error {
 	switch lc.Message.OperationType {
 	case message.OperationInsert, message.OperationUpdate, message.OperationReplace:
 		if lc.Message.FullDocument != nil {
-			l.logger.Info(fmt.Sprintf("Document changed - operation: %s, document: %v, partitionId: %d", string(lc.Message.OperationType), lc.Message.FullDocument, lc.PartitionID))
+			l.logger.Info(fmt.Sprintf("Document changed - operation: %s, document: %v, partitionId: %d", string(lc.Message.OperationType), lc.Message.DocumentID, lc.PartitionID))
 		}
 	case message.OperationDelete:
 		l.logger.Info(fmt.Sprintf("Document deleted - documentId: %v, partitionId: %d", lc.Message.DocumentID, lc.PartitionID))
