@@ -16,6 +16,7 @@ import (
 	"github.com/Trendyol/go-mongo-cdc/partition"
 	"go.mongodb.org/mongo-driver/bson"
 	"go.mongodb.org/mongo-driver/bson/primitive"
+	"go.mongodb.org/mongo-driver/mongo"
 	"go.mongodb.org/mongo-driver/mongo/options"
 	"go.uber.org/zap"
 )
@@ -394,7 +395,7 @@ func (ps *partitionStream) prepareBootstrapProgress(partitionID int) (interface{
 }
 
 func (ps *partitionStream) createBootstrapCursor(worker *streamWorker, filter bson.D, bootstrapLastID interface{}) (connection.Cursor, error) {
-	useNumericStringSorting := ps.shouldUseNumericStringSorting(worker, filter, bootstrapLastID)
+	useNumericStringSorting := ps.shouldUseNumericStringSorting(worker, bootstrapLastID)
 
 	opts := options.Find().SetSort(bson.D{{Key: "_id", Value: 1}})
 
@@ -409,7 +410,7 @@ func (ps *partitionStream) createBootstrapCursor(worker *streamWorker, filter bs
 	return ps.collection.Find(worker.ctx, filter, opts)
 }
 
-func (ps *partitionStream) shouldUseNumericStringSorting(worker *streamWorker, filter bson.D, bootstrapLastID interface{}) bool {
+func (ps *partitionStream) shouldUseNumericStringSorting(worker *streamWorker, bootstrapLastID interface{}) bool {
 	if bootstrapLastID != nil {
 		if lastIDStr, ok := bootstrapLastID.(string); ok && ps.isNumericString(lastIDStr) {
 			ps.logger.Info(fmt.Sprintf("Resuming with numeric string ID '%s' - using mathematical sorting", lastIDStr))
@@ -418,7 +419,7 @@ func (ps *partitionStream) shouldUseNumericStringSorting(worker *streamWorker, f
 		return false
 	}
 
-	isNumericStringCollection, err := ps.detectNumericStringCollection(worker.ctx, filter)
+	isNumericStringCollection, err := ps.detectNumericStringCollection(worker.ctx)
 	if err != nil {
 		ps.logger.Warn(fmt.Sprintf("Failed to detect ID type, using default sorting - partitionId: %d, error: %v", worker.partitionID, err))
 		return false
@@ -430,6 +431,39 @@ func (ps *partitionStream) shouldUseNumericStringSorting(worker *streamWorker, f
 	}
 
 	return false
+}
+
+func (ps *partitionStream) detectNumericStringCollection(ctx context.Context) (bool, error) {
+	var doc struct {
+		ID interface{} `bson:"_id"`
+	}
+
+	err := ps.collection.FindOne(ctx, bson.D{}).Decode(&doc)
+	if err != nil {
+		if err == mongo.ErrNoDocuments {
+			return false, nil
+		}
+		return false, fmt.Errorf("failed to sample document: %w", err)
+	}
+
+	idStr, ok := doc.ID.(string)
+	if !ok {
+		return false, nil
+	}
+
+	return ps.isNumericString(idStr), nil
+}
+
+func (ps *partitionStream) isNumericString(s string) bool {
+	if len(s) == 0 {
+		return false
+	}
+	for _, char := range s {
+		if char < '0' || char > '9' {
+			return false
+		}
+	}
+	return true
 }
 
 func (ps *partitionStream) processBootstrapDocuments(worker *streamWorker, cursor connection.Cursor) error {
@@ -868,79 +902,6 @@ func (ps *partitionStream) createTypeSafeGreaterThanFilter(fieldName string, las
 			}},
 		}
 	}
-}
-
-func (ps *partitionStream) isNumericString(s string) bool {
-	if len(s) == 0 {
-		return false
-	}
-	for _, char := range s {
-		if char < '0' || char > '9' {
-			return false
-		}
-	}
-	return true
-}
-
-func (ps *partitionStream) stringToFloat(s string) float64 {
-	result := 0.0
-	for _, char := range s {
-		if char >= '0' && char <= '9' {
-			result = result*10 + float64(char-'0')
-		}
-	}
-	return result
-}
-
-func (ps *partitionStream) detectNumericStringCollection(ctx context.Context, filter bson.D) (bool, error) {
-	const sampleSize = 10
-	const minSamplesForConfidence = 3
-
-	ps.logger.Debug(fmt.Sprintf("Detecting collection ID type with sample size %d for partition...", sampleSize))
-
-	opts := options.Find().SetLimit(sampleSize)
-	cursor, err := ps.collection.Find(ctx, filter, opts)
-	if err != nil {
-		return false, fmt.Errorf("koleksiyonu örneklemek için sorgu başarısız oldu: %w", err)
-	}
-	defer cursor.Close(ctx)
-
-	var docsChecked int
-	for cursor.Next(ctx) {
-		var doc struct {
-			ID interface{} `bson:"_id"`
-		}
-
-		if err := cursor.Decode(&doc); err != nil {
-			ps.logger.Warn(fmt.Sprintf("failed to decode, r: %v", err))
-			continue
-		}
-		docsChecked++
-
-		idStr, ok := doc.ID.(string)
-		if !ok {
-			ps.logger.Info(fmt.Sprintf("found different type than a string (tip: %T)", doc.ID))
-			return false, nil
-		}
-
-		if !ps.isNumericString(idStr) {
-			ps.logger.Info(fmt.Sprintf("found different type than a numeric string ('%s')", idStr))
-			return false, nil
-		}
-	}
-
-	if err := cursor.Err(); err != nil {
-		return false, fmt.Errorf("failed at cursor: %w", err)
-	}
-
-	if docsChecked < minSamplesForConfidence {
-		ps.logger.Info(fmt.Sprintf("%d documents were found in the sample, which is below the safe decision threshold of %d. The default sorting will be used.", docsChecked, minSamplesForConfidence))
-		return false, nil
-	}
-
-	ps.logger.Info(fmt.Sprintf("All %d documents in the sample were verified as numeric strings. Mathematical sorting will be used.", docsChecked))
-
-	return true, nil
 }
 
 func (ps *partitionStream) isResumeTokenError(err error) bool {
