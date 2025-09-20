@@ -51,6 +51,7 @@ func main() {
 			WorkerTimeout:          30 * time.Second,
 			PartitionDatabase:      "exampleDB",
 			RebalanceCheckInterval: 3 * time.Second,
+			TotalPartition:         4,
 		},
 		Logger: config.LoggerConfig{
 			Logger: logger,
