@@ -531,7 +531,16 @@ func (ps *partitionStream) dispatchBootstrapDocumentToListener(worker *streamWor
 	state.processedCount++
 	state.lastProcessedID = document["_id"]
 
-	return ps.saveBootstrapProgressIfNeeded(worker, document, state)
+	if ps.shouldSaveBootstrapProgress(worker, state) {
+		if !ps.verifyPartitionOwnership(worker.ctx, worker.partitionID) {
+			ps.logger.Warn(fmt.Sprintf("Partition ownership lost before checkpoint save - partitionId: %d, processed: %d", worker.partitionID, state.processedCount))
+			return fmt.Errorf("partition %d ownership lost before checkpoint", worker.partitionID)
+		}
+
+		return ps.saveBootstrapProgress(worker, document, state)
+	}
+
+	return nil
 }
 
 func (ps *partitionStream) createInsertEventFromDocument(document bson.M) message.ChangeEvent {
@@ -547,20 +556,6 @@ func (ps *partitionStream) createInsertEventFromDocument(document bson.M) messag
 		},
 		ClusterTime: primitive.Timestamp{T: uint32(time.Now().Unix()), I: 1},
 	}
-}
-
-func (ps *partitionStream) saveBootstrapProgressIfNeeded(worker *streamWorker, document bson.M, state *bootstrapProcessState) error {
-	shouldSaveCheckpoint := ps.shouldSaveBootstrapProgress(worker, state)
-	if !shouldSaveCheckpoint {
-		return nil
-	}
-
-	if !ps.verifyPartitionOwnership(worker.ctx, worker.partitionID) {
-		ps.logger.Warn(fmt.Sprintf("Partition ownership lost before checkpoint save - partitionId: %d, processed: %d", worker.partitionID, state.processedCount))
-		return fmt.Errorf("partition %d ownership lost before checkpoint", worker.partitionID)
-	}
-
-	return ps.saveBootstrapProgress(worker, document, state)
 }
 
 func (ps *partitionStream) shouldSaveBootstrapProgress(worker *streamWorker, state *bootstrapProcessState) bool {
@@ -590,6 +585,7 @@ func (ps *partitionStream) saveBootstrapProgress(worker *streamWorker, document 
 
 	ps.logger.Debug(fmt.Sprintf("Saved bootstrap progress - partitionId: %d, documentId: %v, processed: %d", worker.partitionID, document["_id"], state.processedCount))
 	state.lastCheckpointTime = time.Now()
+
 	return nil
 }
 
