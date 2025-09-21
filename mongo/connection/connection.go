@@ -38,6 +38,12 @@ type Collection interface {
 		update interface{},
 		opts ...*options.UpdateOptions,
 	) (UpdateResult, error)
+	FindOneAndUpdate(
+		ctx context.Context,
+		filter interface{},
+		update interface{},
+		opts ...*options.FindOneAndUpdateOptions,
+	) SingleResult
 	DeleteOne(ctx context.Context, filter interface{}, opts ...*options.DeleteOptions) (DeleteResult, error)
 	DeleteMany(ctx context.Context, filter interface{}, opts ...*options.DeleteOptions) (DeleteResult, error)
 	CountDocuments(ctx context.Context, filter interface{}, opts ...*options.CountOptions) (int64, error)
@@ -253,6 +259,15 @@ func (c *mongoCollectionImpl) UpdateMany(
 		return nil, err
 	}
 	return &mongoUpdateResultImpl{ur: result}, nil
+}
+
+func (c *mongoCollectionImpl) FindOneAndUpdate(
+	ctx context.Context,
+	filter interface{},
+	update interface{},
+	opts ...*options.FindOneAndUpdateOptions,
+) SingleResult {
+	return &mongoSingleResultImpl{sr: c.coll.FindOneAndUpdate(ctx, filter, update, opts...)}
 }
 
 func (c *mongoCollectionImpl) CountDocuments(

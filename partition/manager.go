@@ -3,7 +3,6 @@ package partition
 import (
 	"context"
 	"fmt"
-	"strings"
 	"sync"
 	"time"
 
@@ -350,8 +349,8 @@ func (m *manager) AcquirePartitions(ctx context.Context) ([]int, error) {
 		expectedPartitions, activeWorkers, workerIndex))
 
 	for _, partitionID := range expectedPartitions {
-		if err := m.tryAcquireOrTakeoverPartition(ctx, partitionID); err != nil {
-			m.logger.Info(fmt.Sprintf("Failed to acquire partition %d: %v", partitionID, err))
+		if err := m.tryAcquireOrTakeoverPartitionWithRetry(ctx, partitionID); err != nil {
+			m.logger.Info(fmt.Sprintf("Failed to acquire partition %d after retries: %v", partitionID, err))
 			failedPartitions = append(failedPartitions, partitionID)
 			continue
 		}
@@ -516,6 +515,34 @@ func (m *manager) determineWorkerIndex(ctx context.Context) (int, error) {
 	return -1, fmt.Errorf("worker not found in active workers list after %d attempts", maxRetries)
 }
 
+func (m *manager) tryAcquireOrTakeoverPartitionWithRetry(ctx context.Context, partitionID int) error {
+	maxRetries := 3
+	baseDelay := 100 * time.Millisecond
+
+	for attempt := 1; attempt <= maxRetries; attempt++ {
+		err := m.tryAcquireOrTakeoverPartition(ctx, partitionID)
+		if err == nil {
+			return nil
+		}
+
+		if attempt == maxRetries {
+			return fmt.Errorf("failed to acquire partition %d after %d attempts: %w", partitionID, maxRetries, err)
+		}
+
+		delay := time.Duration(attempt) * baseDelay
+		m.logger.Debug(fmt.Sprintf("Partition acquisition failed, retrying - partition: %d, attempt: %d/%d, delay: %v, error: %v",
+			partitionID, attempt, maxRetries, delay, err))
+
+		select {
+		case <-ctx.Done():
+			return ctx.Err()
+		case <-time.After(delay):
+		}
+	}
+
+	return fmt.Errorf("partition acquisition failed after %d attempts", maxRetries)
+}
+
 func (m *manager) tryAcquireOrTakeoverPartition(ctx context.Context, partitionID int) error {
 	assignment := PartitionAssignment{
 		PartitionID:   partitionID,
@@ -526,20 +553,6 @@ func (m *manager) tryAcquireOrTakeoverPartition(ctx context.Context, partitionID
 
 	cutoff := time.Now().Add(-m.config.WorkerTimeout)
 
-	var existingAssignment PartitionAssignment
-	err := m.partitionsCol.FindOne(ctx, bson.M{"_id": partitionID}).Decode(&existingAssignment)
-	if err == nil {
-		if existingAssignment.WorkerID != m.workerID {
-			if existingAssignment.LastHeartbeat.After(cutoff) {
-				m.logger.Debug(fmt.Sprintf("Partition %d is owned by active worker %s (heartbeat: %v)",
-					partitionID, existingAssignment.WorkerID, existingAssignment.LastHeartbeat))
-				return fmt.Errorf("partition %d is already owned by another active worker", partitionID)
-			}
-			m.logger.Info(fmt.Sprintf("Taking over partition %d from inactive worker %s (last heartbeat: %v)",
-				partitionID, existingAssignment.WorkerID, existingAssignment.LastHeartbeat))
-		}
-	}
-
 	filter := bson.M{
 		"_id": partitionID,
 		"$or": []bson.M{
@@ -549,31 +562,25 @@ func (m *manager) tryAcquireOrTakeoverPartition(ctx context.Context, partitionID
 	}
 
 	update := bson.M{"$set": assignment}
-	result, err := m.partitionsCol.UpdateOne(ctx, filter, update)
+	opts := options.FindOneAndUpdate().SetUpsert(true).SetReturnDocument(options.After)
+
+	var result PartitionAssignment
+	err := m.partitionsCol.FindOneAndUpdate(ctx, filter, update, opts).Decode(&result)
+
 	if err != nil {
-		return fmt.Errorf("failed to update existing partition %w", err)
+		if err == mongo.ErrNoDocuments {
+			m.logger.Debug(fmt.Sprintf("Partition %d is owned by another active worker", partitionID))
+			return fmt.Errorf("partition %d is already owned by another active worker", partitionID)
+		}
+		return fmt.Errorf("failed to acquire partition %d: %w", partitionID, err)
 	}
 
-	if result.MatchedCount() > 0 {
-		m.logger.Debug(fmt.Sprintf("Successfully acquired partition %d via update", partitionID))
+	if result.WorkerID == m.workerID {
+		m.logger.Debug(fmt.Sprintf("Successfully acquired partition %d atomically", partitionID))
 		return nil
 	}
 
-	_, err = m.partitionsCol.InsertOne(ctx, assignment)
-	if err != nil {
-		if isDuplicateKeyError(err) {
-			return fmt.Errorf("partition %d is already owned by another active worker", partitionID)
-		}
-		return fmt.Errorf("failed to insert new partition assignment: %w", err)
-	}
-
-	return nil
-}
-
-func isDuplicateKeyError(err error) bool {
-	return err != nil && (err.Error() == "E11000" ||
-		strings.Contains(err.Error(), "E11000") ||
-		strings.Contains(err.Error(), "duplicate key error"))
+	return fmt.Errorf("partition %d was acquired by another worker during operation", partitionID)
 }
 
 func (m *manager) releasePartition(ctx context.Context, partitionID int) error {
