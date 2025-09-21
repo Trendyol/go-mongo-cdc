@@ -150,10 +150,16 @@ func (m *manager) registerWorkerWithRetry(ctx context.Context) error {
 }
 
 func (m *manager) registerWorker(ctx context.Context) error {
+	serverTime, err := m.getServerTime(ctx)
+	if err != nil {
+		m.logger.Warn(fmt.Sprintf("Failed to get server time, falling back to local time: %v", err))
+		serverTime = time.Now()
+	}
+
 	worker := WorkerInfo{
 		ID:                 m.workerID,
 		AssignedPartitions: []int{},
-		LastHeartbeat:      time.Now(),
+		LastHeartbeat:      serverTime,
 	}
 
 	filter := bson.M{"_id": m.workerID}
@@ -200,8 +206,8 @@ func (m *manager) heartbeatLoop() {
 func (m *manager) sendHeartbeat(ctx context.Context) error {
 	filter := bson.M{"_id": m.workerID}
 	update := bson.M{
-		"$set": bson.M{
-			"lastHeartbeat": time.Now(),
+		"$currentDate": bson.M{
+			"lastHeartbeat": true,
 		},
 	}
 
@@ -231,8 +237,8 @@ func (m *manager) updatePartitionHeartbeats(ctx context.Context) error {
 		"workerId": m.workerID,
 	}
 	update := bson.M{
-		"$set": bson.M{
-			"lastHeartbeat": time.Now(),
+		"$currentDate": bson.M{
+			"lastHeartbeat": true,
 		},
 	}
 
@@ -404,7 +410,13 @@ func (m *manager) calculateExpectedPartitionsForWorker(workerIndex int, activeWo
 }
 
 func (m *manager) cleanupDeadWorkers(ctx context.Context) error {
-	cutoff := time.Now().Add(-m.config.WorkerTimeout)
+	serverTime, err := m.getServerTime(ctx)
+	if err != nil {
+		m.logger.Warn(fmt.Sprintf("Failed to get server time for cleanup, falling back to local time: %v", err))
+		serverTime = time.Now()
+	}
+
+	cutoff := serverTime.Add(-m.config.WorkerTimeout)
 
 	filter := bson.M{"lastHeartbeat": bson.M{"$lt": cutoff}}
 	cursor, err := m.workersCol.Find(ctx, filter)
@@ -450,7 +462,13 @@ func (m *manager) cleanupDeadWorkers(ctx context.Context) error {
 }
 
 func (m *manager) getActiveWorkerCount(ctx context.Context) (int, error) {
-	cutoff := time.Now().Add(-m.config.WorkerTimeout)
+	serverTime, err := m.getServerTime(ctx)
+	if err != nil {
+		m.logger.Warn(fmt.Sprintf("Failed to get server time for active worker count, falling back to local time: %v", err))
+		serverTime = time.Now()
+	}
+
+	cutoff := serverTime.Add(-m.config.WorkerTimeout)
 	filter := bson.M{"lastHeartbeat": bson.M{"$gte": cutoff}}
 
 	count, err := m.workersCol.CountDocuments(ctx, filter)
@@ -462,7 +480,13 @@ func (m *manager) getActiveWorkerCount(ctx context.Context) (int, error) {
 }
 
 func (m *manager) determineWorkerIndex(ctx context.Context) (int, error) {
-	cutoff := time.Now().Add(-m.config.WorkerTimeout)
+	serverTime, err := m.getServerTime(ctx)
+	if err != nil {
+		m.logger.Warn(fmt.Sprintf("Failed to get server time for worker index, falling back to local time: %v", err))
+		serverTime = time.Now()
+	}
+
+	cutoff := serverTime.Add(-m.config.WorkerTimeout)
 	filter := bson.M{"lastHeartbeat": bson.M{"$gte": cutoff}}
 	opts := options.Find().SetSort(bson.D{{Key: "_id", Value: 1}})
 
@@ -544,14 +568,13 @@ func (m *manager) tryAcquireOrTakeoverPartitionWithRetry(ctx context.Context, pa
 }
 
 func (m *manager) tryAcquireOrTakeoverPartition(ctx context.Context, partitionID int) error {
-	assignment := PartitionAssignment{
-		PartitionID:   partitionID,
-		WorkerID:      m.workerID,
-		AssignedAt:    time.Now(),
-		LastHeartbeat: time.Now(),
+	serverTime, err := m.getServerTime(ctx)
+	if err != nil {
+		m.logger.Warn(fmt.Sprintf("Failed to get server time for partition acquisition, falling back to local time: %v", err))
+		serverTime = time.Now()
 	}
 
-	cutoff := time.Now().Add(-m.config.WorkerTimeout)
+	cutoff := serverTime.Add(-m.config.WorkerTimeout)
 
 	filter := bson.M{
 		"_id": partitionID,
@@ -561,11 +584,20 @@ func (m *manager) tryAcquireOrTakeoverPartition(ctx context.Context, partitionID
 		},
 	}
 
-	update := bson.M{"$set": assignment}
+	update := bson.M{
+		"$set": bson.M{
+			"partitionId": partitionID,
+			"workerId":    m.workerID,
+		},
+		"$currentDate": bson.M{
+			"assignedAt":    true,
+			"lastHeartbeat": true,
+		},
+	}
 	opts := options.FindOneAndUpdate().SetUpsert(true).SetReturnDocument(options.After)
 
 	var result PartitionAssignment
-	err := m.partitionsCol.FindOneAndUpdate(ctx, filter, update, opts).Decode(&result)
+	err = m.partitionsCol.FindOneAndUpdate(ctx, filter, update, opts).Decode(&result)
 
 	if err != nil {
 		if err == mongo.ErrNoDocuments {
@@ -608,7 +640,9 @@ func (m *manager) updateWorkerPartitions(ctx context.Context, partitions []int) 
 	update := bson.M{
 		"$set": bson.M{
 			"assignedPartitions": partitions,
-			"lastHeartbeat":      time.Now(),
+		},
+		"$currentDate": bson.M{
+			"lastHeartbeat": true,
 		},
 	}
 
@@ -693,6 +727,57 @@ func (m *manager) ReleasePartitions(ctx context.Context) error {
 	m.logger.Info(fmt.Sprintf("Released %d partitions from MongoDB", result.DeletedCount()))
 
 	return m.updateWorkerPartitions(ctx, []int{})
+}
+
+func (m *manager) getServerTime(ctx context.Context) (time.Time, error) {
+	db := m.client.Database(m.config.PartitionDatabase)
+	result := db.RunCommand(ctx, bson.D{{Key: "serverStatus", Value: 1}})
+
+	var serverStatus struct {
+		LocalTime time.Time `bson:"localTime"`
+	}
+
+	if err := result.Decode(&serverStatus); err != nil {
+		return m.getServerTimeWithCurrentDate(ctx)
+	}
+
+	return serverStatus.LocalTime, nil
+}
+
+func (m *manager) getServerTimeWithCurrentDate(ctx context.Context) (time.Time, error) {
+	update := bson.M{
+		"$set": bson.M{
+			"purpose": "server_time_check",
+		},
+		"$currentDate": bson.M{
+			"serverTime": true,
+		},
+	}
+
+	opts := options.FindOneAndUpdate().
+		SetUpsert(true).
+		SetReturnDocument(options.After)
+
+	var result struct {
+		ServerTime time.Time `bson:"serverTime"`
+	}
+
+	err := m.workersCol.FindOneAndUpdate(ctx,
+		bson.M{"_id": "temp_time_check"},
+		update,
+		opts).Decode(&result)
+
+	if err != nil {
+		return time.Time{}, fmt.Errorf("failed to get server time with fallback method: %w", err)
+	}
+
+	go func() {
+		deleteCtx, cancel := context.WithTimeout(context.Background(), 5*time.Second)
+		defer cancel()
+		m.workersCol.DeleteOne(deleteCtx, bson.M{"_id": "temp_time_check"})
+	}()
+
+	return result.ServerTime, nil
 }
 
 func (m *manager) Stop(ctx context.Context) error {
