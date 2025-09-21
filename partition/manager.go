@@ -3,6 +3,7 @@ package partition
 import (
 	"context"
 	"fmt"
+	"math/rand"
 	"sync"
 	"time"
 
@@ -276,7 +277,7 @@ func (m *manager) triggerRebalanceIfNeeded() {
 		return
 	}
 
-	needsRebalance := currentWorkerCount != m.lastKnownWorkerCount || m.isUnderAssigned(ctx)
+	needsRebalance := currentWorkerCount != m.lastKnownWorkerCount || m.needsRebalance(ctx)
 
 	if needsRebalance {
 		if currentWorkerCount != m.lastKnownWorkerCount {
@@ -295,9 +296,8 @@ func (m *manager) triggerRebalanceIfNeeded() {
 	}
 }
 
-func (m *manager) isUnderAssigned(ctx context.Context) bool {
+func (m *manager) needsRebalance(ctx context.Context) bool {
 	m.mu.RLock()
-	currentPartitionCount := len(m.assignedPartitions)
 	currentPartitions := make([]int, len(m.assignedPartitions))
 	copy(currentPartitions, m.assignedPartitions)
 	m.mu.RUnlock()
@@ -315,16 +315,27 @@ func (m *manager) isUnderAssigned(ctx context.Context) bool {
 	}
 
 	expectedPartitions := m.calculateExpectedPartitionsForWorker(workerIndex, activeWorkers)
-	expectedPartitionCount := len(expectedPartitions)
 
-	isDeficient := currentPartitionCount < expectedPartitionCount
-
-	if isDeficient {
-		m.logger.Debug(fmt.Sprintf("Partition deficit detected - workerId: %s, current: %d (partitions: %v), expected: %d, workerIndex: %d, activeWorkers: %d",
-			m.workerID, currentPartitionCount, currentPartitions, expectedPartitionCount, workerIndex, activeWorkers))
+	if len(currentPartitions) != len(expectedPartitions) {
+		m.logger.Debug(fmt.Sprintf("Partition assignment count mismatch - workerId: %s, current: %d %v, expected: %d %v, workerIndex: %d, activeWorkers: %d",
+			m.workerID, len(currentPartitions), currentPartitions, len(expectedPartitions), expectedPartitions, workerIndex, activeWorkers))
+		return true
 	}
 
-	return isDeficient
+	expectedPartitionsSet := make(map[int]struct{}, len(expectedPartitions))
+	for _, p := range expectedPartitions {
+		expectedPartitionsSet[p] = struct{}{}
+	}
+
+	for _, p := range currentPartitions {
+		if _, ok := expectedPartitionsSet[p]; !ok {
+			m.logger.Debug(fmt.Sprintf("Partition assignment content mismatch - workerId: %s, has unexpected partition %d. Current: %v, Expected: %v, workerIndex: %d, activeWorkers: %d",
+				m.workerID, p, currentPartitions, expectedPartitions, workerIndex, activeWorkers))
+			return true
+		}
+	}
+
+	return false
 }
 
 func (m *manager) AcquirePartitions(ctx context.Context) ([]int, error) {
@@ -521,7 +532,6 @@ func (m *manager) determineWorkerIndex(ctx context.Context) (int, error) {
 		cursor.Close(ctx)
 
 		if found {
-			m.logger.Debug(fmt.Sprintf("Worker index determined - myWorkerId: %s, myIndex: %d, allActiveWorkers: %v, attempt: %d", m.workerID, index, allWorkers, attempt))
 			return index, nil
 		}
 
@@ -540,22 +550,32 @@ func (m *manager) determineWorkerIndex(ctx context.Context) (int, error) {
 }
 
 func (m *manager) tryAcquireOrTakeoverPartitionWithRetry(ctx context.Context, partitionID int) error {
-	maxRetries := 3
-	baseDelay := 100 * time.Millisecond
+	maxRetries := 5
+	baseDelay := 250 * time.Millisecond
+	maxDelay := 5 * time.Second
 
-	for attempt := 1; attempt <= maxRetries; attempt++ {
+	for attempt := 0; attempt < maxRetries; attempt++ {
 		err := m.tryAcquireOrTakeoverPartition(ctx, partitionID)
 		if err == nil {
 			return nil
 		}
 
-		if attempt == maxRetries {
+		if attempt == maxRetries-1 {
 			return fmt.Errorf("failed to acquire partition %d after %d attempts: %w", partitionID, maxRetries, err)
 		}
 
-		delay := time.Duration(attempt) * baseDelay
+		// Exponential Backoff
+		backoff := baseDelay * (1 << attempt) // 250ms, 500ms, 1s, 2s...
+		if backoff > maxDelay {
+			backoff = maxDelay
+		}
+
+		// Jitter
+		jitter := time.Duration(rand.Intn(int(backoff) / 5))
+		delay := backoff + jitter
+
 		m.logger.Debug(fmt.Sprintf("Partition acquisition failed, retrying - partition: %d, attempt: %d/%d, delay: %v, error: %v",
-			partitionID, attempt, maxRetries, delay, err))
+			partitionID, attempt+1, maxRetries, delay, err))
 
 		select {
 		case <-ctx.Done():
