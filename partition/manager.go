@@ -2,8 +2,9 @@ package partition
 
 import (
 	"context"
+	crand "crypto/rand"
 	"fmt"
-	"math/rand"
+	"math/big"
 	"sync"
 	"time"
 
@@ -359,8 +360,8 @@ func (m *manager) AcquirePartitions(ctx context.Context) ([]int, error) {
 
 	expectedPartitions := m.calculateExpectedPartitionsForWorker(workerIndex, activeWorkers)
 
-	var acquiredPartitions []int
-	var failedPartitions []int
+	acquiredPartitions := make([]int, 0, len(expectedPartitions))
+	failedPartitions := make([]int, 0, len(expectedPartitions))
 
 	m.logger.Info(fmt.Sprintf("Attempting to acquire partitions - expected: %v, activeWorkers: %d, workerIndex: %d",
 		expectedPartitions, activeWorkers, workerIndex))
@@ -570,8 +571,14 @@ func (m *manager) tryAcquireOrTakeoverPartitionWithRetry(ctx context.Context, pa
 			backoff = maxDelay
 		}
 
-		// Jitter
-		jitter := time.Duration(rand.Intn(int(backoff) / 5))
+		maxJitter := backoff / 5
+		jitter := time.Duration(0)
+		if maxJitter > 0 {
+			n, err := crand.Int(crand.Reader, big.NewInt(int64(maxJitter)))
+			if err == nil {
+				jitter = time.Duration(n.Int64())
+			}
+		}
 		delay := backoff + jitter
 
 		m.logger.Debug(fmt.Sprintf("Partition acquisition failed, retrying - partition: %d, attempt: %d/%d, delay: %v, error: %v",

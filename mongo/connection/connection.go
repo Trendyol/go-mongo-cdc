@@ -2,7 +2,7 @@ package connection
 
 import (
 	"context"
-	"fmt"
+	"github.com/Trendyol/go-mongo-cdc/config"
 	"time"
 
 	"go.mongodb.org/mongo-driver/mongo"
@@ -129,19 +129,44 @@ type mongoIndexViewImpl struct {
 	iv mongo.IndexView
 }
 
-func NewConnection(ctx context.Context, uri string) (Client, error) {
-	clientOptions := options.Client().ApplyURI(uri)
+func NewMongoClient(cfg config.MongoDB) (Client, error) {
+	ctx := context.Background()
 
-	clientOptions.SetConnectTimeout(10 * time.Second)
-	clientOptions.SetServerSelectionTimeout(5 * time.Second)
+	clientOpts := options.Client().ApplyURI("mongodb://" + cfg.Connection.URI)
+	clientOpts.SetRetryWrites(true)
+	clientOpts.SetRetryReads(true)
 
-	client, err := mongo.Connect(ctx, clientOptions)
-	if err != nil {
-		return nil, fmt.Errorf("failed to connect to MongoDB: %w", err)
+	if cfg.Connection.Username != "" && cfg.Connection.Password != "" {
+		clientOpts.SetAuth(options.Credential{
+			Username:   cfg.Connection.Username,
+			Password:   cfg.Connection.Password,
+			AuthSource: cfg.Connection.Database,
+		})
 	}
 
-	if err := client.Ping(ctx, readpref.Primary()); err != nil {
-		return nil, fmt.Errorf("failed to ping MongoDB: %w", err)
+	clientOpts.SetMaxPoolSize(cfg.ConnectionPool.MaxPoolSize)
+	clientOpts.SetMinPoolSize(cfg.ConnectionPool.MinPoolSize)
+	clientOpts.SetMaxConnIdleTime(time.Duration(cfg.ConnectionPool.MaxIdleTimeMS) * time.Millisecond)
+
+	clientOpts.SetConnectTimeout(time.Duration(cfg.Timeouts.ConnectTimeoutMS) * time.Millisecond)
+	clientOpts.SetServerSelectionTimeout(time.Duration(cfg.Timeouts.ServerSelectionTimeoutMS) * time.Millisecond)
+	clientOpts.SetSocketTimeout(time.Duration(cfg.Timeouts.SocketTimeoutMS) * time.Millisecond)
+
+	client, err := mongo.Connect(ctx, clientOpts)
+	if err != nil {
+		return nil, err
+	}
+
+	pingCtx, pingCancel := context.WithTimeout(context.Background(), 5*time.Second)
+	defer pingCancel()
+
+	if err = client.Ping(pingCtx, nil); err != nil {
+		errDisc := client.Disconnect(ctx)
+		if errDisc != nil {
+			return nil, errDisc
+		}
+
+		return nil, err
 	}
 
 	return &mongoClientImpl{client: client}, nil

@@ -4,6 +4,7 @@ import (
 	"context"
 	"errors"
 	"fmt"
+	"math"
 	"strings"
 	"sync"
 	"time"
@@ -82,11 +83,11 @@ func NewPartitionStream(
 	logger *zap.Logger,
 	workerID string,
 ) PartitionStream {
-	database := client.Database(cfg.Database)
-	collection := database.Collection(cfg.Collection)
+	database := client.Database(cfg.MongoDB.Connection.Database)
+	collection := database.Collection(cfg.MongoDB.Connection.Collection)
 
 	partitionManager := partition.NewManager(workerID, client, cfg.Partition, logger)
-	checkpointManager := checkpoint.NewManager(client, cfg.Database, cfg.Collection, logger)
+	checkpointManager := checkpoint.NewManager(client, cfg.MongoDB.Connection.Database, cfg.MongoDB.Connection.Collection, logger)
 
 	return &partitionStream{
 		client:            client,
@@ -548,6 +549,13 @@ func (ps *partitionStream) dispatchBootstrapDocumentToListener(worker *streamWor
 }
 
 func (ps *partitionStream) createInsertEventFromDocument(document bson.M) message.ChangeEvent {
+	now := time.Now().Unix()
+	if now < 0 {
+		now = 0
+	} else if now > int64(math.MaxUint32) {
+		now = now % (int64(math.MaxUint32) + 1)
+	}
+
 	return message.ChangeEvent{
 		OperationType: "insert",
 		DocumentKey: message.DocumentKey{
@@ -555,10 +563,10 @@ func (ps *partitionStream) createInsertEventFromDocument(document bson.M) messag
 		},
 		FullDocument: document,
 		Namespace: message.Namespace{
-			Database:   ps.cfg.Database,
-			Collection: ps.cfg.Collection,
+			Database:   ps.cfg.MongoDB.Connection.Database,
+			Collection: ps.cfg.MongoDB.Connection.Collection,
 		},
-		ClusterTime: primitive.Timestamp{T: uint32(time.Now().Unix()), I: 1},
+		ClusterTime: primitive.Timestamp{T: uint32(now), I: 1},
 	}
 }
 

@@ -35,10 +35,23 @@ func main() {
 	}()
 
 	cfg := config.Config{
-		Host:       "localhost",
-		Port:       27017,
-		Database:   "exampleDB",
-		Collection: "exampleCollection",
+		MongoDB: config.MongoDB{
+			Connection: config.Connection{
+				URI:        "localhost:27017",
+				Database:   "exampleDB",
+				Collection: "exampleCollection",
+			},
+			ConnectionPool: config.ConnectionPool{
+				MaxPoolSize:   100,
+				MinPoolSize:   5,
+				MaxIdleTimeMS: 300000, // 5 minutes
+			},
+			Timeouts: config.Timeouts{
+				ConnectTimeoutMS:         10000, // 10 seconds
+				ServerSelectionTimeoutMS: 30000, // 30 seconds
+				SocketTimeoutMS:          30000, // 30 seconds
+			},
+		},
 		Metric: config.MetricConfig{
 			Port: 8080,
 		},
@@ -62,7 +75,7 @@ func main() {
 		logger: logger,
 	}
 
-	connector, err := cdc.NewConnector(context.Background(), cfg, myListener.ProcessChangeEvent)
+	connector, err := cdc.NewConnector(cfg, myListener.ProcessChangeEvent)
 	if err != nil {
 		log.Fatal("failed to create connector:", err)
 	}

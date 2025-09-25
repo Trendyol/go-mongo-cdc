@@ -58,10 +58,10 @@ func NewConnectorWithConfigFile(
 		return nil, err
 	}
 
-	return NewConnector(ctx, cfg, listenerFunc)
+	return NewConnector(cfg, listenerFunc)
 }
 
-func NewConnector(ctx context.Context, cfg config.Config, listenerFunc stream.ListenerFunc) (Connector, error) {
+func NewConnector(cfg config.Config, listenerFunc stream.ListenerFunc) (Connector, error) {
 	cfg.SetDefault()
 	if err := cfg.Validate(); err != nil {
 		return nil, errors.Wrap(err, "config validation")
@@ -70,12 +70,12 @@ func NewConnector(ctx context.Context, cfg config.Config, listenerFunc stream.Li
 
 	zapLogger := logger.InitLoggerWithLevel(cfg.Logger.Logger, cfg.Logger.LogLevel)
 
-	mongoClient, err := connection.NewConnection(ctx, cfg.DSN())
+	mongoClient, err := connection.NewMongoClient(cfg.MongoDB)
 	if err != nil {
 		return nil, err
 	}
 
-	m := metric.NewMetric(cfg.Database, cfg.Collection)
+	m := metric.NewMetric(cfg.MongoDB.Connection.Database, cfg.MongoDB.Connection.Collection)
 
 	workerID := generateWorkerID()
 
