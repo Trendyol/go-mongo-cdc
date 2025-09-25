@@ -2,13 +2,12 @@ package partition
 
 import (
 	"context"
-	crand "crypto/rand"
 	"fmt"
-	"math/big"
 	"sync"
 	"time"
 
 	"github.com/Trendyol/go-mongo-cdc/config"
+	"github.com/Trendyol/go-mongo-cdc/internal/backoff"
 	"github.com/Trendyol/go-mongo-cdc/mongo/connection"
 	"go.mongodb.org/mongo-driver/bson"
 	"go.mongodb.org/mongo-driver/mongo"
@@ -551,38 +550,26 @@ func (m *manager) determineWorkerIndex(ctx context.Context) (int, error) {
 }
 
 func (m *manager) tryAcquireOrTakeoverPartitionWithRetry(ctx context.Context, partitionID int) error {
-	maxRetries := 5
-	baseDelay := 250 * time.Millisecond
-	maxDelay := 5 * time.Second
+	backoffStrategy := backoff.New(backoff.Config{
+		BaseDelay:  250 * time.Millisecond,
+		MaxDelay:   5 * time.Second,
+		Factor:     2.0,
+		MaxRetries: 5,
+	})
 
-	for attempt := 0; attempt < maxRetries; attempt++ {
+	for {
 		err := m.tryAcquireOrTakeoverPartition(ctx, partitionID)
 		if err == nil {
 			return nil
 		}
 
-		if attempt == maxRetries-1 {
-			return fmt.Errorf("failed to acquire partition %d after %d attempts: %w", partitionID, maxRetries, err)
+		delay, ok := backoffStrategy.NextDelay()
+		if !ok {
+			return fmt.Errorf("failed to acquire partition %d after %d attempts: %w", partitionID, backoffStrategy.Attempts(), err)
 		}
-
-		// Exponential Backoff
-		backoff := baseDelay * (1 << attempt) // 250ms, 500ms, 1s, 2s...
-		if backoff > maxDelay {
-			backoff = maxDelay
-		}
-
-		maxJitter := backoff / 5
-		jitter := time.Duration(0)
-		if maxJitter > 0 {
-			n, err := crand.Int(crand.Reader, big.NewInt(int64(maxJitter)))
-			if err == nil {
-				jitter = time.Duration(n.Int64())
-			}
-		}
-		delay := backoff + jitter
 
 		m.logger.Debug(fmt.Sprintf("Partition acquisition failed, retrying - partition: %d, attempt: %d/%d, delay: %v, error: %v",
-			partitionID, attempt+1, maxRetries, delay, err))
+			partitionID, backoffStrategy.Attempts(), backoffStrategy.Config.MaxRetries, delay, err))
 
 		select {
 		case <-ctx.Done():
@@ -590,8 +577,6 @@ func (m *manager) tryAcquireOrTakeoverPartitionWithRetry(ctx context.Context, pa
 		case <-time.After(delay):
 		}
 	}
-
-	return fmt.Errorf("partition acquisition failed after %d attempts", maxRetries)
 }
 
 func (m *manager) tryAcquireOrTakeoverPartition(ctx context.Context, partitionID int) error {

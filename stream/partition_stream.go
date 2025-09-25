@@ -13,6 +13,7 @@ import (
 
 	"github.com/Trendyol/go-mongo-cdc/checkpoint"
 	"github.com/Trendyol/go-mongo-cdc/config"
+	"github.com/Trendyol/go-mongo-cdc/internal/backoff"
 	"github.com/Trendyol/go-mongo-cdc/internal/metric"
 	"github.com/Trendyol/go-mongo-cdc/mongo/connection"
 	"github.com/Trendyol/go-mongo-cdc/mongo/message"
@@ -211,6 +212,13 @@ func (ps *partitionStream) managePartitionWorkerLifecycle(worker *streamWorker) 
 			worker.partitionID, ps.workerID))
 	}
 
+	backoffStrategy := backoff.New(backoff.Config{
+		BaseDelay:  1 * time.Second,
+		MaxDelay:   30 * time.Second,
+		Factor:     2.0,
+		MaxRetries: 0, // Infinite retries
+	})
+
 	for {
 		select {
 		case <-worker.ctx.Done():
@@ -227,11 +235,17 @@ func (ps *partitionStream) managePartitionWorkerLifecycle(worker *streamWorker) 
 				return
 			}
 
-			//TODO: Exponential Backoff with Jitter yapılabilir
-			// sonsuza dek denemeli mi?
 			ps.logger.Error(fmt.Sprintf("Partition stream error, retrying - partitionId: %d, error: %v", worker.partitionID, err))
 
-			time.Sleep(5 * time.Second)
+			delay, _ := backoffStrategy.NextDelay()
+
+			ps.logger.Debug(fmt.Sprintf("Backing off for %v before retry - partitionId: %d", delay, worker.partitionID))
+
+			select {
+			case <-time.After(delay):
+			case <-worker.ctx.Done():
+				return
+			}
 		}
 	}
 }
@@ -550,10 +564,13 @@ func (ps *partitionStream) dispatchBootstrapDocumentToListener(worker *streamWor
 
 func (ps *partitionStream) createInsertEventFromDocument(document bson.M) message.ChangeEvent {
 	now := time.Now().Unix()
+	var t uint32
 	if now < 0 {
-		now = 0
+		t = 0
 	} else if now > int64(math.MaxUint32) {
-		now = now % (int64(math.MaxUint32) + 1)
+		t = math.MaxUint32
+	} else {
+		t = uint32(now)
 	}
 
 	return message.ChangeEvent{
@@ -566,7 +583,7 @@ func (ps *partitionStream) createInsertEventFromDocument(document bson.M) messag
 			Database:   ps.cfg.MongoDB.Connection.Database,
 			Collection: ps.cfg.MongoDB.Connection.Collection,
 		},
-		ClusterTime: primitive.Timestamp{T: uint32(now), I: 1},
+		ClusterTime: primitive.Timestamp{T: t, I: 1},
 	}
 }
 
