@@ -68,6 +68,7 @@ type streamWorker struct {
 	lastClusterTime *primitive.Timestamp
 	tokenMutex      sync.RWMutex
 	lastEventTime   time.Time
+	ackedEventCount int
 }
 
 type streamStartInfo struct {
@@ -340,21 +341,25 @@ func (ps *partitionStream) fetchCurrentDbOperationTime(ctx context.Context) (*pr
 }
 
 func (ps *partitionStream) runBootstrapWithRetries(worker *streamWorker) error {
-	maxRetries := 3
-	retryDelay := 5 * time.Second
+	backoffStrategy := backoff.New(backoff.Config{
+		BaseDelay:  5 * time.Second,
+		MaxDelay:   30 * time.Second,
+		Factor:     2.0,
+		MaxRetries: 3,
+	})
 
-	for attempt := 1; attempt <= maxRetries; attempt++ {
+	for {
 		select {
 		case <-worker.ctx.Done():
 			return worker.ctx.Err()
 		default:
 		}
 
-		ps.logger.Debug(fmt.Sprintf("Bootstrap attempt %d/%d for partition %d", attempt, maxRetries, worker.partitionID))
+		ps.logger.Debug(fmt.Sprintf("Bootstrap attempt %d/%d for partition %d", backoffStrategy.Attempts()+1, backoffStrategy.Config.MaxRetries, worker.partitionID))
 
 		err := ps.bootstrapPartition(worker)
 		if err == nil {
-			ps.logger.Info(fmt.Sprintf("Bootstrap successful for partition %d after %d attempts", worker.partitionID, attempt))
+			ps.logger.Info(fmt.Sprintf("Bootstrap successful for partition %d after %d attempts", worker.partitionID, backoffStrategy.Attempts()))
 			return nil
 		}
 
@@ -363,18 +368,19 @@ func (ps *partitionStream) runBootstrapWithRetries(worker *streamWorker) error {
 			return err
 		}
 
-		ps.logger.Warn(fmt.Sprintf("Bootstrap attempt %d/%d failed for partition %d: %v", attempt, maxRetries, worker.partitionID, err))
+		ps.logger.Warn(fmt.Sprintf("Bootstrap attempt %d/%d failed for partition %d: %v", backoffStrategy.Attempts(), backoffStrategy.Config.MaxRetries, worker.partitionID, err))
 
-		if attempt < maxRetries {
-			select {
-			case <-worker.ctx.Done():
-				return worker.ctx.Err()
-			case <-time.After(retryDelay):
-			}
+		delay, keepTrying := backoffStrategy.NextDelay()
+		if !keepTrying {
+			return fmt.Errorf("bootstrap failed after %d attempts for partition %d", backoffStrategy.Attempts(), worker.partitionID)
+		}
+
+		select {
+		case <-worker.ctx.Done():
+			return worker.ctx.Err()
+		case <-time.After(delay):
 		}
 	}
-
-	return fmt.Errorf("bootstrap failed after %d attempts for partition %d", maxRetries, worker.partitionID)
 }
 
 func (ps *partitionStream) bootstrapPartition(worker *streamWorker) error {
@@ -679,8 +685,7 @@ func (ps *partitionStream) startAndManageChangeStream(worker *streamWorker, resu
 	defer heartbeatTicker.Stop()
 	go ps.startIdleHeartbeat(helpersCtx, worker, heartbeatTicker)
 
-	//TODO: her eventi isler islemez kaydediyoruz su an yapı degisince ise yarayacak
-	//defer ps.saveFinalTokenOnExit(worker)
+	defer ps.saveLatestResumeTokenOnInterruption(worker)
 
 	ps.logger.Debug(fmt.Sprintf("Change stream is now listening for partition %d", worker.partitionID))
 
@@ -705,7 +710,7 @@ func (ps *partitionStream) startAndManageChangeStream(worker *streamWorker, resu
 	return changeStream.Err()
 }
 
-func (ps *partitionStream) saveFinalTokenOnExit(worker *streamWorker) {
+func (ps *partitionStream) saveLatestResumeTokenOnInterruption(worker *streamWorker) {
 	worker.tokenMutex.RLock()
 	lastToken := worker.lastAckedToken
 	lastClusterTime := worker.lastClusterTime
@@ -980,14 +985,20 @@ func (ps *partitionStream) processEvent(worker *streamWorker, event message.Chan
 				worker.tokenMutex.Lock()
 				worker.lastAckedToken = append([]byte(nil), resumeToken...)
 				worker.lastClusterTime = &event.ClusterTime
+				worker.ackedEventCount++
 				worker.tokenMutex.Unlock()
 
-				return ps.checkpointManager.SaveResumeToken(
-					ps.ctx,
-					worker.partitionID,
-					resumeToken,
-					&event.ClusterTime,
-				)
+				if worker.ackedEventCount >= ps.cfg.Checkpoint.ChangeStreamBatchSize {
+					worker.tokenMutex.Lock()
+					worker.ackedEventCount = 0
+					worker.tokenMutex.Unlock()
+					return ps.checkpointManager.SaveResumeToken(
+						ps.ctx,
+						worker.partitionID,
+						resumeToken,
+						&event.ClusterTime,
+					)
+				}
 			}
 			return nil
 		},

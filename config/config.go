@@ -65,6 +65,7 @@ type CheckpointConfig struct {
 	SaveTimeout           time.Duration `json:"saveTimeout" yaml:"saveTimeout"`
 	IdleHeartbeatInterval time.Duration `json:"idleHeartbeatInterval" yaml:"idleHeartbeatInterval"`
 	MaxIdleTime           time.Duration `json:"maxIdleTime" yaml:"maxIdleTime"`
+	ChangeStreamBatchSize int           `json:"changeStreamBatchSize" yaml:"changeStreamBatchSize"`
 }
 
 type PartitionConfig struct {
@@ -126,6 +127,10 @@ func (c *Config) SetDefault() {
 	}
 	if c.Checkpoint.MaxIdleTime == 0 {
 		c.Checkpoint.MaxIdleTime = 15 * time.Minute
+	}
+
+	if c.Checkpoint.ChangeStreamBatchSize == 0 {
+		c.Checkpoint.ChangeStreamBatchSize = 100
 	}
 
 	if c.Partition.HeartbeatInterval == 0 {

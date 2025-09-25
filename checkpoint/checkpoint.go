@@ -5,6 +5,7 @@ import (
 	"fmt"
 	"time"
 
+	"github.com/Trendyol/go-mongo-cdc/internal/backoff"
 	"github.com/Trendyol/go-mongo-cdc/mongo/connection"
 	"go.mongodb.org/mongo-driver/bson"
 	"go.mongodb.org/mongo-driver/bson/primitive"
@@ -28,7 +29,6 @@ type CheckpointInfo struct {
 	PartitionID     int                 `bson:"partitionId"`
 	ResumeToken     []byte              `bson:"resumeToken,omitempty"`
 	LastClusterTime primitive.Timestamp `bson:"lastClusterTime,omitempty"`
-	LastRun         time.Time           `bson:"lastRun"`
 	UpdatedAt       time.Time           `bson:"updatedAt"`
 	BootstrapLastID interface{}         `bson:"bootstrapLastId,omitempty"`
 	IsBootstrapping bool                `bson:"isBootstrapping"`
@@ -68,7 +68,6 @@ func (m *manager) SaveResumeToken(ctx context.Context, partitionID int, token []
 
 	setFields := bson.M{
 		"partitionId":     partitionID,
-		"lastRun":         time.Now(),
 		"updatedAt":       time.Now(),
 		"isBootstrapping": false,
 	}
@@ -85,42 +84,45 @@ func (m *manager) SaveResumeToken(ctx context.Context, partitionID int, token []
 
 	opts := options.Update().SetUpsert(true)
 
-	var err error
-	maxRetries := 3
-	retryDelay := 2 * time.Second
+	backoffStrategy := backoff.New(backoff.Config{
+		BaseDelay:  2 * time.Second,
+		MaxDelay:   10 * time.Second,
+		Factor:     2.0,
+		MaxRetries: 3,
+	})
 
-	for attempt := 1; attempt <= maxRetries; attempt++ {
-		_, err = m.collection.UpdateOne(ctx, filter, update, opts)
+	for {
+		_, err := m.collection.UpdateOne(ctx, filter, update, opts)
 		if err == nil {
 			m.logger.Debug(fmt.Sprintf("Resume token saved - partitionId: %d, checkpointId: %s", partitionID, checkpointID))
 			return nil
 		}
 
+		delay, keepTrying := backoffStrategy.NextDelay()
+		if !keepTrying {
+			m.logger.Error(
+				"Failed to save resume token after all retries",
+				zap.Int("partitionId", partitionID),
+				zap.String("checkpointId", checkpointID),
+				zap.Error(err),
+			)
+			return err
+		}
+
 		m.logger.Warn(
 			"Failed to save resume token, retrying...",
 			zap.Int("partitionId", partitionID),
-			zap.Int("attempt", attempt),
-			zap.Int("maxRetries", maxRetries),
+			zap.Int("attempt", backoffStrategy.Attempts()),
+			zap.Int("maxRetries", backoffStrategy.Config.MaxRetries),
 			zap.Error(err),
 		)
 
-		if attempt < maxRetries {
-			select {
-			case <-ctx.Done():
-				return ctx.Err()
-			case <-time.After(retryDelay):
-				retryDelay *= 2 // Exponential backoff
-			}
+		select {
+		case <-ctx.Done():
+			return ctx.Err()
+		case <-time.After(delay):
 		}
 	}
-
-	m.logger.Error(
-		"Failed to save resume token after all retries",
-		zap.Int("partitionId", partitionID),
-		zap.String("checkpointId", checkpointID),
-		zap.Error(err),
-	)
-	return err
 }
 
 func (m *manager) GetResumeToken(ctx context.Context, partitionID int) ([]byte, *primitive.Timestamp, error) {
