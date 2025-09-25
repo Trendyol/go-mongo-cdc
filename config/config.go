@@ -44,6 +44,8 @@ type CheckpointConfig struct {
 	BootstrapSaveCount    int           `json:"bootstrapSaveCount" yaml:"bootstrapSaveCount"`
 	BootstrapSaveInterval time.Duration `json:"bootstrapSaveInterval" yaml:"bootstrapSaveInterval"`
 	SaveTimeout           time.Duration `json:"saveTimeout" yaml:"saveTimeout"`
+	IdleHeartbeatInterval time.Duration `json:"idleHeartbeatInterval" yaml:"idleHeartbeatInterval"`
+	MaxIdleTime           time.Duration `json:"maxIdleTime" yaml:"maxIdleTime"`
 }
 
 type PartitionConfig struct {
@@ -81,6 +83,12 @@ func (c *Config) SetDefault() {
 	}
 	if c.Checkpoint.BootstrapSaveInterval == 0 {
 		c.Checkpoint.BootstrapSaveInterval = 30 * time.Second
+	}
+	if c.Checkpoint.IdleHeartbeatInterval == 0 {
+		c.Checkpoint.IdleHeartbeatInterval = 3 * time.Minute
+	}
+	if c.Checkpoint.MaxIdleTime == 0 {
+		c.Checkpoint.MaxIdleTime = 15 * time.Minute
 	}
 
 	if c.Partition.HeartbeatInterval == 0 {

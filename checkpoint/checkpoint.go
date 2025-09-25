@@ -58,38 +58,69 @@ func (m *manager) getCheckpointID(partitionID int) string {
 }
 
 func (m *manager) SaveResumeToken(ctx context.Context, partitionID int, token []byte, clusterTime *primitive.Timestamp) error {
-	if len(token) == 0 {
+	if len(token) == 0 && clusterTime == nil {
+		m.logger.Debug("SaveResumeToken skipped: both token and clusterTime are nil", zap.Int("partitionId", partitionID))
 		return nil
 	}
 
 	checkpointID := m.getCheckpointID(partitionID)
 	filter := bson.M{"_id": checkpointID}
 
-	update := bson.M{
-		"$set": bson.M{
-			"partitionId":     partitionID,
-			"resumeToken":     token,
-			"lastRun":         time.Now(),
-			"updatedAt":       time.Now(),
-			"isBootstrapping": false,
-		},
+	setFields := bson.M{
+		"partitionId":     partitionID,
+		"lastRun":         time.Now(),
+		"updatedAt":       time.Now(),
+		"isBootstrapping": false,
+	}
+
+	if len(token) > 0 {
+		setFields["resumeToken"] = token
 	}
 
 	if clusterTime != nil {
-		update["$set"].(bson.M)["lastClusterTime"] = *clusterTime
+		setFields["lastClusterTime"] = *clusterTime
 	}
+
+	update := bson.M{"$set": setFields}
 
 	opts := options.Update().SetUpsert(true)
-	_, err := m.collection.UpdateOne(ctx, filter, update, opts)
 
-	if err != nil {
-		m.logger.Error(fmt.Sprintf("Failed to save resume token - partitionId: %d, checkpointId: %s, error: %v", partitionID, checkpointID, err))
-		return err
+	var err error
+	maxRetries := 3
+	retryDelay := 2 * time.Second
+
+	for attempt := 1; attempt <= maxRetries; attempt++ {
+		_, err = m.collection.UpdateOne(ctx, filter, update, opts)
+		if err == nil {
+			m.logger.Debug(fmt.Sprintf("Resume token saved - partitionId: %d, checkpointId: %s", partitionID, checkpointID))
+			return nil
+		}
+
+		m.logger.Warn(
+			"Failed to save resume token, retrying...",
+			zap.Int("partitionId", partitionID),
+			zap.Int("attempt", attempt),
+			zap.Int("maxRetries", maxRetries),
+			zap.Error(err),
+		)
+
+		if attempt < maxRetries {
+			select {
+			case <-ctx.Done():
+				return ctx.Err()
+			case <-time.After(retryDelay):
+				retryDelay *= 2 // Exponential backoff
+			}
+		}
 	}
 
-	m.logger.Debug(fmt.Sprintf("Resume token saved - partitionId: %d, checkpointId: %s", partitionID, checkpointID))
-
-	return nil
+	m.logger.Error(
+		"Failed to save resume token after all retries",
+		zap.Int("partitionId", partitionID),
+		zap.String("checkpointId", checkpointID),
+		zap.Error(err),
+	)
+	return err
 }
 
 func (m *manager) GetResumeToken(ctx context.Context, partitionID int) ([]byte, *primitive.Timestamp, error) {
