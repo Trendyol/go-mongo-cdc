@@ -8,6 +8,8 @@ import (
 	"sync"
 	"time"
 
+	"bytes"
+
 	"github.com/Trendyol/go-mongo-cdc/checkpoint"
 	"github.com/Trendyol/go-mongo-cdc/config"
 	"github.com/Trendyol/go-mongo-cdc/internal/metric"
@@ -63,6 +65,7 @@ type streamWorker struct {
 	lastAckedToken  []byte
 	lastClusterTime *primitive.Timestamp
 	tokenMutex      sync.RWMutex
+	lastEventTime   time.Time
 }
 
 type streamStartInfo struct {
@@ -180,7 +183,8 @@ func (ps *partitionStream) reconcilePartitionAssignments(newPartitions []int) {
 			ps.logger.Debug(fmt.Sprintf("Starting stream for partition %d", partitionID))
 
 			worker := &streamWorker{
-				partitionID: partitionID,
+				partitionID:   partitionID,
+				lastEventTime: time.Now(),
 			}
 			worker.ctx, worker.cancel = context.WithCancel(ps.ctx)
 
@@ -639,9 +643,16 @@ func (ps *partitionStream) startAndManageChangeStream(worker *streamWorker, resu
 
 	worker.stream = changeStream
 
+	helpersCtx, helpersCancel := context.WithCancel(worker.ctx)
+	defer helpersCancel()
+
 	tokenSaveTicker := time.NewTicker(ps.cfg.Checkpoint.SaveInterval)
 	defer tokenSaveTicker.Stop()
-	go ps.startPeriodicTokenSaver(worker, tokenSaveTicker)
+	go ps.startPeriodicTokenSaver(helpersCtx, worker, tokenSaveTicker)
+
+	heartbeatTicker := time.NewTicker(ps.cfg.Checkpoint.IdleHeartbeatInterval)
+	defer heartbeatTicker.Stop()
+	go ps.startIdleHeartbeat(helpersCtx, worker, heartbeatTicker)
 
 	//TODO: her eventi isler islemez kaydediyoruz su an yapı degisince ise yarayacak
 	//defer ps.saveFinalTokenOnExit(worker)
@@ -649,6 +660,10 @@ func (ps *partitionStream) startAndManageChangeStream(worker *streamWorker, resu
 	ps.logger.Debug(fmt.Sprintf("Change stream is now listening for partition %d", worker.partitionID))
 
 	for changeStream.Next(worker.ctx) {
+		worker.tokenMutex.Lock()
+		worker.lastEventTime = time.Now()
+		worker.tokenMutex.Unlock()
+
 		var event message.ChangeEvent
 		if err := changeStream.Decode(&event); err != nil {
 			ps.logger.Error(fmt.Sprintf("Error decoding change event - partitionId: %d, error: %v", worker.partitionID, err))
@@ -756,14 +771,13 @@ func (ps *partitionStream) buildPartitioningHashExpression(idField string) bson.
 				{Key: "$or", Value: bson.A{
 					bson.D{{Key: "$eq", Value: bson.A{bson.D{{Key: "$type", Value: idField}}, "int"}}},
 					bson.D{{Key: "$eq", Value: bson.A{bson.D{{Key: "$type", Value: idField}}, "long"}}},
-					bson.D{{Key: "$eq", Value: bson.A{bson.D{{Key: "$type", Value: idField}}, "double"}}},
 				}},
 			}},
 			{Key: "then", Value: idField},
 			{Key: "else", Value: bson.D{
 				{Key: "$cond", Value: bson.D{
 					{Key: "if", Value: ps.createIsNumericStringCheck(idField)},
-					{Key: "then", Value: bson.D{{Key: "$toDouble", Value: idField}}},
+					{Key: "then", Value: bson.D{{Key: "toLong", Value: idField}}},
 					{Key: "else", Value: ps.buildStringDistributionHash(idField)},
 				}},
 			}},
@@ -970,10 +984,10 @@ func (ps *partitionStream) updateMetrics(opType message.OperationType) {
 	}
 }
 
-func (ps *partitionStream) startPeriodicTokenSaver(worker *streamWorker, ticker *time.Ticker) {
+func (ps *partitionStream) startPeriodicTokenSaver(ctx context.Context, worker *streamWorker, ticker *time.Ticker) {
 	for {
 		select {
-		case <-worker.ctx.Done():
+		case <-ctx.Done():
 			return
 		case <-ticker.C:
 			worker.tokenMutex.RLock()
@@ -995,6 +1009,87 @@ func (ps *partitionStream) startPeriodicTokenSaver(worker *streamWorker, ticker 
 			}
 		}
 	}
+}
+
+func (ps *partitionStream) startIdleHeartbeat(ctx context.Context, worker *streamWorker, ticker *time.Ticker) {
+	for {
+		select {
+		case <-ctx.Done():
+			return
+		case <-ticker.C:
+			worker.tokenMutex.RLock()
+			idleDuration := time.Since(worker.lastEventTime)
+			worker.tokenMutex.RUnlock()
+
+			if idleDuration > ps.cfg.Checkpoint.MaxIdleTime {
+				ps.logger.Info(fmt.Sprintf("Stream is idle, updating highwatermark - partitionId: %d, idleDuration: %v",
+					worker.partitionID, idleDuration))
+				if err := ps.updateResumeTokenToHighwatermark(worker); err != nil {
+					ps.logger.Warn(fmt.Sprintf("Failed to update highwatermark - partitionId: %d, error: %v",
+						worker.partitionID, err))
+				}
+			}
+		}
+	}
+}
+
+func (ps *partitionStream) updateResumeTokenToHighwatermark(worker *streamWorker) error {
+	worker.tokenMutex.RLock()
+	lastToken := worker.lastAckedToken
+	worker.tokenMutex.RUnlock()
+
+	// Primary method: Try to get the highwatermark from the driver's internal state.
+	highwatermarkToken := worker.stream.ResumeToken()
+
+	// Fallback condition: If the driver returns no token or the same old token,
+	// we actively query the server for the latest operation time.
+	if highwatermarkToken == nil || bytes.Equal(lastToken, highwatermarkToken) {
+		ps.logger.Debug(
+			"Highwatermark token is nil or unchanged, falling back to fetching server operation time",
+			zap.Int("partitionId", worker.partitionID),
+		)
+
+		opTime, err := ps.fetchCurrentDbOperationTime(worker.ctx)
+		if err != nil {
+			return fmt.Errorf("fallback failed: could not fetch server operation time: %w", err)
+		}
+		if opTime == nil {
+			return errors.New("fallback failed: received nil operation time from server")
+		}
+
+		ctx, cancel := context.WithTimeout(context.Background(), ps.cfg.Checkpoint.SaveTimeout)
+		defer cancel()
+
+		if err := ps.checkpointManager.SaveResumeToken(ctx, worker.partitionID, nil, opTime); err != nil {
+			return fmt.Errorf("fallback failed: failed to save highwatermark checkpoint with opTime: %w", err)
+		}
+
+		worker.tokenMutex.Lock()
+		worker.lastAckedToken = nil
+		worker.lastClusterTime = opTime
+		worker.lastEventTime = time.Now()
+		worker.tokenMutex.Unlock()
+
+		ps.logger.Debug("Successfully updated highwatermark via fallback method", zap.Int("partitionId", worker.partitionID))
+		return nil
+	}
+
+	// Primary method successful: We received a new, valid token from the driver.
+	ctx, cancel := context.WithTimeout(context.Background(), ps.cfg.Checkpoint.SaveTimeout)
+	defer cancel()
+
+	if err := ps.checkpointManager.SaveResumeToken(ctx, worker.partitionID, highwatermarkToken, nil); err != nil {
+		return fmt.Errorf("failed to save highwatermark checkpoint with new token: %w", err)
+	}
+
+	worker.tokenMutex.Lock()
+	worker.lastAckedToken = highwatermarkToken
+	worker.lastClusterTime = nil
+	worker.lastEventTime = time.Now()
+	worker.tokenMutex.Unlock()
+
+	ps.logger.Debug("Successfully updated highwatermark from driver token", zap.Int("partitionId", worker.partitionID))
+	return nil
 }
 
 func (ps *partitionStream) Stop(ctx context.Context) error {

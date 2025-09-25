@@ -628,7 +628,7 @@ func (m *manager) tryAcquireOrTakeoverPartition(ctx context.Context, partitionID
 	}
 
 	if result.WorkerID == m.workerID {
-		m.logger.Debug(fmt.Sprintf("Successfully acquired partition %d atomically", partitionID))
+		m.logger.Debug(fmt.Sprintf("Successfully acquired partition %d", partitionID))
 		return nil
 	}
 
