@@ -56,8 +56,8 @@ func main() {
 			Port: 8080,
 		},
 		Checkpoint: config.CheckpointConfig{
-			Collection:   "checkpoint",
-			SaveInterval: 60 * time.Second,
+			Collection:        "checkpoint",
+			TokenSaveInterval: 60 * time.Second,
 		},
 		Partition: config.PartitionConfig{
 			HeartbeatInterval:      5 * time.Second,

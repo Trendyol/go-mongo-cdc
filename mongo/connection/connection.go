@@ -140,7 +140,7 @@ func NewMongoClient(cfg config.MongoDB) (Client, error) {
 		clientOpts.SetAuth(options.Credential{
 			Username:   cfg.Connection.Username,
 			Password:   cfg.Connection.Password,
-			AuthSource: cfg.Connection.Database,
+			AuthSource: "admin",
 		})
 	}
 
@@ -160,7 +160,7 @@ func NewMongoClient(cfg config.MongoDB) (Client, error) {
 	pingCtx, pingCancel := context.WithTimeout(context.Background(), 5*time.Second)
 	defer pingCancel()
 
-	if err = client.Ping(pingCtx, nil); err != nil {
+	if err = client.Ping(pingCtx, readpref.Primary()); err != nil {
 		errDisc := client.Disconnect(ctx)
 		if errDisc != nil {
 			return nil, errDisc

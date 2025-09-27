@@ -59,13 +59,13 @@ type LoggerConfig struct {
 
 type CheckpointConfig struct {
 	Collection            string        `json:"collection" yaml:"collection"`
-	SaveInterval          time.Duration `json:"saveInterval" yaml:"saveInterval"`
+	TokenSaveTimeout      time.Duration `json:"saveTimeout" yaml:"saveTimeout"`
+	TokenSaveInterval     time.Duration `json:"tokenSaveInterval" yaml:"tokenSaveInterval"`
+	ChangeStreamBatchSize int           `json:"changeStreamBatchSize" yaml:"changeStreamBatchSize"`
 	BootstrapSaveCount    int           `json:"bootstrapSaveCount" yaml:"bootstrapSaveCount"`
 	BootstrapSaveInterval time.Duration `json:"bootstrapSaveInterval" yaml:"bootstrapSaveInterval"`
-	SaveTimeout           time.Duration `json:"saveTimeout" yaml:"saveTimeout"`
 	IdleHeartbeatInterval time.Duration `json:"idleHeartbeatInterval" yaml:"idleHeartbeatInterval"`
 	MaxIdleTime           time.Duration `json:"maxIdleTime" yaml:"maxIdleTime"`
-	ChangeStreamBatchSize int           `json:"changeStreamBatchSize" yaml:"changeStreamBatchSize"`
 }
 
 type PartitionConfig struct {
@@ -110,14 +110,14 @@ func (c *Config) SetDefault() {
 	if c.Checkpoint.Collection == "" {
 		c.Checkpoint.Collection = "cdc_checkpoints"
 	}
-	if c.Checkpoint.SaveInterval == 0 {
-		c.Checkpoint.SaveInterval = 30 * time.Second
+	if c.Checkpoint.TokenSaveInterval == 0 {
+		c.Checkpoint.TokenSaveInterval = 30 * time.Second
 	}
 	if c.Checkpoint.BootstrapSaveCount == 0 {
 		c.Checkpoint.BootstrapSaveCount = 5000
 	}
-	if c.Checkpoint.SaveTimeout == 0 {
-		c.Checkpoint.SaveTimeout = 10 * time.Second
+	if c.Checkpoint.TokenSaveTimeout == 0 {
+		c.Checkpoint.TokenSaveTimeout = 10 * time.Second
 	}
 	if c.Checkpoint.BootstrapSaveInterval == 0 {
 		c.Checkpoint.BootstrapSaveInterval = 30 * time.Second

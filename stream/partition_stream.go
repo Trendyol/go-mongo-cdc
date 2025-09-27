@@ -613,7 +613,7 @@ type bootstrapProcessState struct {
 
 func (ps *partitionStream) saveFinalBootstrapProgressOnInterruption(worker *streamWorker, state *bootstrapProcessState) {
 	if !state.bootstrapCompleted && state.lastProcessedID != nil {
-		ctx, cancel := context.WithTimeout(context.Background(), ps.cfg.Checkpoint.SaveTimeout)
+		ctx, cancel := context.WithTimeout(context.Background(), ps.cfg.Checkpoint.TokenSaveTimeout)
 		defer cancel()
 		if err := ps.checkpointManager.SaveBootstrapProgress(ctx, worker.partitionID, state.lastProcessedID); err != nil {
 			ps.logger.Error(fmt.Sprintf("Failed to save final bootstrap progress on interruption - partitionId: %d, lastId: %v, error: %v", worker.partitionID, state.lastProcessedID, err))
@@ -700,7 +700,7 @@ func (ps *partitionStream) shouldSaveBootstrapProgress(worker *streamWorker, sta
 }
 
 func (ps *partitionStream) saveBootstrapProgress(worker *streamWorker, document bson.M, state *bootstrapProcessState) error {
-	saveCtx, saveCancel := context.WithTimeout(context.Background(), ps.cfg.Checkpoint.SaveTimeout)
+	saveCtx, saveCancel := context.WithTimeout(context.Background(), ps.cfg.Checkpoint.TokenSaveTimeout)
 	defer saveCancel()
 
 	if err := ps.checkpointManager.SaveBootstrapProgress(saveCtx, worker.partitionID, document["_id"]); err != nil {
@@ -767,7 +767,7 @@ func (ps *partitionStream) startAndManageChangeStream(worker *streamWorker, resu
 	helpersCtx, helpersCancel := context.WithCancel(worker.ctx)
 	defer helpersCancel()
 
-	tokenSaveTicker := time.NewTicker(ps.cfg.Checkpoint.SaveInterval)
+	tokenSaveTicker := time.NewTicker(ps.cfg.Checkpoint.TokenSaveInterval)
 	defer tokenSaveTicker.Stop()
 	go ps.startPeriodicTokenSaver(helpersCtx, worker, tokenSaveTicker)
 
@@ -810,7 +810,7 @@ func (ps *partitionStream) saveLatestResumeTokenOnInterruption(worker *streamWor
 		return
 	}
 
-	ctx, cancel := context.WithTimeout(context.Background(), ps.cfg.Checkpoint.SaveTimeout)
+	ctx, cancel := context.WithTimeout(context.Background(), ps.cfg.Checkpoint.TokenSaveTimeout)
 	defer cancel()
 
 	if err := ps.checkpointManager.SaveResumeToken(ctx, worker.partitionID, lastToken, lastClusterTime); err != nil {
@@ -1122,7 +1122,7 @@ func (ps *partitionStream) startPeriodicTokenSaver(ctx context.Context, worker *
 			worker.tokenMutex.RUnlock()
 
 			if len(token) > 0 {
-				ctx, cancel := context.WithTimeout(context.Background(), ps.cfg.Checkpoint.SaveTimeout)
+				ctx, cancel := context.WithTimeout(context.Background(), ps.cfg.Checkpoint.TokenSaveTimeout)
 				if err := ps.checkpointManager.SaveResumeToken(
 					ctx,
 					worker.partitionID,
@@ -1180,7 +1180,7 @@ func (ps *partitionStream) updateResumeTokenToHighwatermark(worker *streamWorker
 			return fmt.Errorf("fallback failed: could not fetch server operation time: %w", err)
 		}
 
-		ctx, cancel := context.WithTimeout(context.Background(), ps.cfg.Checkpoint.SaveTimeout)
+		ctx, cancel := context.WithTimeout(context.Background(), ps.cfg.Checkpoint.TokenSaveTimeout)
 		defer cancel()
 
 		if err := ps.checkpointManager.SaveResumeToken(ctx, worker.partitionID, nil, opTime); err != nil {
@@ -1198,7 +1198,7 @@ func (ps *partitionStream) updateResumeTokenToHighwatermark(worker *streamWorker
 	}
 
 	// Primary method successful: We received a new, valid token from the driver.
-	ctx, cancel := context.WithTimeout(context.Background(), ps.cfg.Checkpoint.SaveTimeout)
+	ctx, cancel := context.WithTimeout(context.Background(), ps.cfg.Checkpoint.TokenSaveTimeout)
 	defer cancel()
 
 	if err := ps.checkpointManager.SaveResumeToken(ctx, worker.partitionID, highwatermarkToken, nil); err != nil {
