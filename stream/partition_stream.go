@@ -897,7 +897,7 @@ func (ps *partitionStream) buildPartitioningHashExpression(idField string) bson.
 			{Key: "else", Value: bson.D{
 				{Key: "$cond", Value: bson.D{
 					{Key: "if", Value: ps.createIsNumericStringCheck(idField)},
-					{Key: "then", Value: bson.D{{Key: "toLong", Value: idField}}},
+					{Key: "then", Value: bson.D{{Key: "$toLong", Value: idField}}},
 					{Key: "else", Value: ps.buildStringDistributionHash(idField)},
 				}},
 			}},
