@@ -217,7 +217,7 @@ func (ps *partitionStream) managePartitionWorkerLifecycle(worker *streamWorker) 
 		BaseDelay:  1 * time.Second,
 		MaxDelay:   30 * time.Second,
 		Factor:     2.0,
-		MaxRetries: 0, // Infinite retries
+		MaxRetries: 3,
 	})
 
 	for {
@@ -306,10 +306,9 @@ func (ps *partitionStream) executeFullBootstrapFlow(worker *streamWorker) error 
 		return fmt.Errorf("partition %d not owned by this worker during bootstrap verification", worker.partitionID)
 	}
 
-	opTime, err := ps.fetchCurrentDbOperationTime(worker.ctx)
+	opTime, err := ps.fetchCurrentDbOperationTimeWithRetry(worker.ctx, 3)
 	if err != nil {
 		ps.logger.Warn(fmt.Sprintf("Could not get server operation time before bootstrap - partitionId: %d, error: %v", worker.partitionID, err))
-		//TODO: opTime şart burayı duzelt
 	}
 
 	if err := ps.runBootstrapWithRetries(worker); err != nil {
@@ -338,6 +337,97 @@ func (ps *partitionStream) fetchCurrentDbOperationTime(ctx context.Context) (*pr
 		return &opTime, nil
 	}
 	return nil, nil
+}
+
+func (ps *partitionStream) fetchCurrentDbOperationTimeWithRetry(ctx context.Context, maxRetries int) (*primitive.Timestamp, error) {
+	backoffStrategy := backoff.New(backoff.Config{
+		BaseDelay:  1 * time.Second,
+		MaxDelay:   5 * time.Second,
+		Factor:     2.0,
+		MaxRetries: maxRetries,
+	})
+
+	var lastErr error
+	for {
+		select {
+		case <-ctx.Done():
+			return nil, ctx.Err()
+		default:
+		}
+
+		opTime, err := ps.fetchCurrentDbOperationTime(ctx)
+		if err == nil && opTime != nil {
+			ps.logger.Debug(fmt.Sprintf("Successfully obtained operation time from database after %d attempts", backoffStrategy.Attempts()))
+			return opTime, nil
+		}
+
+		lastErr = err
+		if err != nil {
+			ps.logger.Warn(fmt.Sprintf("Failed to get operation time, attempt %d/%d: %v", backoffStrategy.Attempts()+1, maxRetries, err))
+		} else {
+			ps.logger.Warn(fmt.Sprintf("Operation time is nil, attempt %d/%d", backoffStrategy.Attempts()+1, maxRetries))
+		}
+
+		delay, keepTrying := backoffStrategy.NextDelay()
+		if !keepTrying {
+			break
+		}
+
+		select {
+		case <-ctx.Done():
+			return nil, ctx.Err()
+		case <-time.After(delay):
+		}
+	}
+
+	ps.logger.Warn(fmt.Sprintf("Failed to get operation time from database after %d attempts, using current time as fallback. Last error: %v", backoffStrategy.Attempts(), lastErr))
+
+	now := time.Now().Unix()
+	var t uint32
+	if now < 0 {
+		t = 0
+	} else if now > int64(math.MaxUint32) {
+		t = math.MaxUint32
+	} else {
+		t = uint32(now)
+	}
+
+	fallbackOpTime := &primitive.Timestamp{T: t, I: 1}
+	ps.logger.Info(fmt.Sprintf("Using fallback operation time: %v", fallbackOpTime))
+
+	return fallbackOpTime, nil
+}
+
+func (ps *partitionStream) getBootstrapProgressWithRetry(partitionID int, maxRetries int) (interface{}, error) {
+	backoffStrategy := backoff.New(backoff.Config{
+		BaseDelay:  1 * time.Second,
+		MaxDelay:   5 * time.Second,
+		Factor:     2.0,
+		MaxRetries: maxRetries,
+	})
+
+	var lastErr error
+	for {
+		ctx, cancel := context.WithTimeout(context.Background(), 10*time.Second)
+
+		bootstrapLastID, err := ps.checkpointManager.GetBootstrapProgress(ctx, partitionID)
+		cancel()
+
+		if err == nil {
+			ps.logger.Debug(fmt.Sprintf("Successfully obtained bootstrap progress after %d attempts - partitionId: %d", backoffStrategy.Attempts(), partitionID))
+			return bootstrapLastID, nil
+		}
+
+		lastErr = err
+		ps.logger.Warn(fmt.Sprintf("Failed to get bootstrap progress, attempt %d/%d - partitionId: %d, error: %v", backoffStrategy.Attempts()+1, maxRetries, partitionID, err))
+
+		delay, keepTrying := backoffStrategy.NextDelay()
+		if !keepTrying {
+			return nil, fmt.Errorf("failed to get bootstrap progress after %d attempts for partition %d, last error: %v", backoffStrategy.Attempts(), partitionID, lastErr)
+		}
+
+		time.Sleep(delay)
+	}
 }
 
 func (ps *partitionStream) runBootstrapWithRetries(worker *streamWorker) error {
@@ -386,7 +476,10 @@ func (ps *partitionStream) runBootstrapWithRetries(worker *streamWorker) error {
 func (ps *partitionStream) bootstrapPartition(worker *streamWorker) error {
 	ps.logger.Debug(fmt.Sprintf("Starting bootstrap for partition %d", worker.partitionID))
 
-	bootstrapLastID, filter := ps.loadBootstrapStateAndCreateFilter(worker.partitionID)
+	bootstrapLastID, filter, err := ps.loadBootstrapStateAndCreateFilter(worker.partitionID)
+	if err != nil {
+		return fmt.Errorf("failed to load bootstrap state for partition %d: %w", worker.partitionID, err)
+	}
 
 	cursor, err := ps.queryDocumentsForBootstrap(worker, filter, bootstrapLastID)
 	if err != nil {
@@ -397,14 +490,11 @@ func (ps *partitionStream) bootstrapPartition(worker *streamWorker) error {
 	return ps.iterateAndProcessBootstrapCursor(worker, cursor)
 }
 
-func (ps *partitionStream) loadBootstrapStateAndCreateFilter(partitionID int) (interface{}, bson.D) {
-	ctx, cancel := context.WithTimeout(context.Background(), 10*time.Second)
-	defer cancel()
-
-	bootstrapLastID, err := ps.checkpointManager.GetBootstrapProgress(ctx, partitionID)
+func (ps *partitionStream) loadBootstrapStateAndCreateFilter(partitionID int) (interface{}, bson.D, error) {
+	bootstrapLastID, err := ps.getBootstrapProgressWithRetry(partitionID, 3)
 	if err != nil {
-		ps.logger.Error(fmt.Sprintf("Failed to get bootstrap progress - partitionId: %d, error: %v", partitionID, err))
-		//TODO: bu durumda devam mı etmeli?
+		ps.logger.Error(fmt.Sprintf("CRITICAL: Failed to get bootstrap progress after retries - partitionId: %d, error: %v", partitionID, err))
+		return nil, nil, err
 	}
 
 	filter := ps.buildBootstrapPartitionFilter(partitionID)
@@ -416,7 +506,7 @@ func (ps *partitionStream) loadBootstrapStateAndCreateFilter(partitionID int) (i
 		ps.logger.Info(fmt.Sprintf("Starting fresh bootstrap - partitionId: %d", partitionID))
 	}
 
-	return bootstrapLastID, filter
+	return bootstrapLastID, filter, nil
 }
 
 func (ps *partitionStream) queryDocumentsForBootstrap(worker *streamWorker, filter bson.D, bootstrapLastID interface{}) (connection.Cursor, error) {
@@ -1085,12 +1175,9 @@ func (ps *partitionStream) updateResumeTokenToHighwatermark(worker *streamWorker
 			zap.Int("partitionId", worker.partitionID),
 		)
 
-		opTime, err := ps.fetchCurrentDbOperationTime(worker.ctx)
+		opTime, err := ps.fetchCurrentDbOperationTimeWithRetry(worker.ctx, 3)
 		if err != nil {
 			return fmt.Errorf("fallback failed: could not fetch server operation time: %w", err)
-		}
-		if opTime == nil {
-			return errors.New("fallback failed: received nil operation time from server")
 		}
 
 		ctx, cancel := context.WithTimeout(context.Background(), ps.cfg.Checkpoint.SaveTimeout)
