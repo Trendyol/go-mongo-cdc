@@ -111,16 +111,16 @@ func (c *Config) SetDefault() {
 		c.Checkpoint.Collection = "cdc_checkpoints"
 	}
 	if c.Checkpoint.TokenSaveInterval == 0 {
-		c.Checkpoint.TokenSaveInterval = 30 * time.Second
+		c.Checkpoint.TokenSaveInterval = 10 * time.Second
 	}
 	if c.Checkpoint.BootstrapSaveCount == 0 {
-		c.Checkpoint.BootstrapSaveCount = 5000
+		c.Checkpoint.BootstrapSaveCount = 1000
 	}
 	if c.Checkpoint.TokenSaveTimeout == 0 {
 		c.Checkpoint.TokenSaveTimeout = 10 * time.Second
 	}
 	if c.Checkpoint.BootstrapSaveInterval == 0 {
-		c.Checkpoint.BootstrapSaveInterval = 30 * time.Second
+		c.Checkpoint.BootstrapSaveInterval = 5 * time.Second
 	}
 	if c.Checkpoint.IdleHeartbeatInterval == 0 {
 		c.Checkpoint.IdleHeartbeatInterval = 3 * time.Minute
@@ -134,19 +134,19 @@ func (c *Config) SetDefault() {
 	}
 
 	if c.Partition.HeartbeatInterval == 0 {
-		c.Partition.HeartbeatInterval = 5 * time.Second
+		c.Partition.HeartbeatInterval = 10 * time.Second
 	}
 	if c.Partition.WorkerTimeout == 0 {
-		c.Partition.WorkerTimeout = 30 * time.Second
+		c.Partition.WorkerTimeout = 90 * time.Second
 	}
 	if c.Partition.PartitionDatabase == "" {
 		c.Partition.PartitionDatabase = "cdc_partitions"
 	}
 	if c.Partition.RebalanceCheckInterval == 0 {
-		c.Partition.RebalanceCheckInterval = 10 * time.Second
+		c.Partition.RebalanceCheckInterval = 15 * time.Second
 	}
 	if c.Partition.TotalPartition == 0 {
-		c.Partition.TotalPartition = 10
+		c.Partition.TotalPartition = 15
 	}
 }
 

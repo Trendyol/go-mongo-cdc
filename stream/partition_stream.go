@@ -113,6 +113,14 @@ func (ps *partitionStream) Start(ctx context.Context) error {
 		return err
 	}
 
+	select {
+	case <-ps.ctx.Done():
+		ps.logger.Debug("Event processing cancelled during initial delay")
+		return ps.ctx.Err()
+	case <-time.After(30 * time.Second): //TODO: configden alınabilir
+		ps.logger.Debug("Initial delay completed before acquiring partitions")
+	}
+
 	if err := ps.partitionManager.Initialize(ps.ctx); err != nil {
 		return fmt.Errorf("failed to initialize partition manager: %w", err)
 	}
@@ -203,15 +211,6 @@ func (ps *partitionStream) reconcilePartitionAssignments(newPartitions []int) {
 
 func (ps *partitionStream) managePartitionWorkerLifecycle(worker *streamWorker) {
 	defer ps.wg.Done()
-
-	select {
-	case <-worker.ctx.Done():
-		ps.logger.Debug(fmt.Sprintf("Event processing cancelled during delay - partitionId: %d", worker.partitionID))
-		return
-	case <-time.After(30 * time.Second): //TODO: configden alınabilir
-		ps.logger.Debug(fmt.Sprintf("Event processing delay completed - partitionId: %d, workerId: %s",
-			worker.partitionID, ps.workerID))
-	}
 
 	backoffStrategy := backoff.New(backoff.Config{
 		BaseDelay:  1 * time.Second,
