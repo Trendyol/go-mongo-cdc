@@ -90,10 +90,8 @@ func NewConnector(cfg config.Config, listenerFunc stream.ListenerFunc) (Connecto
 
 	prometheusRegistry := metric.NewRegistry(m)
 
-	// MongoDB operational metrics - 'local' database contains oplog in replica sets
-	// If not available (single node), metrics will be gracefully skipped
-	mongoMetricsCollector := metric.NewMongoDBMetricsCollector("local")
-	shardedMetricsCollector := metric.NewShardedMetricsCollector(cfg.Metric.EnableShardMetricsMapping, "local")
+	mongoMetricsCollector := metric.NewMongoDBMetricsCollector()
+	shardedMetricsCollector := metric.NewShardedMetricsCollector(cfg.Metric.EnableShardMetricsMapping)
 
 	isSharded := detectShardedCluster(mongoClient)
 
@@ -237,8 +235,14 @@ func (c *connector) collectMongoDBMetricsPeriodically(ctx context.Context) {
 			}
 
 			c.metricInstance.SetMongoDBMetrics(mongoMetrics)
-			c.logger.Debug(fmt.Sprintf("MongoDB metrics collected - OplogUsed: %.2f%%, ReplicationLag: %ds",
-				mongoMetrics.OplogUsedPercent, mongoMetrics.ReplicationLag))
+
+			// Log metrics status
+			if mongoMetrics.OplogSize > 0 {
+				c.logger.Debug(fmt.Sprintf("MongoDB metrics collected - OplogUsed: %.2f%%, ReplicationLag: %ds",
+					mongoMetrics.OplogUsedPercent, mongoMetrics.ReplicationLag))
+			} else {
+				c.logger.Debug("MongoDB metrics collected - Oplog/Replication metrics unavailable (expected for mongos/standalone)")
+			}
 		}
 	}
 

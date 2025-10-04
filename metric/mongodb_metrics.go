@@ -30,17 +30,10 @@ type MongoDBMetricsCollector interface {
 	CollectMongoDBMetrics(ctx context.Context, client *mongo.Client) (*MongoDBMetrics, error)
 }
 
-type mongoDBMetricsCollector struct {
-	database string
-}
+type mongoDBMetricsCollector struct{}
 
-func NewMongoDBMetricsCollector(database string) MongoDBMetricsCollector {
-	if database == "" {
-		database = "local" // Fallback to 'local' if not provided
-	}
-	return &mongoDBMetricsCollector{
-		database: database,
-	}
+func NewMongoDBMetricsCollector() MongoDBMetricsCollector {
+	return &mongoDBMetricsCollector{}
 }
 
 func (c *mongoDBMetricsCollector) CollectMongoDBMetrics(ctx context.Context, client *mongo.Client) (*MongoDBMetrics, error) {
@@ -63,7 +56,8 @@ func (c *mongoDBMetricsCollector) CollectMongoDBMetrics(ctx context.Context, cli
 }
 
 func (c *mongoDBMetricsCollector) collectOplogMetrics(ctx context.Context, client *mongo.Client, metrics *MongoDBMetrics) error {
-	db := client.Database(c.database)
+	// Oplog is always in 'local' database (replica sets only)
+	db := client.Database("local")
 
 	var result bson.M
 	err := db.RunCommand(ctx, bson.D{{Key: "collStats", Value: "oplog.rs"}}).Decode(&result)

@@ -25,9 +25,9 @@ type shardedMetricsCollector struct {
 	enableHostMapping bool
 }
 
-func NewShardedMetricsCollector(enableHostMapping bool, database string) ShardedMetricsCollector {
+func NewShardedMetricsCollector(enableHostMapping bool) ShardedMetricsCollector {
 	return &shardedMetricsCollector{
-		baseCollector:     NewMongoDBMetricsCollector(database),
+		baseCollector:     NewMongoDBMetricsCollector(),
 		enableHostMapping: enableHostMapping,
 	}
 }
