@@ -84,11 +84,11 @@ $ go get github.com/Trendyol/go-mongo-cdc
 
 #### Connection Settings (`mongodb.connection`)
 
-| Variable                      | Type   | Required | Default | Description                        |
-|-------------------------------|--------|----------|---------|------------------------------------|
-| `mongodb.connection.uri`      | string | yes      |         | MongoDB connection URI             |
-| `mongodb.connection.database` | string | yes      |         | MongoDB database name              |
-| `mongodb.connection.collection` | string | yes    |         | MongoDB collection name to monitor |
+| Variable                      | Type   | Required | Default | Description                         |
+|-------------------------------|--------|----------|---------|-------------------------------------|
+| `mongodb.connection.uri`      | string | yes      |         | MongoDB connection URI              |
+| `mongodb.connection.database` | string | yes      |         | MongoDB database name               |
+| `mongodb.connection.collection` | string | yes    |         | MongoDB collection                  |
 | `mongodb.connection.username` | string | no       |         | MongoDB username for authentication |
 | `mongodb.connection.password` | string | no       |         | MongoDB password for authentication |
 
