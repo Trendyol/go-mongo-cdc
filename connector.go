@@ -37,8 +37,8 @@ type connector struct {
 	logger                  *zap.Logger
 	cancelCh                chan os.Signal
 	workerID                string
-	metricsPort             int
 	isShardedCluster        bool
+	cfg                     config.Config
 
 	once   sync.Once
 	closed bool
@@ -104,9 +104,9 @@ func NewConnector(cfg config.Config, listenerFunc stream.ListenerFunc) (Connecto
 		metricInstance:          m,
 		logger:                  zapLogger,
 		workerID:                workerID,
-		metricsPort:             cfg.Metric.Port,
 		isShardedCluster:        isSharded,
 		cancelCh:                make(chan os.Signal, 1),
+		cfg:                     cfg,
 	}, nil
 }
 
@@ -127,8 +127,8 @@ func (c *connector) Start(ctx context.Context) {
 	})
 
 	g.Go(func() error {
-		if err := c.prometheusRegistry.StartMetricsServer(gCtx, c.metricsPort); err != nil {
-			c.logger.Warn(fmt.Sprintf("Metrics server could not start (port %d may be in use): %v - continuing without metrics", c.metricsPort, err))
+		if err := c.prometheusRegistry.StartMetricsServer(gCtx, c.cfg.Metric.Port); err != nil {
+			c.logger.Warn(fmt.Sprintf("Metrics server could not start (port %d may be in use): %v - continuing without metrics", c.cfg.Metric.Port, err))
 			<-gCtx.Done()
 		}
 		return nil
@@ -200,7 +200,7 @@ func generateWorkerID() string {
 }
 
 func (c *connector) collectMongoDBMetricsPeriodically(ctx context.Context) {
-	ticker := time.NewTicker(30 * time.Second)
+	ticker := time.NewTicker(c.cfg.Metric.CollectionInterval)
 	defer ticker.Stop()
 
 	collectMetrics := func() {

@@ -81,32 +81,6 @@ func (c *mongoDBMetricsCollector) collectOplogMetrics(ctx context.Context, clien
 		metrics.OplogUsedPercent = float64(metrics.OplogUsedSize) / float64(metrics.OplogSize) * 100
 	}
 
-	oplogColl := db.Collection("oplog.rs")
-
-	var firstEntry bson.M
-	cursor, err := oplogColl.Find(ctx, bson.M{}, nil)
-	if err == nil {
-		defer cursor.Close(ctx)
-		if cursor.Next(ctx) {
-			cursor.Decode(&firstEntry)
-		}
-	}
-
-	var lastEntry bson.M
-	cursor, err = oplogColl.Find(ctx, bson.M{}, nil)
-	if err == nil {
-		defer cursor.Close(ctx)
-		for cursor.Next(ctx) {
-			cursor.Decode(&lastEntry)
-		}
-	}
-
-	if firstTS, ok := firstEntry["ts"].(int64); ok {
-		if lastTS, ok := lastEntry["ts"].(int64); ok {
-			metrics.OplogTimeDiff = (lastTS - firstTS) / 1000
-		}
-	}
-
 	return nil
 }
 
@@ -117,6 +91,7 @@ func (c *mongoDBMetricsCollector) collectReplicationMetrics(ctx context.Context,
 		return err
 	}
 
+	// Calculate replication lag from member optimes
 	if members, ok := result["members"].(bson.A); ok {
 		var primaryOptime, secondaryOptime time.Time
 
@@ -139,14 +114,12 @@ func (c *mongoDBMetricsCollector) collectReplicationMetrics(ctx context.Context,
 		}
 	}
 
-	if optimes, ok := result["optimes"].(bson.M); ok {
-		if readConcernMajority, ok := optimes["readConcernMajorityOpTime"].(bson.M); ok {
-			if lastCommitted, ok := optimes["lastCommittedOpTime"].(bson.M); ok {
-				if rcmTS, ok := readConcernMajority["ts"].(int64); ok {
-					if lcTS, ok := lastCommitted["ts"].(int64); ok {
-						metrics.ReplicationOplogWindow = (lcTS - rcmTS) / 1000
-					}
-				}
+	// Calculate oplog window from replSetGetStatus (more efficient than scanning oplog.rs)
+	if oplogInfo, ok := result["oplog"].(bson.M); ok {
+		// Try to get oplog time window from firstEventTime and lastEventTime
+		if firstEventTime, ok := oplogInfo["firstEventTime"].(time.Time); ok {
+			if lastEventTime, ok := oplogInfo["lastEventTime"].(time.Time); ok {
+				metrics.ReplicationOplogWindow = int64(lastEventTime.Sub(firstEventTime).Seconds())
 			}
 		}
 	}

@@ -89,14 +89,14 @@ func NewCollector(m Metric) *Collector {
 		),
 
 		processLatency: prometheus.NewDesc(
-			prometheus.BuildFQName(namespace, "", "process_latency_ms_current"),
-			"Current processing latency in milliseconds",
+			prometheus.BuildFQName(namespace, "", "process_latency_seconds"),
+			"Processing latency in seconds",
 			nil,
 			nil,
 		),
 		cdcLatency: prometheus.NewDesc(
-			prometheus.BuildFQName(namespace, "", "cdc_latency_ms_current"),
-			"Current CDC latency in milliseconds",
+			prometheus.BuildFQName(namespace, "", "cdc_latency_seconds"),
+			"CDC latency in seconds",
 			nil,
 			nil,
 		),
@@ -114,8 +114,8 @@ func NewCollector(m Metric) *Collector {
 			nil,
 		),
 		checkpointSaveLatency: prometheus.NewDesc(
-			prometheus.BuildFQName(namespace, "", "checkpoint_save_latency_ms_current"),
-			"Current checkpoint save latency in milliseconds",
+			prometheus.BuildFQName(namespace, "", "checkpoint_save_latency_seconds"),
+			"Checkpoint save latency in seconds",
 			nil,
 			nil,
 		),
@@ -190,8 +190,8 @@ func NewCollector(m Metric) *Collector {
 			nil,
 		),
 		eventLagDuration: prometheus.NewDesc(
-			prometheus.BuildFQName(namespace, "", "event_lag_duration_seconds"),
-			"Duration since the last event was processed",
+			prometheus.BuildFQName(namespace, "", "event_lag_seconds"),
+			"Time since the last event was processed in seconds",
 			nil,
 			nil,
 		),
