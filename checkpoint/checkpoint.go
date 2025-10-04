@@ -6,12 +6,12 @@ import (
 	"time"
 
 	"github.com/Trendyol/go-mongo-cdc/internal/backoff"
+	"github.com/Trendyol/go-mongo-cdc/logger"
 	"github.com/Trendyol/go-mongo-cdc/mongo/connection"
 	"go.mongodb.org/mongo-driver/bson"
 	"go.mongodb.org/mongo-driver/bson/primitive"
 	"go.mongodb.org/mongo-driver/mongo"
 	"go.mongodb.org/mongo-driver/mongo/options"
-	"go.uber.org/zap"
 )
 
 type Manager interface {
@@ -38,10 +38,9 @@ type manager struct {
 	collection connection.Collection
 	database   string
 	collName   string
-	logger     *zap.Logger
 }
 
-func NewManager(client connection.Client, database, collection string, logger *zap.Logger) Manager {
+func NewManager(client connection.Client, database, collection string) Manager {
 	db := client.Database(database)
 	checkpointCol := db.Collection(collection + "_checkpoints")
 
@@ -49,7 +48,6 @@ func NewManager(client connection.Client, database, collection string, logger *z
 		collection: checkpointCol,
 		database:   database,
 		collName:   collection,
-		logger:     logger,
 	}
 }
 
@@ -59,7 +57,7 @@ func (m *manager) getCheckpointID(partitionID int) string {
 
 func (m *manager) SaveResumeToken(ctx context.Context, partitionID int, token []byte, clusterTime *primitive.Timestamp) error {
 	if len(token) == 0 && clusterTime == nil {
-		m.logger.Debug("SaveResumeToken skipped: both token and clusterTime are nil", zap.Int("partitionId", partitionID))
+		logger.Log.Debug("SaveResumeToken skipped: both token and clusterTime are nil - partitionId: %d", partitionID)
 		return nil
 	}
 
@@ -94,27 +92,22 @@ func (m *manager) SaveResumeToken(ctx context.Context, partitionID int, token []
 	for {
 		_, err := m.collection.UpdateOne(ctx, filter, update, opts)
 		if err == nil {
-			m.logger.Debug(fmt.Sprintf("Resume token saved - partitionId: %d, checkpointId: %s", partitionID, checkpointID))
+			logger.Log.Debug("Resume token saved - partitionId: %d, checkpointId: %s", partitionID, checkpointID)
 			return nil
 		}
 
 		delay, keepTrying := backoffStrategy.NextDelay()
 		if !keepTrying {
-			m.logger.Error(
-				"Failed to save resume token after all retries",
-				zap.Int("partitionId", partitionID),
-				zap.String("checkpointId", checkpointID),
-				zap.Error(err),
+			logger.Log.Error(
+				"Failed to save resume token after all retries - partitionId: %d, checkpointId: %s, error: %v",
+				partitionID, checkpointID, err,
 			)
 			return err
 		}
 
-		m.logger.Warn(
-			"Failed to save resume token, retrying...",
-			zap.Int("partitionId", partitionID),
-			zap.Int("attempt", backoffStrategy.Attempts()),
-			zap.Int("maxRetries", backoffStrategy.Config.MaxRetries),
-			zap.Error(err),
+		logger.Log.Warn(
+			"Failed to save resume token, retrying... - partitionId: %d, attempt: %d, maxRetries: %d, error: %v",
+			partitionID, backoffStrategy.Attempts(), backoffStrategy.Config.MaxRetries, err,
 		)
 
 		select {
@@ -163,7 +156,7 @@ func (m *manager) SaveBootstrapProgress(ctx context.Context, partitionID int, la
 	_, err := m.collection.UpdateOne(ctx, filter, update, opts)
 
 	if err != nil {
-		m.logger.Error(fmt.Sprintf("Failed to save bootstrap progress - partitionId: %d, lastId: %v, error: %v", partitionID, lastID, err))
+		logger.Log.Error(fmt.Sprintf("Failed to save bootstrap progress - partitionId: %d, lastId: %v, error: %v", partitionID, lastID, err))
 	}
 
 	return err
@@ -223,17 +216,14 @@ func (m *manager) ClearResumeToken(ctx context.Context, partitionID int) error {
 
 	result, err := m.collection.UpdateOne(ctx, filter, update)
 	if err != nil {
-		m.logger.Error("Failed to clear resume token",
-			zap.Int("partitionId", partitionID),
-			zap.String("checkpointId", checkpointID),
-			zap.Error(err))
+		logger.Log.Error("Failed to clear resume token - partitionId: %d, checkpointId: %s, error: %v",
+			partitionID, checkpointID, err)
 		return err
 	}
 
 	if result.MatchedCount() > 0 {
-		m.logger.Info("Resume token cleared successfully",
-			zap.Int("partitionId", partitionID),
-			zap.String("checkpointId", checkpointID))
+		logger.Log.Info("Resume token cleared successfully - partitionId: %d, checkpointId: %s",
+			partitionID, checkpointID)
 	}
 
 	return nil

@@ -2,38 +2,20 @@ package main
 
 import (
 	"context"
+	"github.com/Trendyol/go-mongo-cdc/logger"
 
 	cdc "github.com/Trendyol/go-mongo-cdc"
 
 	"fmt"
 	"log"
-	"strings"
 	"time"
 
 	"github.com/Trendyol/go-mongo-cdc/config"
 	"github.com/Trendyol/go-mongo-cdc/mongo/message"
 	"github.com/Trendyol/go-mongo-cdc/stream"
-	"go.uber.org/zap"
-	"go.uber.org/zap/zapcore"
 )
 
-type CDCListener struct {
-	logger *zap.Logger
-}
-
 func main() {
-	loggerConfig := zap.NewDevelopmentConfig()
-	loggerConfig.Level = zap.NewAtomicLevelAt(zapcore.DebugLevel)
-	logger, _ := loggerConfig.Build()
-
-	defer func() {
-		if err := logger.Sync(); err != nil {
-			if !strings.Contains(err.Error(), "inappropriate ioctl for device") && !strings.Contains(err.Error(), "bad file descriptor") {
-				log.Printf("Failed to sync logger: %v", err)
-			}
-		}
-	}()
-
 	cfg := config.Config{
 		MongoDB: config.MongoDB{
 			Connection: config.Connection{
@@ -70,16 +52,9 @@ func main() {
 			RebalanceCheckInterval: 15 * time.Second,
 			TotalPartition:         30,
 		},
-		Logger: config.LoggerConfig{
-			Logger: logger,
-		},
 	}
 
-	myListener := &CDCListener{
-		logger: logger,
-	}
-
-	connector, err := cdc.NewConnector(cfg, myListener.ProcessChangeEvent)
+	connector, err := cdc.NewConnector(cfg, ProcessChangeEvent)
 	if err != nil {
 		log.Fatal("failed to create connector:", err)
 	}
@@ -90,18 +65,18 @@ func main() {
 	connector.Start(ctx)
 }
 
-func (l *CDCListener) ProcessChangeEvent(lc *stream.ListenerContext) error {
+func ProcessChangeEvent(lc *stream.ListenerContext) error {
 	switch lc.Message.OperationType {
 	case message.OperationInsert, message.OperationUpdate, message.OperationReplace:
 		if lc.Message.FullDocument != nil {
-			l.logger.Info(fmt.Sprintf("Document changed - operation: %s, document: %v, partitionId: %d", string(lc.Message.OperationType), lc.Message.DocumentID, lc.PartitionID))
+			logger.Log.Info(fmt.Sprintf("Document changed - operation: %s, document: %v, partitionId: %d", string(lc.Message.OperationType), lc.Message.DocumentID, lc.PartitionID))
 		}
 	case message.OperationDelete:
-		l.logger.Info(fmt.Sprintf("Document deleted - documentId: %v, partitionId: %d", lc.Message.DocumentID, lc.PartitionID))
+		logger.Log.Info(fmt.Sprintf("Document deleted - documentId: %v, partitionId: %d", lc.Message.DocumentID, lc.PartitionID))
 	}
 
 	if err := lc.Ack(); err != nil {
-		l.logger.Error(fmt.Sprintf("Failed to acknowledge message: %v", err))
+		logger.Log.Error(fmt.Sprintf("Failed to acknowledge message: %v", err))
 		return err
 	}
 	return nil

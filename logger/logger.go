@@ -1,144 +1,106 @@
 package logger
 
 import (
-	"log/slog"
-
+	"fmt"
 	"go.uber.org/zap"
 )
 
+var Log Logger
+
+const (
+	ERROR = "error"
+	WARN  = "warn"
+	INFO  = "info"
+	DEBUG = "debug"
+	TRACE = "trace"
+)
+
 type Logger interface {
-	Debug(msg string, fields ...zap.Field)
-	Info(msg string, fields ...zap.Field)
-	Warn(msg string, fields ...zap.Field)
-	Error(msg string, fields ...zap.Field)
-	Fatal(msg string, fields ...zap.Field)
+	Trace(message string, args ...interface{})
+	Debug(message string, args ...interface{})
+	Info(message string, args ...interface{})
+	Warn(message string, args ...interface{})
+	Error(message string, args ...interface{})
+	Log(level string, message string, args ...interface{})
 }
 
-var defaultLogger *zap.Logger
-
-func InitLogger(customLogger *zap.Logger) *zap.Logger {
-	if customLogger != nil {
-		defaultLogger = customLogger
-		return customLogger
-	}
-
-	config := zap.NewProductionConfig()
-	config.Level = zap.NewAtomicLevelAt(zap.InfoLevel)
-
-	logger, err := config.Build()
-	if err != nil {
-		panic(err)
-	}
-
-	defaultLogger = logger
-	return logger
+type Loggers struct {
+	Zap *zap.Logger
 }
 
-func InitLoggerWithLevel(customLogger *zap.Logger, level slog.Level) *zap.Logger {
-	if customLogger != nil {
-		defaultLogger = customLogger
-		return customLogger
-	}
+func (loggers *Loggers) Trace(message string, args ...interface{}) {
+	loggers.Log(TRACE, message, args...)
+}
 
-	config := zap.NewProductionConfig()
+func (loggers *Loggers) Debug(message string, args ...interface{}) {
+	loggers.Log(DEBUG, message, args...)
+}
 
-	var zapLevel zap.AtomicLevel
+func (loggers *Loggers) Info(message string, args ...interface{}) {
+	loggers.Log(INFO, message, args...)
+}
+
+func (loggers *Loggers) Warn(message string, args ...interface{}) {
+	loggers.Log(WARN, message, args...)
+}
+
+func (loggers *Loggers) Error(message string, args ...interface{}) {
+	loggers.Log(ERROR, message, args...)
+}
+
+func (loggers *Loggers) Log(level string, message string, args ...interface{}) {
+	formattedMsg := fmt.Sprintf(message, args...)
+
 	switch level {
-	case slog.LevelDebug:
-		zapLevel = zap.NewAtomicLevelAt(zap.DebugLevel)
-	case slog.LevelInfo:
-		zapLevel = zap.NewAtomicLevelAt(zap.InfoLevel)
-	case slog.LevelWarn:
-		zapLevel = zap.NewAtomicLevelAt(zap.WarnLevel)
-	case slog.LevelError:
-		zapLevel = zap.NewAtomicLevelAt(zap.ErrorLevel)
+	case ERROR:
+		loggers.Zap.Error(formattedMsg)
+	case WARN:
+		loggers.Zap.Warn(formattedMsg)
+	case INFO:
+		loggers.Zap.Info(formattedMsg)
+	case DEBUG:
+		loggers.Zap.Debug(formattedMsg)
+	case TRACE:
+		loggers.Zap.Debug(formattedMsg)
 	default:
-		zapLevel = zap.NewAtomicLevelAt(zap.InfoLevel)
+		loggers.Zap.Info(formattedMsg)
 	}
-
-	config.Level = zapLevel
-	logger, err := config.Build()
-	if err != nil {
-		panic(err)
-	}
-
-	defaultLogger = logger
-	return logger
 }
 
-func GetLogger() *zap.Logger {
-	if defaultLogger == nil {
-		return InitLogger(nil)
-	}
-	return defaultLogger
-}
-
-func Debug(msg string, fields ...zap.Field) {
-	GetLogger().Debug(msg, fields...)
-}
-
-func Info(msg string, fields ...zap.Field) {
-	GetLogger().Info(msg, fields...)
-}
-
-func Warn(msg string, fields ...zap.Field) {
-	GetLogger().Warn(msg, fields...)
-}
-
-func Error(msg string, fields ...zap.Field) {
-	GetLogger().Error(msg, fields...)
-}
-
-func Fatal(msg string, fields ...zap.Field) {
-	GetLogger().Fatal(msg, fields...)
-}
-
-func NewSlog(level slog.Level) Logger {
+func InitDefaultLogger(logLevel string) {
 	config := zap.NewProductionConfig()
 
-	var zapLevel zap.AtomicLevel
-	switch level {
-	case slog.LevelDebug:
-		zapLevel = zap.NewAtomicLevelAt(zap.DebugLevel)
-	case slog.LevelInfo:
-		zapLevel = zap.NewAtomicLevelAt(zap.InfoLevel)
-	case slog.LevelWarn:
-		zapLevel = zap.NewAtomicLevelAt(zap.WarnLevel)
-	case slog.LevelError:
-		zapLevel = zap.NewAtomicLevelAt(zap.ErrorLevel)
-	default:
-		zapLevel = zap.NewAtomicLevelAt(zap.InfoLevel)
+	level, err := parseLogLevel(logLevel)
+	if err != nil {
+		zap.L().Error("error while logger parse level", zap.Error(err))
+		panic(err)
 	}
 
-	config.Level = zapLevel
-	logger, err := config.Build()
+	config.Level = level
+	config.Encoding = "json"
+	config.EncoderConfig.MessageKey = "message"
+
+	zapLogger, err := config.Build(zap.AddCallerSkip(2))
 	if err != nil {
 		panic(err)
 	}
 
-	return &zapLogger{logger: logger}
+	Log = &Loggers{
+		Zap: zapLogger,
+	}
 }
 
-type zapLogger struct {
-	logger *zap.Logger
-}
-
-func (z *zapLogger) Debug(msg string, fields ...zap.Field) {
-	z.logger.Debug(msg, fields...)
-}
-
-func (z *zapLogger) Info(msg string, fields ...zap.Field) {
-	z.logger.Info(msg, fields...)
-}
-
-func (z *zapLogger) Warn(msg string, fields ...zap.Field) {
-	z.logger.Warn(msg, fields...)
-}
-
-func (z *zapLogger) Error(msg string, fields ...zap.Field) {
-	z.logger.Error(msg, fields...)
-}
-
-func (z *zapLogger) Fatal(msg string, fields ...zap.Field) {
-	z.logger.Fatal(msg, fields...)
+func parseLogLevel(level string) (zap.AtomicLevel, error) {
+	switch level {
+	case ERROR:
+		return zap.NewAtomicLevelAt(zap.ErrorLevel), nil
+	case WARN:
+		return zap.NewAtomicLevelAt(zap.WarnLevel), nil
+	case INFO:
+		return zap.NewAtomicLevelAt(zap.InfoLevel), nil
+	case DEBUG, TRACE:
+		return zap.NewAtomicLevelAt(zap.DebugLevel), nil
+	default:
+		return zap.NewAtomicLevelAt(zap.InfoLevel), fmt.Errorf("unknown log level: %s", level)
+	}
 }

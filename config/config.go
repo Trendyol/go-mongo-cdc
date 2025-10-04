@@ -3,6 +3,7 @@ package config
 import (
 	"encoding/json"
 	"fmt"
+	"github.com/Trendyol/go-mongo-cdc/logger"
 	"io"
 	"log/slog"
 	"os"
@@ -10,7 +11,6 @@ import (
 	"strings"
 	"time"
 
-	"go.uber.org/zap"
 	"gopkg.in/yaml.v2"
 )
 
@@ -55,8 +55,7 @@ type MetricConfig struct {
 }
 
 type LoggerConfig struct {
-	LogLevel slog.Level  `json:"logLevel" yaml:"logLevel"`
-	Logger   *zap.Logger `json:"-" yaml:"-"`
+	LogLevel string `json:"logLevel" yaml:"logLevel"`
 }
 
 type CheckpointConfig struct {
@@ -109,8 +108,8 @@ func (c *Config) SetDefault() {
 	if c.Metric.CollectionInterval == 0 {
 		c.Metric.CollectionInterval = 30 * time.Second
 	}
-	if c.Logger.LogLevel == 0 {
-		c.Logger.LogLevel = slog.LevelInfo
+	if c.Logger.LogLevel == "" {
+		c.Logger.LogLevel = logger.INFO
 	}
 	if c.Checkpoint.Collection == "" {
 		c.Checkpoint.Collection = "cdc_checkpoints"
