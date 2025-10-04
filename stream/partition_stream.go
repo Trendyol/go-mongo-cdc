@@ -173,6 +173,9 @@ func (ps *partitionStream) reconcilePartitionAssignments(newPartitions []int) {
 	ps.streamsMutex.Lock()
 	defer ps.streamsMutex.Unlock()
 
+	// Track if any partition changes happened (rebalance)
+	rebalanceHappened := false
+
 	for partitionID, worker := range ps.activeStreams {
 		found := false
 		for _, p := range newPartitions {
@@ -187,6 +190,7 @@ func (ps *partitionStream) reconcilePartitionAssignments(newPartitions []int) {
 			worker.cancel()
 			delete(ps.activeStreams, partitionID)
 			ps.metric.IncPartitionReleaseTotal()
+			rebalanceHappened = true
 		}
 	}
 
@@ -202,10 +206,16 @@ func (ps *partitionStream) reconcilePartitionAssignments(newPartitions []int) {
 
 			ps.activeStreams[partitionID] = worker
 			ps.metric.IncPartitionAcquireTotal()
+			rebalanceHappened = true
 
 			ps.wg.Add(1)
 			go ps.managePartitionWorkerLifecycle(worker)
 		}
+	}
+
+	// Track rebalance event
+	if rebalanceHappened {
+		ps.metric.IncPartitionRebalanceTotal()
 	}
 
 	ps.metric.SetActivePartitionCount(len(ps.activeStreams))
@@ -1112,6 +1122,8 @@ func (ps *partitionStream) processEvent(worker *streamWorker, event message.Chan
 						ps.metric.IncCheckpointSaveErrorTotal()
 					} else {
 						ps.metric.IncCheckpointSaveTotal()
+						// Update last checkpoint time on successful save
+						ps.metric.SetLastCheckpointTime(time.Now())
 					}
 
 					return err
@@ -1121,7 +1133,20 @@ func (ps *partitionStream) processEvent(worker *streamWorker, event message.Chan
 		},
 	}
 
-	return ps.listener(listenerCtx)
+	// Measure listener execution time
+	listenerStart := time.Now()
+	listenerErr := ps.listener(listenerCtx)
+	listenerDuration := time.Since(listenerStart)
+
+	// Update listener latency metric
+	ps.metric.SetListenerLatency(listenerDuration.Nanoseconds())
+
+	// Track listener errors
+	if listenerErr != nil {
+		ps.metric.IncListenerErrorTotal()
+	}
+
+	return listenerErr
 }
 
 func (ps *partitionStream) updateMetrics(opType message.OperationType) {
@@ -1149,16 +1174,27 @@ func (ps *partitionStream) startPeriodicTokenSaver(ctx context.Context, worker *
 			worker.tokenMutex.RUnlock()
 
 			if len(token) > 0 {
+				saveStart := time.Now()
 				ctx, cancel := context.WithTimeout(context.Background(), ps.cfg.Checkpoint.TokenSaveTimeout)
-				if err := ps.checkpointManager.SaveResumeToken(
+				err := ps.checkpointManager.SaveResumeToken(
 					ctx,
 					worker.partitionID,
 					token,
 					clusterTime,
-				); err != nil {
-					ps.logger.Error(fmt.Sprintf("Failed to save resume token periodically - partitionId: %d, error: %v", worker.partitionID, err))
-				}
+				)
 				cancel()
+
+				// Update checkpoint metrics
+				saveLatency := time.Since(saveStart).Milliseconds()
+				ps.metric.SetCheckpointSaveLatency(saveLatency)
+
+				if err != nil {
+					ps.logger.Error(fmt.Sprintf("Failed to save resume token periodically - partitionId: %d, error: %v", worker.partitionID, err))
+					ps.metric.IncCheckpointSaveErrorTotal()
+				} else {
+					ps.metric.IncCheckpointSaveTotal()
+					ps.metric.SetLastCheckpointTime(time.Now())
+				}
 			}
 		}
 	}

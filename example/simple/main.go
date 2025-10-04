@@ -59,7 +59,7 @@ func main() {
 		Checkpoint: config.CheckpointConfig{
 			Collection:            "cdc_checkpoints",
 			TokenSaveInterval:     10 * time.Second,
-			ChangeStreamBatchSize: 100,
+			ChangeStreamBatchSize: 1,
 			BootstrapSaveCount:    1000,
 			BootstrapSaveInterval: 5 * time.Second,
 		},

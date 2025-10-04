@@ -33,6 +33,10 @@ type Metric interface {
 
 	SetWorkerHealthy(isHealthy bool)
 	SetLastEventTime(t time.Time)
+	SetListenerLatency(latencyNs int64)
+	SetLastCheckpointTime(t time.Time)
+	IncListenerErrorTotal()
+	IncPartitionRebalanceTotal()
 
 	SetMongoDBMetrics(metrics *MongoDBMetrics)
 	SetShardMetrics(shardMetrics []*ShardMetrics)
@@ -57,6 +61,10 @@ type Metric interface {
 	GetChangeStreamRestartTotal() int64
 	GetWorkerHealthy() bool
 	GetLastEventTime() int64
+	GetListenerLatency() int64
+	GetLastCheckpointTime() int64
+	GetListenerErrorTotal() int64
+	GetPartitionRebalanceTotal() int64
 	GetMongoDBMetrics() *MongoDBMetrics
 	GetShardMetrics() []*ShardMetrics
 }
@@ -91,6 +99,11 @@ type metric struct {
 
 	workerHealthy int64
 	lastEventTime int64
+
+	listenerLatency         int64
+	lastCheckpointTime      int64
+	listenerErrorTotal      int64
+	partitionRebalanceTotal int64
 
 	mongoDBMetrics   *MongoDBMetrics
 	mongoDBMetricsMu sync.RWMutex
@@ -274,6 +287,38 @@ func (m *metric) GetWorkerHealthy() bool {
 
 func (m *metric) GetLastEventTime() int64 {
 	return atomic.LoadInt64(&m.lastEventTime)
+}
+
+func (m *metric) SetListenerLatency(latencyNs int64) {
+	atomic.StoreInt64(&m.listenerLatency, latencyNs)
+}
+
+func (m *metric) GetListenerLatency() int64 {
+	return atomic.LoadInt64(&m.listenerLatency)
+}
+
+func (m *metric) SetLastCheckpointTime(t time.Time) {
+	atomic.StoreInt64(&m.lastCheckpointTime, t.Unix())
+}
+
+func (m *metric) GetLastCheckpointTime() int64 {
+	return atomic.LoadInt64(&m.lastCheckpointTime)
+}
+
+func (m *metric) IncListenerErrorTotal() {
+	atomic.AddInt64(&m.listenerErrorTotal, 1)
+}
+
+func (m *metric) GetListenerErrorTotal() int64 {
+	return atomic.LoadInt64(&m.listenerErrorTotal)
+}
+
+func (m *metric) IncPartitionRebalanceTotal() {
+	atomic.AddInt64(&m.partitionRebalanceTotal, 1)
+}
+
+func (m *metric) GetPartitionRebalanceTotal() int64 {
+	return atomic.LoadInt64(&m.partitionRebalanceTotal)
 }
 
 func (m *metric) SetMongoDBMetrics(metrics *MongoDBMetrics) {

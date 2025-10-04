@@ -33,9 +33,13 @@ type Collector struct {
 	changeStreamErrorTotal   *prometheus.Desc
 	changeStreamRestartTotal *prometheus.Desc
 
-	workerHealthy    *prometheus.Desc
-	lastEventTime    *prometheus.Desc
-	eventLagDuration *prometheus.Desc
+	workerHealthy           *prometheus.Desc
+	lastEventTime           *prometheus.Desc
+	eventLagDuration        *prometheus.Desc
+	listenerLatency         *prometheus.Desc
+	timeSinceLastCheckpoint *prometheus.Desc
+	listenerErrorTotal      *prometheus.Desc
+	partitionRebalanceTotal *prometheus.Desc
 
 	oplogSize            *prometheus.Desc
 	oplogUsedSize        *prometheus.Desc
@@ -192,6 +196,30 @@ func NewCollector(m Metric) *Collector {
 		eventLagDuration: prometheus.NewDesc(
 			prometheus.BuildFQName(namespace, "", "event_lag_seconds"),
 			"Time since the last event was processed in seconds",
+			nil,
+			nil,
+		),
+		listenerLatency: prometheus.NewDesc(
+			prometheus.BuildFQName(namespace, "", "listener_latency_seconds"),
+			"Listener function execution latency in seconds",
+			nil,
+			nil,
+		),
+		timeSinceLastCheckpoint: prometheus.NewDesc(
+			prometheus.BuildFQName(namespace, "", "time_since_last_checkpoint_seconds"),
+			"Time since last checkpoint was saved in seconds",
+			nil,
+			nil,
+		),
+		listenerErrorTotal: prometheus.NewDesc(
+			prometheus.BuildFQName(namespace, "", "listener_error_total"),
+			"Total number of listener function errors",
+			nil,
+			nil,
+		),
+		partitionRebalanceTotal: prometheus.NewDesc(
+			prometheus.BuildFQName(namespace, "", "partition_rebalance_total"),
+			"Total number of partition rebalance operations",
 			nil,
 			nil,
 		),
@@ -415,6 +443,43 @@ func (c *Collector) Collect(ch chan<- prometheus.Metric) {
 			eventLag,
 		)
 	}
+
+	// Listener latency (convert nanoseconds to seconds)
+	listenerLatencyNs := c.metric.GetListenerLatency()
+	ch <- prometheus.MustNewConstMetric(
+		c.listenerLatency,
+		prometheus.GaugeValue,
+		float64(listenerLatencyNs)/1e9,
+	)
+
+	// Time since last checkpoint
+	lastCheckpointTime := c.metric.GetLastCheckpointTime()
+	var timeSinceCheckpoint float64
+	if lastCheckpointTime > 0 {
+		timeSinceCheckpoint = time.Since(time.Unix(lastCheckpointTime, 0)).Seconds()
+	} else {
+		// If no checkpoint has been saved yet, report -1 to indicate "never"
+		timeSinceCheckpoint = -1
+	}
+	ch <- prometheus.MustNewConstMetric(
+		c.timeSinceLastCheckpoint,
+		prometheus.GaugeValue,
+		timeSinceCheckpoint,
+	)
+
+	// Listener errors
+	ch <- prometheus.MustNewConstMetric(
+		c.listenerErrorTotal,
+		prometheus.CounterValue,
+		float64(c.metric.GetListenerErrorTotal()),
+	)
+
+	// Partition rebalance
+	ch <- prometheus.MustNewConstMetric(
+		c.partitionRebalanceTotal,
+		prometheus.CounterValue,
+		float64(c.metric.GetPartitionRebalanceTotal()),
+	)
 
 	mongoMetrics := c.metric.GetMongoDBMetrics()
 	if mongoMetrics != nil {
