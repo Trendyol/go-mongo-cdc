@@ -49,7 +49,9 @@ type Timeouts struct {
 }
 
 type MetricConfig struct {
-	Port int `json:"port" yaml:"port"`
+	Port                      int           `json:"port" yaml:"port"`
+	EnableShardMetricsMapping bool          `json:"enableShardMetricsMapping" yaml:"enableShardMetricsMapping"`
+	CollectionInterval        time.Duration `json:"collectionInterval" yaml:"collectionInterval"`
 }
 
 type LoggerConfig struct {
@@ -103,6 +105,9 @@ func (c *Config) SetDefault() {
 
 	if c.Metric.Port == 0 {
 		c.Metric.Port = 8080
+	}
+	if c.Metric.CollectionInterval == 0 {
+		c.Metric.CollectionInterval = 30 * time.Second
 	}
 	if c.Logger.LogLevel == 0 {
 		c.Logger.LogLevel = slog.LevelInfo

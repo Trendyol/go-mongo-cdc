@@ -33,11 +33,32 @@ type Collector struct {
 	changeStreamErrorTotal   *prometheus.Desc
 	changeStreamRestartTotal *prometheus.Desc
 
-	workerHealthy    *prometheus.Desc
-	lastEventTime    *prometheus.Desc
-	eventLagDuration *prometheus.Desc
+	workerHealthy           *prometheus.Desc
+	lastEventTime           *prometheus.Desc
+	eventLagDuration        *prometheus.Desc
+	listenerLatency         *prometheus.Desc
+	timeSinceLastCheckpoint *prometheus.Desc
+	listenerErrorTotal      *prometheus.Desc
+	partitionRebalanceTotal *prometheus.Desc
+
+	oplogSize            *prometheus.Desc
+	oplogUsedSize        *prometheus.Desc
+	oplogUsedPercent     *prometheus.Desc
+	oplogTimeDiff        *prometheus.Desc
+	replicationLag       *prometheus.Desc
+	activeConnections    *prometheus.Desc
+	availableConnections *prometheus.Desc
+
+	shardOplogSize        *prometheus.Desc
+	shardOplogUsedSize    *prometheus.Desc
+	shardOplogUsedPercent *prometheus.Desc
+	shardReplicationLag   *prometheus.Desc
 
 	buildInfo *prometheus.Desc
+}
+
+type ShardMetricsHolder interface {
+	GetShardMetrics() []*ShardMetrics
 }
 
 func NewCollector(m Metric) *Collector {
@@ -72,14 +93,14 @@ func NewCollector(m Metric) *Collector {
 		),
 
 		processLatency: prometheus.NewDesc(
-			prometheus.BuildFQName(namespace, "", "process_latency_ms_current"),
-			"Current processing latency in milliseconds",
+			prometheus.BuildFQName(namespace, "", "process_latency_seconds"),
+			"Processing latency in seconds",
 			nil,
 			nil,
 		),
 		cdcLatency: prometheus.NewDesc(
-			prometheus.BuildFQName(namespace, "", "cdc_latency_ms_current"),
-			"Current CDC latency in milliseconds",
+			prometheus.BuildFQName(namespace, "", "cdc_latency_seconds"),
+			"CDC latency in seconds",
 			nil,
 			nil,
 		),
@@ -97,8 +118,8 @@ func NewCollector(m Metric) *Collector {
 			nil,
 		),
 		checkpointSaveLatency: prometheus.NewDesc(
-			prometheus.BuildFQName(namespace, "", "checkpoint_save_latency_ms_current"),
-			"Current checkpoint save latency in milliseconds",
+			prometheus.BuildFQName(namespace, "", "checkpoint_save_latency_seconds"),
+			"Checkpoint save latency in seconds",
 			nil,
 			nil,
 		),
@@ -173,9 +194,101 @@ func NewCollector(m Metric) *Collector {
 			nil,
 		),
 		eventLagDuration: prometheus.NewDesc(
-			prometheus.BuildFQName(namespace, "", "event_lag_duration_seconds"),
-			"Duration since the last event was processed",
+			prometheus.BuildFQName(namespace, "", "event_lag_seconds"),
+			"Time since the last event was processed in seconds",
 			nil,
+			nil,
+		),
+		listenerLatency: prometheus.NewDesc(
+			prometheus.BuildFQName(namespace, "", "listener_latency_seconds"),
+			"Listener function execution latency in seconds",
+			nil,
+			nil,
+		),
+		timeSinceLastCheckpoint: prometheus.NewDesc(
+			prometheus.BuildFQName(namespace, "", "time_since_last_checkpoint_seconds"),
+			"Time since last checkpoint was saved in seconds",
+			nil,
+			nil,
+		),
+		listenerErrorTotal: prometheus.NewDesc(
+			prometheus.BuildFQName(namespace, "", "listener_error_total"),
+			"Total number of listener function errors",
+			nil,
+			nil,
+		),
+		partitionRebalanceTotal: prometheus.NewDesc(
+			prometheus.BuildFQName(namespace, "", "partition_rebalance_total"),
+			"Total number of partition rebalance operations",
+			nil,
+			nil,
+		),
+
+		oplogSize: prometheus.NewDesc(
+			prometheus.BuildFQName(namespace, "mongodb", "oplog_size_bytes"),
+			"MongoDB oplog size in bytes",
+			nil,
+			nil,
+		),
+		oplogUsedSize: prometheus.NewDesc(
+			prometheus.BuildFQName(namespace, "mongodb", "oplog_used_bytes"),
+			"MongoDB oplog used size in bytes",
+			nil,
+			nil,
+		),
+		oplogUsedPercent: prometheus.NewDesc(
+			prometheus.BuildFQName(namespace, "mongodb", "oplog_used_percent"),
+			"MongoDB oplog used percentage",
+			nil,
+			nil,
+		),
+		oplogTimeDiff: prometheus.NewDesc(
+			prometheus.BuildFQName(namespace, "mongodb", "oplog_window_seconds"),
+			"MongoDB oplog time window in seconds",
+			nil,
+			nil,
+		),
+		replicationLag: prometheus.NewDesc(
+			prometheus.BuildFQName(namespace, "mongodb", "replication_lag_seconds"),
+			"MongoDB replication lag in seconds",
+			nil,
+			nil,
+		),
+		activeConnections: prometheus.NewDesc(
+			prometheus.BuildFQName(namespace, "mongodb", "connections_active"),
+			"MongoDB active connections",
+			nil,
+			nil,
+		),
+		availableConnections: prometheus.NewDesc(
+			prometheus.BuildFQName(namespace, "mongodb", "connections_available"),
+			"MongoDB available connections",
+			nil,
+			nil,
+		),
+
+		shardOplogSize: prometheus.NewDesc(
+			prometheus.BuildFQName(namespace, "mongodb_shard", "oplog_size_bytes"),
+			"MongoDB shard oplog size in bytes",
+			[]string{"shard"},
+			nil,
+		),
+		shardOplogUsedSize: prometheus.NewDesc(
+			prometheus.BuildFQName(namespace, "mongodb_shard", "oplog_used_bytes"),
+			"MongoDB shard oplog used size in bytes",
+			[]string{"shard"},
+			nil,
+		),
+		shardOplogUsedPercent: prometheus.NewDesc(
+			prometheus.BuildFQName(namespace, "mongodb_shard", "oplog_used_percent"),
+			"MongoDB shard oplog used percentage",
+			[]string{"shard"},
+			nil,
+		),
+		shardReplicationLag: prometheus.NewDesc(
+			prometheus.BuildFQName(namespace, "mongodb_shard", "replication_lag_seconds"),
+			"MongoDB shard replication lag in seconds",
+			[]string{"shard"},
 			nil,
 		),
 
@@ -329,6 +442,125 @@ func (c *Collector) Collect(ch chan<- prometheus.Metric) {
 			prometheus.GaugeValue,
 			eventLag,
 		)
+	}
+
+	// Listener latency (convert nanoseconds to seconds)
+	listenerLatencyNs := c.metric.GetListenerLatency()
+	ch <- prometheus.MustNewConstMetric(
+		c.listenerLatency,
+		prometheus.GaugeValue,
+		float64(listenerLatencyNs)/1e9,
+	)
+
+	// Time since last checkpoint
+	lastCheckpointTime := c.metric.GetLastCheckpointTime()
+	var timeSinceCheckpoint float64
+	if lastCheckpointTime > 0 {
+		timeSinceCheckpoint = time.Since(time.Unix(lastCheckpointTime, 0)).Seconds()
+	} else {
+		// If no checkpoint has been saved yet, report -1 to indicate "never"
+		timeSinceCheckpoint = -1
+	}
+	ch <- prometheus.MustNewConstMetric(
+		c.timeSinceLastCheckpoint,
+		prometheus.GaugeValue,
+		timeSinceCheckpoint,
+	)
+
+	// Listener errors
+	ch <- prometheus.MustNewConstMetric(
+		c.listenerErrorTotal,
+		prometheus.CounterValue,
+		float64(c.metric.GetListenerErrorTotal()),
+	)
+
+	// Partition rebalance
+	ch <- prometheus.MustNewConstMetric(
+		c.partitionRebalanceTotal,
+		prometheus.CounterValue,
+		float64(c.metric.GetPartitionRebalanceTotal()),
+	)
+
+	mongoMetrics := c.metric.GetMongoDBMetrics()
+	if mongoMetrics != nil {
+		ch <- prometheus.MustNewConstMetric(
+			c.oplogSize,
+			prometheus.GaugeValue,
+			float64(mongoMetrics.OplogSize),
+		)
+
+		ch <- prometheus.MustNewConstMetric(
+			c.oplogUsedSize,
+			prometheus.GaugeValue,
+			float64(mongoMetrics.OplogUsedSize),
+		)
+
+		ch <- prometheus.MustNewConstMetric(
+			c.oplogUsedPercent,
+			prometheus.GaugeValue,
+			mongoMetrics.OplogUsedPercent,
+		)
+
+		ch <- prometheus.MustNewConstMetric(
+			c.oplogTimeDiff,
+			prometheus.GaugeValue,
+			float64(mongoMetrics.OplogTimeDiff),
+		)
+
+		ch <- prometheus.MustNewConstMetric(
+			c.replicationLag,
+			prometheus.GaugeValue,
+			float64(mongoMetrics.ReplicationLag),
+		)
+
+		ch <- prometheus.MustNewConstMetric(
+			c.activeConnections,
+			prometheus.GaugeValue,
+			float64(mongoMetrics.ActiveConnections),
+		)
+
+		ch <- prometheus.MustNewConstMetric(
+			c.availableConnections,
+			prometheus.GaugeValue,
+			float64(mongoMetrics.AvailableConnections),
+		)
+	}
+
+	if holder, ok := c.metric.(ShardMetricsHolder); ok {
+		shardMetrics := holder.GetShardMetrics()
+		for _, sm := range shardMetrics {
+			if sm.Metrics == nil {
+				continue
+			}
+
+			ch <- prometheus.MustNewConstMetric(
+				c.shardOplogSize,
+				prometheus.GaugeValue,
+				float64(sm.Metrics.OplogSize),
+				sm.ShardName,
+			)
+
+			ch <- prometheus.MustNewConstMetric(
+				c.shardOplogUsedSize,
+				prometheus.GaugeValue,
+				float64(sm.Metrics.OplogUsedSize),
+				sm.ShardName,
+			)
+
+			ch <- prometheus.MustNewConstMetric(
+				c.shardOplogUsedPercent,
+				prometheus.GaugeValue,
+				sm.Metrics.OplogUsedPercent,
+				sm.ShardName,
+			)
+
+			ch <- prometheus.MustNewConstMetric(
+				c.shardReplicationLag,
+				prometheus.GaugeValue,
+				float64(sm.Metrics.ReplicationLag),
+				sm.ShardName,
+			)
+		}
 	}
 
 	ch <- prometheus.MustNewConstMetric(

@@ -1,6 +1,7 @@
 package metric
 
 import (
+	"sync"
 	"sync/atomic"
 	"time"
 )
@@ -32,6 +33,13 @@ type Metric interface {
 
 	SetWorkerHealthy(isHealthy bool)
 	SetLastEventTime(t time.Time)
+	SetListenerLatency(latencyNs int64)
+	SetLastCheckpointTime(t time.Time)
+	IncListenerErrorTotal()
+	IncPartitionRebalanceTotal()
+
+	SetMongoDBMetrics(metrics *MongoDBMetrics)
+	SetShardMetrics(shardMetrics []*ShardMetrics)
 
 	GetInsertTotal() int64
 	GetUpdateTotal() int64
@@ -53,6 +61,12 @@ type Metric interface {
 	GetChangeStreamRestartTotal() int64
 	GetWorkerHealthy() bool
 	GetLastEventTime() int64
+	GetListenerLatency() int64
+	GetLastCheckpointTime() int64
+	GetListenerErrorTotal() int64
+	GetPartitionRebalanceTotal() int64
+	GetMongoDBMetrics() *MongoDBMetrics
+	GetShardMetrics() []*ShardMetrics
 }
 
 type metric struct {
@@ -85,6 +99,17 @@ type metric struct {
 
 	workerHealthy int64
 	lastEventTime int64
+
+	listenerLatency         int64
+	lastCheckpointTime      int64
+	listenerErrorTotal      int64
+	partitionRebalanceTotal int64
+
+	mongoDBMetrics   *MongoDBMetrics
+	mongoDBMetricsMu sync.RWMutex
+
+	shardMetrics   []*ShardMetrics
+	shardMetricsMu sync.RWMutex
 }
 
 func NewMetric(database, collection string) Metric {
@@ -262,4 +287,60 @@ func (m *metric) GetWorkerHealthy() bool {
 
 func (m *metric) GetLastEventTime() int64 {
 	return atomic.LoadInt64(&m.lastEventTime)
+}
+
+func (m *metric) SetListenerLatency(latencyNs int64) {
+	atomic.StoreInt64(&m.listenerLatency, latencyNs)
+}
+
+func (m *metric) GetListenerLatency() int64 {
+	return atomic.LoadInt64(&m.listenerLatency)
+}
+
+func (m *metric) SetLastCheckpointTime(t time.Time) {
+	atomic.StoreInt64(&m.lastCheckpointTime, t.Unix())
+}
+
+func (m *metric) GetLastCheckpointTime() int64 {
+	return atomic.LoadInt64(&m.lastCheckpointTime)
+}
+
+func (m *metric) IncListenerErrorTotal() {
+	atomic.AddInt64(&m.listenerErrorTotal, 1)
+}
+
+func (m *metric) GetListenerErrorTotal() int64 {
+	return atomic.LoadInt64(&m.listenerErrorTotal)
+}
+
+func (m *metric) IncPartitionRebalanceTotal() {
+	atomic.AddInt64(&m.partitionRebalanceTotal, 1)
+}
+
+func (m *metric) GetPartitionRebalanceTotal() int64 {
+	return atomic.LoadInt64(&m.partitionRebalanceTotal)
+}
+
+func (m *metric) SetMongoDBMetrics(metrics *MongoDBMetrics) {
+	m.mongoDBMetricsMu.Lock()
+	defer m.mongoDBMetricsMu.Unlock()
+	m.mongoDBMetrics = metrics
+}
+
+func (m *metric) GetMongoDBMetrics() *MongoDBMetrics {
+	m.mongoDBMetricsMu.RLock()
+	defer m.mongoDBMetricsMu.RUnlock()
+	return m.mongoDBMetrics
+}
+
+func (m *metric) SetShardMetrics(shardMetrics []*ShardMetrics) {
+	m.shardMetricsMu.Lock()
+	defer m.shardMetricsMu.Unlock()
+	m.shardMetrics = shardMetrics
+}
+
+func (m *metric) GetShardMetrics() []*ShardMetrics {
+	m.shardMetricsMu.RLock()
+	defer m.shardMetricsMu.RUnlock()
+	return m.shardMetrics
 }

@@ -18,6 +18,7 @@ import (
 	"github.com/Trendyol/go-mongo-cdc/mongo/connection"
 	"github.com/Trendyol/go-mongo-cdc/stream"
 	"github.com/go-playground/errors"
+	"go.mongodb.org/mongo-driver/bson"
 	"go.uber.org/zap"
 )
 
@@ -27,13 +28,17 @@ type Connector interface {
 }
 
 type connector struct {
-	stream             stream.PartitionStream
-	prometheusRegistry metric.Registry
-	mongoClient        connection.Client
-	logger             *zap.Logger
-	cancelCh           chan os.Signal
-	workerID           string
-	metricsPort        int
+	stream                  stream.PartitionStream
+	prometheusRegistry      metric.Registry
+	mongoClient             connection.Client
+	mongoMetricsCollector   metric.MongoDBMetricsCollector
+	shardedMetricsCollector metric.ShardedMetricsCollector
+	metricInstance          metric.Metric
+	logger                  *zap.Logger
+	cancelCh                chan os.Signal
+	workerID                string
+	isShardedCluster        bool
+	cfg                     config.Config
 
 	once   sync.Once
 	closed bool
@@ -85,19 +90,31 @@ func NewConnector(cfg config.Config, listenerFunc stream.ListenerFunc) (Connecto
 
 	prometheusRegistry := metric.NewRegistry(m)
 
+	mongoMetricsCollector := metric.NewMongoDBMetricsCollector()
+	shardedMetricsCollector := metric.NewShardedMetricsCollector(cfg.Metric.EnableShardMetricsMapping)
+
+	isSharded := detectShardedCluster(mongoClient)
+
 	return &connector{
-		mongoClient:        mongoClient,
-		stream:             partitionStream,
-		prometheusRegistry: prometheusRegistry,
-		logger:             zapLogger,
-		workerID:           workerID,
-		metricsPort:        cfg.Metric.Port,
-		cancelCh:           make(chan os.Signal, 1),
+		mongoClient:             mongoClient,
+		stream:                  partitionStream,
+		prometheusRegistry:      prometheusRegistry,
+		mongoMetricsCollector:   mongoMetricsCollector,
+		shardedMetricsCollector: shardedMetricsCollector,
+		metricInstance:          m,
+		logger:                  zapLogger,
+		workerID:                workerID,
+		isShardedCluster:        isSharded,
+		cancelCh:                make(chan os.Signal, 1),
+		cfg:                     cfg,
 	}, nil
 }
 
 func (c *connector) Start(ctx context.Context) {
 	c.logger.Info(fmt.Sprintf("Starting MongoDB change stream connector - workerId: %s", c.workerID))
+
+	ctx, cancel := context.WithCancel(ctx)
+	defer cancel()
 
 	g, gCtx := errgroup.WithContext(ctx)
 
@@ -110,10 +127,16 @@ func (c *connector) Start(ctx context.Context) {
 	})
 
 	g.Go(func() error {
-		if err := c.prometheusRegistry.StartMetricsServer(gCtx, c.metricsPort); err != nil {
-			c.logger.Warn(fmt.Sprintf("Metrics server could not start (port %d may be in use): %v - continuing without metrics", c.metricsPort, err))
+		if err := c.prometheusRegistry.StartMetricsServer(gCtx, c.cfg.Metric.Port); err != nil {
+			c.logger.Warn(fmt.Sprintf("Metrics server could not start (port %d may be in use): %v - continuing without metrics", c.cfg.Metric.Port, err))
 			<-gCtx.Done()
 		}
+		return nil
+	})
+
+	g.Go(func() error {
+		c.collectMongoDBMetricsPeriodically(gCtx)
+		c.logger.Debug("Metrics collection stopped")
 		return nil
 	})
 
@@ -121,8 +144,9 @@ func (c *connector) Start(ctx context.Context) {
 		signal.Notify(c.cancelCh, syscall.SIGTERM, syscall.SIGINT, syscall.SIGABRT, syscall.SIGQUIT)
 		select {
 		case <-c.cancelCh:
-			c.logger.Info("Shutdown signal received")
-			return nil
+			c.logger.Info("Shutdown signal received, cancelling context...")
+			cancel()
+			return context.Canceled
 		case <-gCtx.Done():
 			c.logger.Info(fmt.Sprintf("Context cancelled: %v", gCtx.Err()))
 			return gCtx.Err()
@@ -173,4 +197,84 @@ func (c *connector) Close() {
 func generateWorkerID() string {
 	hostname, _ := os.Hostname()
 	return fmt.Sprintf("%s-%d-%d", hostname, os.Getpid(), time.Now().UnixNano())
+}
+
+func (c *connector) collectMongoDBMetricsPeriodically(ctx context.Context) {
+	ticker := time.NewTicker(c.cfg.Metric.CollectionInterval)
+	defer ticker.Stop()
+
+	collectMetrics := func() {
+		select {
+		case <-ctx.Done():
+			return
+		default:
+		}
+
+		metricsCtx, cancel := context.WithTimeout(context.Background(), 5*time.Second)
+		defer cancel()
+
+		client, ok := c.mongoClient.(*connection.MongoClient)
+		if !ok {
+			return
+		}
+
+		if c.isShardedCluster {
+			c.logger.Debug("Collecting shard metrics...")
+			shardMetrics, err := c.shardedMetricsCollector.CollectShardedMetrics(metricsCtx, client.GetClient())
+			if err != nil {
+				c.logger.Debug(fmt.Sprintf("Failed to collect shard metrics: %v", err))
+			} else {
+				c.metricInstance.SetShardMetrics(shardMetrics)
+				c.logger.Debug(fmt.Sprintf("Shard metrics collected - shards: %d", len(shardMetrics)))
+			}
+		} else {
+			mongoMetrics, err := c.mongoMetricsCollector.CollectMongoDBMetrics(metricsCtx, client.GetClient())
+			if err != nil {
+				c.logger.Debug(fmt.Sprintf("Failed to collect MongoDB metrics: %v", err))
+				return
+			}
+
+			c.metricInstance.SetMongoDBMetrics(mongoMetrics)
+
+			// Log metrics status
+			if mongoMetrics.OplogSize > 0 {
+				c.logger.Debug(fmt.Sprintf("MongoDB metrics collected - OplogUsed: %.2f%%, ReplicationLag: %ds",
+					mongoMetrics.OplogUsedPercent, mongoMetrics.ReplicationLag))
+			} else {
+				c.logger.Debug("MongoDB metrics collected - Oplog/Replication metrics unavailable (expected for mongos/standalone)")
+			}
+		}
+	}
+
+	collectMetrics()
+
+	for {
+		select {
+		case <-ctx.Done():
+			c.logger.Debug("Metrics collection goroutine stopping...")
+			return
+		case <-ticker.C:
+			collectMetrics()
+		}
+	}
+}
+
+func detectShardedCluster(client connection.Client) bool {
+	ctx, cancel := context.WithTimeout(context.Background(), 2*time.Second)
+	defer cancel()
+
+	db := client.Database("admin")
+	var result bson.M
+	err := db.RunCommand(ctx, bson.D{{Key: "isMaster", Value: 1}}).Decode(&result)
+	if err != nil {
+		return false
+	}
+
+	if msg, ok := result["msg"]; ok {
+		if msgStr, ok := msg.(string); ok && msgStr == "isdbgrid" {
+			return true
+		}
+	}
+
+	return false
 }

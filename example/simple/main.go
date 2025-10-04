@@ -53,12 +53,13 @@ func main() {
 			},
 		},
 		Metric: config.MetricConfig{
-			Port: 8080,
+			Port:                      8080,
+			EnableShardMetricsMapping: true, // Enable for local development with docker-compose
 		},
 		Checkpoint: config.CheckpointConfig{
 			Collection:            "cdc_checkpoints",
 			TokenSaveInterval:     10 * time.Second,
-			ChangeStreamBatchSize: 100,
+			ChangeStreamBatchSize: 1,
 			BootstrapSaveCount:    1000,
 			BootstrapSaveInterval: 5 * time.Second,
 		},

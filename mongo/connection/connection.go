@@ -2,8 +2,9 @@ package connection
 
 import (
 	"context"
-	"github.com/Trendyol/go-mongo-cdc/config"
 	"time"
+
+	"github.com/Trendyol/go-mongo-cdc/config"
 
 	"go.mongodb.org/mongo-driver/mongo"
 	"go.mongodb.org/mongo-driver/mongo/options"
@@ -14,6 +15,26 @@ type Client interface {
 	Database(name string) Database
 	Close(ctx context.Context) error
 	Ping(ctx context.Context) error
+}
+
+type MongoClient struct {
+	client *mongo.Client
+}
+
+func (m *MongoClient) GetClient() *mongo.Client {
+	return m.client
+}
+
+func (m *MongoClient) Database(name string) Database {
+	return &mongoDatabaseImpl{db: m.client.Database(name)}
+}
+
+func (m *MongoClient) Close(ctx context.Context) error {
+	return m.client.Disconnect(ctx)
+}
+
+func (m *MongoClient) Ping(ctx context.Context) error {
+	return m.client.Ping(ctx, readpref.Primary())
 }
 
 type Database interface {
@@ -169,7 +190,7 @@ func NewMongoClient(cfg config.MongoDB) (Client, error) {
 		return nil, err
 	}
 
-	return &mongoClientImpl{client: client}, nil
+	return &MongoClient{client: client}, nil
 }
 
 func (c *mongoClientImpl) Database(name string) Database {
