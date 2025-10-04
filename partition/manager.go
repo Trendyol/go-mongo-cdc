@@ -43,6 +43,7 @@ type manager struct {
 	workersCol    connection.Collection
 	partitionsCol connection.Collection
 	config        config.PartitionConfig
+	database      string
 
 	mu                 sync.RWMutex
 	assignedPartitions []int
@@ -56,10 +57,11 @@ type manager struct {
 	onPartitionsChanged func(newPartitions []int)
 }
 
-func NewManager(workerID string, client connection.Client, cfg config.PartitionConfig) Manager {
+func NewManager(workerID string, client connection.Client, database string, cfg config.PartitionConfig) Manager {
 	return &manager{
 		workerID:           workerID,
 		client:             client,
+		database:           database,
 		config:             cfg,
 		stopCh:             make(chan struct{}),
 		assignedPartitions: make([]int, 0),
@@ -67,7 +69,7 @@ func NewManager(workerID string, client connection.Client, cfg config.PartitionC
 }
 
 func (m *manager) Initialize(ctx context.Context) error {
-	db := m.client.Database(m.config.PartitionDatabase)
+	db := m.client.Database(m.database)
 	m.workersCol = db.Collection(m.config.WorkersCollection)
 	m.partitionsCol = db.Collection(m.config.PartitionsCollection)
 
@@ -759,7 +761,7 @@ func (m *manager) ReleasePartitions(ctx context.Context) error {
 }
 
 func (m *manager) getServerTime(ctx context.Context) (time.Time, error) {
-	db := m.client.Database(m.config.PartitionDatabase)
+	db := m.client.Database(m.database)
 	result := db.RunCommand(ctx, bson.D{{Key: "serverStatus", Value: 1}})
 
 	var serverStatus struct {

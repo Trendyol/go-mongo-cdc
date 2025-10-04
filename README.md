@@ -120,7 +120,6 @@ $ go get github.com/Trendyol/go-mongo-cdc
 
 | Variable                          | Type          | Required | Default         | Description                                  |
 |-----------------------------------|---------------|----------|-----------------|----------------------------------------------|
-| `checkpoint.collection`           | string        | no       | cdc_checkpoints | Checkpoint collection name                   |
 | `checkpoint.tokenSaveInterval`    | time.Duration | no       | 10s             | Token save interval                          |
 | `checkpoint.tokenSaveTimeout`     | time.Duration | no       | 10s             | Token save timeout                           |
 | `checkpoint.changeStreamBatchSize`| int           | no       | 100             | Change stream batch size                     |
@@ -131,13 +130,14 @@ $ go get github.com/Trendyol/go-mongo-cdc
 
 ### Partition Configuration
 
-| Variable                              | Type          | Required | Default        | Description                       |
-|---------------------------------------|---------------|----------|----------------|-----------------------------------|
-| `partition.heartbeatInterval`         | time.Duration | no       | 10s            | Worker heartbeat interval         |
-| `partition.workerTimeout`             | time.Duration | no       | 90s            | Worker timeout duration           |
-| `partition.partitionDatabase`         | string        | no       | cdc_partitions | Partition database                |
-| `partition.rebalanceCheckInterval`    | time.Duration | no       | 15s            | Partition rebalance check interval|
-| `partition.totalPartition`            | int           | no       | 15             | Total number of partitions        |
+| Variable                              | Type          | Required | Default              | Description                       |
+|---------------------------------------|---------------|----------|----------------------|-----------------------------------|
+| `partition.heartbeatInterval`         | time.Duration | no       | 10s                  | Worker heartbeat interval         |
+| `partition.workerTimeout`             | time.Duration | no       | 90s                  | Worker timeout duration           |
+| `partition.workersCollection`         | string        | no       | workers              | Workers collection name           |
+| `partition.partitionsCollection`      | string        | no       | partition_assignments| Partition assignments collection  |
+| `partition.rebalanceCheckInterval`    | time.Duration | no       | 15s                  | Partition rebalance check interval|
+| `partition.totalPartition`            | int           | no       | 15                   | Total number of partitions        |
 
 ### Logger Configuration
 
@@ -171,7 +171,6 @@ metric:
   collectionInterval: 30s
 
 checkpoint:
-  collection: "cdc_checkpoints"
   tokenSaveInterval: 10s
   changeStreamBatchSize: 100
   bootstrapSaveCount: 1000
@@ -180,7 +179,8 @@ checkpoint:
 partition:
   heartbeatInterval: 10s
   workerTimeout: 90s
-  partitionDatabase: "cdc_partitions"
+  workersCollection: "workers"
+  partitionsCollection: "partition_assignments"
   rebalanceCheckInterval: 15s
   totalPartition: 15
 

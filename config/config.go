@@ -60,7 +60,6 @@ type LoggerConfig struct {
 }
 
 type CheckpointConfig struct {
-	Collection            string        `json:"collection" yaml:"collection"`
 	TokenSaveTimeout      time.Duration `json:"saveTimeout" yaml:"saveTimeout"`
 	TokenSaveInterval     time.Duration `json:"tokenSaveInterval" yaml:"tokenSaveInterval"`
 	ChangeStreamBatchSize int           `json:"changeStreamBatchSize" yaml:"changeStreamBatchSize"`
@@ -73,7 +72,6 @@ type CheckpointConfig struct {
 type PartitionConfig struct {
 	HeartbeatInterval      time.Duration `json:"heartbeatInterval" yaml:"heartbeatInterval"`
 	WorkerTimeout          time.Duration `json:"workerTimeout" yaml:"workerTimeout"`
-	PartitionDatabase      string        `json:"partitionDatabase" yaml:"partitionDatabase"`
 	WorkersCollection      string        `json:"workersCollection" yaml:"workersCollection"`
 	PartitionsCollection   string        `json:"partitionsCollection" yaml:"partitionsCollection"`
 	RebalanceCheckInterval time.Duration `json:"rebalanceCheckInterval" yaml:"rebalanceCheckInterval"`
@@ -114,9 +112,6 @@ func (c *Config) SetDefault() {
 	if c.Logger.LogLevel == "" {
 		c.Logger.LogLevel = logger.INFO
 	}
-	if c.Checkpoint.Collection == "" {
-		c.Checkpoint.Collection = "cdc_checkpoints"
-	}
 	if c.Checkpoint.TokenSaveInterval == 0 {
 		c.Checkpoint.TokenSaveInterval = 10 * time.Second
 	}
@@ -145,9 +140,6 @@ func (c *Config) SetDefault() {
 	}
 	if c.Partition.WorkerTimeout == 0 {
 		c.Partition.WorkerTimeout = 90 * time.Second
-	}
-	if c.Partition.PartitionDatabase == "" {
-		c.Partition.PartitionDatabase = "cdc_partitions"
 	}
 	if c.Partition.WorkersCollection == "" {
 		c.Partition.WorkersCollection = "workers"

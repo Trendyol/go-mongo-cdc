@@ -6,7 +6,6 @@ import (
 
 	cdc "github.com/Trendyol/go-mongo-cdc"
 
-	"fmt"
 	"log"
 	"time"
 
@@ -39,7 +38,6 @@ func main() {
 			EnableShardMetricsMapping: true, // Enable for local development with docker-compose
 		},
 		Checkpoint: config.CheckpointConfig{
-			Collection:            "cdc_checkpoints",
 			TokenSaveInterval:     10 * time.Second,
 			ChangeStreamBatchSize: 1,
 			BootstrapSaveCount:    1000,
@@ -48,7 +46,6 @@ func main() {
 		Partition: config.PartitionConfig{
 			HeartbeatInterval:      10 * time.Second,
 			WorkerTimeout:          90 * time.Second,
-			PartitionDatabase:      "exampleDB",
 			RebalanceCheckInterval: 15 * time.Second,
 			TotalPartition:         30,
 		},
@@ -69,14 +66,14 @@ func ProcessChangeEvent(lc *stream.ListenerContext) error {
 	switch lc.Message.OperationType {
 	case message.OperationInsert, message.OperationUpdate, message.OperationReplace:
 		if lc.Message.FullDocument != nil {
-			logger.Log.Info(fmt.Sprintf("Document changed - operation: %s, document: %v, partitionId: %d", string(lc.Message.OperationType), lc.Message.DocumentID, lc.PartitionID))
+			logger.Log.Info("Document changed - operation: %s, document: %v, partitionId: %d", string(lc.Message.OperationType), lc.Message.DocumentID, lc.PartitionID)
 		}
 	case message.OperationDelete:
-		logger.Log.Info(fmt.Sprintf("Document deleted - documentId: %v, partitionId: %d", lc.Message.DocumentID, lc.PartitionID))
+		logger.Log.Info("Document deleted - documentId: %v, partitionId: %d", lc.Message.DocumentID, lc.PartitionID)
 	}
 
 	if err := lc.Ack(); err != nil {
-		logger.Log.Error(fmt.Sprintf("Failed to acknowledge message: %v", err))
+		logger.Log.Error("Failed to acknowledge message: %v", err)
 		return err
 	}
 	return nil

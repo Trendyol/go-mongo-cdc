@@ -85,7 +85,7 @@ func NewPartitionStream(
 	database := client.Database(cfg.MongoDB.Connection.Database)
 	collection := database.Collection(cfg.MongoDB.Connection.Collection)
 
-	partitionManager := partition.NewManager(workerID, client, cfg.Partition)
+	partitionManager := partition.NewManager(workerID, client, cfg.MongoDB.Connection.Database, cfg.Partition)
 	checkpointManager := checkpoint.NewManager(client, cfg.MongoDB.Connection.Database, cfg.MongoDB.Connection.Collection)
 
 	return &partitionStream{
@@ -113,7 +113,7 @@ func (ps *partitionStream) Start(ctx context.Context) error {
 	case <-ps.ctx.Done():
 		logger.Log.Debug("Event processing cancelled during initial delay")
 		return ps.ctx.Err()
-	case <-time.After(30 * time.Second): //TODO: configden alınabilir
+	case <-time.After(30 * time.Second): //TODO: sistemin reliable olması icin 30 saniye bekleme suresi iyi daha az olmaması gerekir fakat bazı kullanıcılar 30 dan yuksek vermek isteyebilir bu sebeple configurable yapılabilir
 		logger.Log.Debug("Initial delay completed before acquiring partitions")
 	}
 
@@ -835,7 +835,7 @@ func (ps *partitionStream) saveLatestResumeTokenOnInterruption(worker *streamWor
 }
 
 func (ps *partitionStream) verifyPartitionOwnership(ctx context.Context, partitionID int) bool {
-	partitionsCol := ps.client.Database(ps.cfg.Partition.PartitionDatabase).Collection("partition_assignments")
+	partitionsCol := ps.client.Database(ps.cfg.MongoDB.Connection.Database).Collection("partition_assignments")
 
 	filter := bson.M{"_id": partitionID}
 	var assignment bson.M
