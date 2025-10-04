@@ -336,6 +336,6 @@ func (c *Collector) Collect(ch chan<- prometheus.Metric) {
 		prometheus.GaugeValue,
 		1,
 		"1.0.0",
-		"go1.24",
+		"go1.25",
 	)
 }

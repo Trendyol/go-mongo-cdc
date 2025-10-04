@@ -3,6 +3,8 @@ package metric
 import (
 	"context"
 	"fmt"
+	"log"
+	"net"
 	"net/http"
 	"time"
 
@@ -32,6 +34,15 @@ func NewRegistry(m Metric) Registry {
 }
 
 func (r *registry) StartMetricsServer(ctx context.Context, port int) error {
+	listener, actualPort, err := r.createListener(port)
+	if err != nil {
+		return fmt.Errorf("failed to create listener: %w", err)
+	}
+
+	if actualPort != port {
+		log.Printf("Warning: Requested port %d was in use, using port %d instead\n", port, actualPort)
+	}
+
 	mux := http.NewServeMux()
 	mux.Handle("/metrics", promhttp.HandlerFor(r.registerer, promhttp.HandlerOpts{
 		Registry: r.registerer,
@@ -48,7 +59,6 @@ func (r *registry) StartMetricsServer(ctx context.Context, port int) error {
 	})
 
 	r.server = &http.Server{
-		Addr:              fmt.Sprintf(":%d", port),
 		Handler:           mux,
 		ReadTimeout:       10 * time.Second,
 		WriteTimeout:      10 * time.Second,
@@ -58,7 +68,8 @@ func (r *registry) StartMetricsServer(ctx context.Context, port int) error {
 
 	errCh := make(chan error, 1)
 	go func() {
-		if err := r.server.ListenAndServe(); err != nil && err != http.ErrServerClosed {
+		log.Printf("Metrics server starting on port %d\n", actualPort)
+		if err := r.server.Serve(listener); err != nil && err != http.ErrServerClosed {
 			errCh <- err
 		}
 	}()
@@ -68,7 +79,7 @@ func (r *registry) StartMetricsServer(ctx context.Context, port int) error {
 		shutdownCtx, cancel := context.WithTimeout(context.Background(), 5*time.Second)
 		defer cancel()
 		if err := r.server.Shutdown(shutdownCtx); err != nil {
-			fmt.Printf("Error shutting down metrics server: %v\n", err)
+			log.Printf("Error shutting down metrics server: %v\n", err)
 		}
 	}()
 
@@ -78,4 +89,26 @@ func (r *registry) StartMetricsServer(ctx context.Context, port int) error {
 	case <-time.After(100 * time.Millisecond):
 		return nil
 	}
+}
+
+func (r *registry) createListener(preferredPort int) (net.Listener, int, error) {
+	listener, err := net.Listen("tcp", fmt.Sprintf(":%d", preferredPort))
+	if err == nil {
+		return listener, preferredPort, nil
+	}
+
+	for port := preferredPort + 1; port <= preferredPort+100; port++ {
+		listener, err = net.Listen("tcp", fmt.Sprintf(":%d", port))
+		if err == nil {
+			return listener, port, nil
+		}
+	}
+
+	listener, err = net.Listen("tcp", ":0")
+	if err != nil {
+		return nil, 0, err
+	}
+
+	actualPort := listener.Addr().(*net.TCPAddr).Port
+	return listener, actualPort, nil
 }

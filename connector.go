@@ -33,6 +33,7 @@ type connector struct {
 	logger             *zap.Logger
 	cancelCh           chan os.Signal
 	workerID           string
+	metricsPort        int
 
 	once   sync.Once
 	closed bool
@@ -90,6 +91,7 @@ func NewConnector(cfg config.Config, listenerFunc stream.ListenerFunc) (Connecto
 		prometheusRegistry: prometheusRegistry,
 		logger:             zapLogger,
 		workerID:           workerID,
+		metricsPort:        cfg.Metric.Port,
 		cancelCh:           make(chan os.Signal, 1),
 	}, nil
 }
@@ -108,9 +110,9 @@ func (c *connector) Start(ctx context.Context) {
 	})
 
 	g.Go(func() error {
-		if err := c.prometheusRegistry.StartMetricsServer(gCtx, 8080); err != nil {
-			c.logger.Error(fmt.Sprintf("Failed to start metrics server: %v", err))
-			return err
+		if err := c.prometheusRegistry.StartMetricsServer(gCtx, c.metricsPort); err != nil {
+			c.logger.Warn(fmt.Sprintf("Metrics server could not start (port %d may be in use): %v - continuing without metrics", c.metricsPort, err))
+			<-gCtx.Done()
 		}
 		return nil
 	})
