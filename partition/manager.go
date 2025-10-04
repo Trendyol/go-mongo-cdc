@@ -68,9 +68,8 @@ func NewManager(workerID string, client connection.Client, cfg config.PartitionC
 
 func (m *manager) Initialize(ctx context.Context) error {
 	db := m.client.Database(m.config.PartitionDatabase)
-	//TODO: configden alınabilir
-	m.workersCol = db.Collection("workers")
-	m.partitionsCol = db.Collection("partition_assignments")
+	m.workersCol = db.Collection(m.config.WorkersCollection)
+	m.partitionsCol = db.Collection(m.config.PartitionsCollection)
 
 	if err := m.createIndexes(ctx); err != nil {
 		return fmt.Errorf("failed to create indexes: %w", err)

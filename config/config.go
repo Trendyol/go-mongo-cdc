@@ -3,13 +3,14 @@ package config
 import (
 	"encoding/json"
 	"fmt"
-	"github.com/Trendyol/go-mongo-cdc/logger"
 	"io"
 	"log/slog"
 	"os"
 	"path/filepath"
 	"strings"
 	"time"
+
+	"github.com/Trendyol/go-mongo-cdc/logger"
 
 	"gopkg.in/yaml.v2"
 )
@@ -73,6 +74,8 @@ type PartitionConfig struct {
 	HeartbeatInterval      time.Duration `json:"heartbeatInterval" yaml:"heartbeatInterval"`
 	WorkerTimeout          time.Duration `json:"workerTimeout" yaml:"workerTimeout"`
 	PartitionDatabase      string        `json:"partitionDatabase" yaml:"partitionDatabase"`
+	WorkersCollection      string        `json:"workersCollection" yaml:"workersCollection"`
+	PartitionsCollection   string        `json:"partitionsCollection" yaml:"partitionsCollection"`
 	RebalanceCheckInterval time.Duration `json:"rebalanceCheckInterval" yaml:"rebalanceCheckInterval"`
 	TotalPartition         int           `json:"totalPartition" yaml:"totalPartition"`
 }
@@ -145,6 +148,12 @@ func (c *Config) SetDefault() {
 	}
 	if c.Partition.PartitionDatabase == "" {
 		c.Partition.PartitionDatabase = "cdc_partitions"
+	}
+	if c.Partition.WorkersCollection == "" {
+		c.Partition.WorkersCollection = "workers"
+	}
+	if c.Partition.PartitionsCollection == "" {
+		c.Partition.PartitionsCollection = "partition_assignments"
 	}
 	if c.Partition.RebalanceCheckInterval == 0 {
 		c.Partition.RebalanceCheckInterval = 15 * time.Second
