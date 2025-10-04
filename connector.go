@@ -3,7 +3,6 @@ package cdc
 import (
 	"context"
 	"fmt"
-	"golang.org/x/sync/errgroup"
 	"os"
 	"os/signal"
 	"strings"
@@ -11,9 +10,11 @@ import (
 	"syscall"
 	"time"
 
+	"golang.org/x/sync/errgroup"
+
 	"github.com/Trendyol/go-mongo-cdc/config"
-	"github.com/Trendyol/go-mongo-cdc/internal/metric"
 	"github.com/Trendyol/go-mongo-cdc/logger"
+	"github.com/Trendyol/go-mongo-cdc/metric"
 	"github.com/Trendyol/go-mongo-cdc/mongo/connection"
 	"github.com/Trendyol/go-mongo-cdc/stream"
 	"github.com/go-playground/errors"
@@ -101,6 +102,14 @@ func (c *connector) Start(ctx context.Context) {
 	g.Go(func() error {
 		if err := c.stream.Start(gCtx); err != nil {
 			c.logger.Error(fmt.Sprintf("Failed to start partition stream: %v", err))
+			return err
+		}
+		return nil
+	})
+
+	g.Go(func() error {
+		if err := c.prometheusRegistry.StartMetricsServer(gCtx, 8080); err != nil {
+			c.logger.Error(fmt.Sprintf("Failed to start metrics server: %v", err))
 			return err
 		}
 		return nil

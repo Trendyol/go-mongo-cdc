@@ -14,7 +14,7 @@ import (
 	"github.com/Trendyol/go-mongo-cdc/checkpoint"
 	"github.com/Trendyol/go-mongo-cdc/config"
 	"github.com/Trendyol/go-mongo-cdc/internal/backoff"
-	"github.com/Trendyol/go-mongo-cdc/internal/metric"
+	"github.com/Trendyol/go-mongo-cdc/metric"
 	"github.com/Trendyol/go-mongo-cdc/mongo/connection"
 	"github.com/Trendyol/go-mongo-cdc/mongo/message"
 	"github.com/Trendyol/go-mongo-cdc/partition"
@@ -186,6 +186,7 @@ func (ps *partitionStream) reconcilePartitionAssignments(newPartitions []int) {
 			ps.logger.Debug(fmt.Sprintf("Stopping stream for partition %d", partitionID))
 			worker.cancel()
 			delete(ps.activeStreams, partitionID)
+			ps.metric.IncPartitionReleaseTotal()
 		}
 	}
 
@@ -200,12 +201,14 @@ func (ps *partitionStream) reconcilePartitionAssignments(newPartitions []int) {
 			worker.ctx, worker.cancel = context.WithCancel(ps.ctx)
 
 			ps.activeStreams[partitionID] = worker
+			ps.metric.IncPartitionAcquireTotal()
 
 			ps.wg.Add(1)
 			go ps.managePartitionWorkerLifecycle(worker)
 		}
 	}
 
+	ps.metric.SetActivePartitionCount(len(ps.activeStreams))
 	ps.logger.Debug(fmt.Sprintf("Active partitions updated - count: %d, partitions: %v", len(ps.activeStreams), newPartitions))
 }
 
@@ -236,6 +239,8 @@ func (ps *partitionStream) managePartitionWorkerLifecycle(worker *streamWorker) 
 			}
 
 			ps.logger.Error(fmt.Sprintf("Partition stream error, retrying - partitionId: %d, error: %v", worker.partitionID, err))
+			ps.metric.IncChangeStreamErrorTotal()
+			ps.metric.IncChangeStreamRestartTotal()
 
 			delay, _ := backoffStrategy.NextDelay()
 
@@ -263,7 +268,10 @@ func (ps *partitionStream) startOrResumePartitionStream(worker *streamWorker) er
 
 	if startInfo.shouldBootstrap {
 		ps.logger.Info(fmt.Sprintf("Starting bootstrap flow for partition %d", worker.partitionID))
-		return ps.executeFullBootstrapFlow(worker)
+		ps.metric.SetBootstrapStatus(true)
+		err := ps.executeFullBootstrapFlow(worker)
+		ps.metric.SetBootstrapStatus(false)
+		return err
 	}
 
 	ps.logger.Info(fmt.Sprintf("Starting change stream for partition %d", worker.partitionID))
@@ -644,6 +652,7 @@ func (ps *partitionStream) dispatchBootstrapDocumentToListener(worker *streamWor
 
 	state.processedCount++
 	state.lastProcessedID = document["_id"]
+	ps.metric.IncBootstrapDocumentTotal()
 
 	if ps.shouldSaveBootstrapProgress(worker, state) {
 		if !ps.verifyPartitionOwnership(worker.ctx, worker.partitionID) {
@@ -749,6 +758,7 @@ func (ps *partitionStream) startAndManageChangeStream(worker *streamWorker, resu
 			ps.logger.Warn("Resume token expired or invalid, clearing and starting from current time",
 				zap.Int("partitionId", worker.partitionID),
 				zap.Error(err))
+			ps.metric.IncResumeTokenExpiredTotal()
 
 			if clearErr := ps.checkpointManager.ClearResumeToken(worker.ctx, worker.partitionID); clearErr != nil {
 				ps.logger.Error("Failed to clear invalid resume token", zap.Error(clearErr))
@@ -1063,6 +1073,11 @@ func (ps *partitionStream) processEvent(worker *streamWorker, event message.Chan
 
 	ps.updateMetrics(msg.OperationType)
 
+	ps.metric.SetLastEventTime(time.Now())
+
+	cdcLatency := time.Since(msg.EventTime).Milliseconds()
+	ps.metric.SetCDCLatency(cdcLatency)
+
 	listenerCtx := &ListenerContext{
 		Message:     msg,
 		PartitionID: worker.partitionID,
@@ -1081,12 +1096,25 @@ func (ps *partitionStream) processEvent(worker *streamWorker, event message.Chan
 					worker.tokenMutex.Lock()
 					worker.ackedEventCount = 0
 					worker.tokenMutex.Unlock()
-					return ps.checkpointManager.SaveResumeToken(
+
+					saveStart := time.Now()
+					err := ps.checkpointManager.SaveResumeToken(
 						ps.ctx,
 						worker.partitionID,
 						resumeToken,
 						&event.ClusterTime,
 					)
+
+					saveLatency := time.Since(saveStart).Milliseconds()
+					ps.metric.SetCheckpointSaveLatency(saveLatency)
+
+					if err != nil {
+						ps.metric.IncCheckpointSaveErrorTotal()
+					} else {
+						ps.metric.IncCheckpointSaveTotal()
+					}
+
+					return err
 				}
 			}
 			return nil

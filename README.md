@@ -287,23 +287,137 @@ When run for the first time, the system:
 
 ## 📊 Monitoring and Metrics
 
-The system provides the following Prometheus metrics:
+The system provides comprehensive Prometheus metrics for monitoring and alerting:
 
-### Core Metrics
+### Operation Metrics
 
-- `go_mongo_cdc_insert_total`: Total number of INSERT operations
-- `go_mongo_cdc_update_total`: Total number of UPDATE operations
-- `go_mongo_cdc_delete_total`: Total number of DELETE operations
-- `go_mongo_cdc_process_latency_current`: Current processing latency
-- `go_mongo_cdc_cdc_latency_current`: Current CDC latency
-- `go_mongo_cdc_build_info`: Build information
+| Metric Name | Type | Description |
+|-------------|------|-------------|
+| `go_mongo_cdc_insert_total` | Counter | Total number of INSERT operations processed |
+| `go_mongo_cdc_update_total` | Counter | Total number of UPDATE operations processed |
+| `go_mongo_cdc_delete_total` | Counter | Total number of DELETE operations processed |
+| `go_mongo_cdc_replace_total` | Counter | Total number of REPLACE operations processed |
 
-### Metrics Endpoint
+### Latency Metrics
 
-The metrics endpoint runs at `:8080/metrics` by default.
+| Metric Name | Type | Description |
+|-------------|------|-------------|
+| `go_mongo_cdc_process_latency_ms_current` | Gauge | Current processing latency in milliseconds |
+| `go_mongo_cdc_cdc_latency_ms_current` | Gauge | Current CDC latency (time between event creation and processing) in milliseconds |
+
+### Checkpoint Metrics
+
+| Metric Name | Type | Description |
+|-------------|------|-------------|
+| `go_mongo_cdc_checkpoint_save_total` | Counter | Total number of successful checkpoint saves |
+| `go_mongo_cdc_checkpoint_save_error_total` | Counter | Total number of checkpoint save errors |
+| `go_mongo_cdc_checkpoint_save_latency_ms_current` | Gauge | Current checkpoint save latency in milliseconds |
+
+### Bootstrap Metrics
+
+| Metric Name | Type | Description |
+|-------------|------|-------------|
+| `go_mongo_cdc_bootstrap_document_total` | Counter | Total number of documents processed during bootstrap |
+| `go_mongo_cdc_bootstrap_progress_percent` | Gauge | Bootstrap progress percentage (0-100) |
+| `go_mongo_cdc_bootstrap_active` | Gauge | Bootstrap active status (1=active, 0=inactive) |
+
+### Partition Metrics
+
+| Metric Name | Type | Description |
+|-------------|------|-------------|
+| `go_mongo_cdc_active_partition_count` | Gauge | Number of currently active partitions assigned to this worker |
+| `go_mongo_cdc_partition_acquire_total` | Counter | Total number of partition acquisitions |
+| `go_mongo_cdc_partition_release_total` | Counter | Total number of partition releases |
+
+### Error & Recovery Metrics
+
+| Metric Name | Type | Description |
+|-------------|------|-------------|
+| `go_mongo_cdc_resume_token_expired_total` | Counter | Total number of expired resume tokens (automatic recovery triggered) |
+| `go_mongo_cdc_change_stream_error_total` | Counter | Total number of change stream errors |
+| `go_mongo_cdc_change_stream_restart_total` | Counter | Total number of change stream restarts |
+
+### Health Metrics
+
+| Metric Name | Type | Description |
+|-------------|------|-------------|
+| `go_mongo_cdc_worker_healthy` | Gauge | Worker health status (1=healthy, 0=unhealthy) |
+| `go_mongo_cdc_last_event_time_seconds` | Gauge | Unix timestamp of the last processed event |
+| `go_mongo_cdc_event_lag_duration_seconds` | Gauge | Duration in seconds since the last event was processed |
+
+### System Metrics
+
+| Metric Name | Type | Description |
+|-------------|------|-------------|
+| `go_mongo_cdc_build_info` | Gauge | Build information (labels: version, go_version) |
+
+### Metrics Endpoints
+
+The following HTTP endpoints are available:
+
+- **Metrics**: `:8080/metrics` - Prometheus metrics endpoint
+- **Health**: `:8080/health` - Health check endpoint (returns 200 OK)
+- **Ready**: `:8080/ready` - Readiness check endpoint (returns 200 OK)
 
 ```bash
 curl http://localhost:8080/metrics
+curl http://localhost:8080/health
+curl http://localhost:8080/ready
+```
+
+### Alerting Examples
+
+Example Prometheus alerting rules:
+
+```yaml
+groups:
+  - name: mongodb_cdc_alerts
+    interval: 30s
+    rules:
+      - alert: CDCHighLatency
+        expr: go_mongo_cdc_cdc_latency_ms_current > 5000
+        for: 5m
+        labels:
+          severity: warning
+        annotations:
+          summary: "CDC latency is high"
+          description: "CDC latency is {{ $value }}ms, which exceeds 5 seconds"
+      
+      - alert: CDCCheckpointErrors
+        expr: rate(go_mongo_cdc_checkpoint_save_error_total[5m]) > 0.1
+        for: 5m
+        labels:
+          severity: critical
+        annotations:
+          summary: "High checkpoint error rate"
+          description: "Checkpoint save error rate is {{ $value }} per second"
+      
+      - alert: CDCResumeTokenExpired
+        expr: increase(go_mongo_cdc_resume_token_expired_total[15m]) > 5
+        for: 5m
+        labels:
+          severity: warning
+        annotations:
+          summary: "Resume tokens expiring frequently"
+          description: "{{ $value }} resume tokens expired in the last 15 minutes"
+      
+      - alert: CDCNoRecentEvents
+        expr: time() - go_mongo_cdc_last_event_time_seconds > 600
+        for: 5m
+        labels:
+          severity: warning
+        annotations:
+          summary: "No recent CDC events"
+          description: "No events processed for {{ $value }} seconds"
+      
+      - alert: CDCWorkerUnhealthy
+        expr: go_mongo_cdc_worker_healthy == 0
+        for: 2m
+        labels:
+          severity: critical
+        annotations:
+          summary: "CDC worker is unhealthy"
+          description: "CDC worker health check is failing"
 ```
 
 ## 🐳 Docker Usage
