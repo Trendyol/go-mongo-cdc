@@ -53,7 +53,8 @@ func main() {
 			},
 		},
 		Metric: config.MetricConfig{
-			Port: 8080,
+			Port:                      8080,
+			EnableShardMetricsMapping: true, // Enable for local development with docker-compose
 		},
 		Checkpoint: config.CheckpointConfig{
 			Collection:            "cdc_checkpoints",

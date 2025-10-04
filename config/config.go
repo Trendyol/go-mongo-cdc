@@ -49,7 +49,8 @@ type Timeouts struct {
 }
 
 type MetricConfig struct {
-	Port int `json:"port" yaml:"port"`
+	Port                      int  `json:"port" yaml:"port"`
+	EnableShardMetricsMapping bool `json:"enableShardMetricsMapping" yaml:"enableShardMetricsMapping"`
 }
 
 type LoggerConfig struct {

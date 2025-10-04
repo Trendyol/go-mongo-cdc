@@ -1,34 +1,94 @@
-version: '3.8'
-
 services:
-  mongodb:
-    image: mongo:6.0
-    container_name: my-mongo
-    restart: always
+  # Config Server
+  config-server:
+    image: mongo:7.0.15
+    container_name: config-server
+    command: mongod --configsvr --replSet configReplSet --port 27019 --dbpath /data/db
+    volumes:
+      - config-server-data:/data/db
+    networks:
+      - mongo-network
+    ports:
+      - "27019:27019"
+    healthcheck:
+      test: ["CMD", "mongosh", "--eval", "'db.adminCommand(\"ping\")'", "--port", "27019"]
+      interval: 10s
+      timeout: 5s
+      retries: 5
+      start_period: 10s
+
+  # Shard 1 Replica Set
+  shard1-server:
+    image: mongo:7.0.15
+    container_name: shard1-server
+    command: mongod --shardsvr --replSet shard1ReplSet --port 27018 --dbpath /data/db
+    volumes:
+      - shard1-server-data:/data/db
+    networks:
+      - mongo-network
+    ports:
+      - "27018:27018"
+    healthcheck:
+      test: ["CMD", "mongosh", "--eval", "'db.adminCommand(\"ping\")'", "--port", "27018"]
+      interval: 10s
+      timeout: 5s
+      retries: 5
+      start_period: 10s
+
+  # Shard 2 Replica Set
+  shard2-server:
+    image: mongo:7.0.15
+    container_name: shard2-server
+    command: mongod --shardsvr --replSet shard2ReplSet --port 27018 --dbpath /data/db
+    volumes:
+      - shard2-server-data:/data/db
+    networks:
+      - mongo-network
+    ports:
+      - "27028:27018"
+    healthcheck:
+      test: ["CMD", "mongosh", "--eval", "'db.adminCommand(\"ping\")'", "--port", "27018"]
+      interval: 10s
+      timeout: 5s
+      retries: 5
+      start_period: 10s
+
+  # Mongos Router
+  mongos:
+    image: mongo:7.0.15
+    container_name: mongos
+    command: mongos --configdb configReplSet/config-server:27019 --port 27017 --bind_ip_all
+    networks:
+      - mongo-network
     ports:
       - "27017:27017"
-    volumes:
-      - mongo-data:/data/db
-    command: --replSet rs0 --bind_ip_all --noauth
-
-  mongodb-init:
-    image: mongo:6.0
     depends_on:
-      - mongodb
-    command: >
-      bash -c "
-        echo 'Waiting for MongoDB to start...' &&
-        sleep 15 &&
-        mongosh mongodb://mongodb:27017/admin --eval \"
-          rs.initiate({
-            _id: 'rs0',
-            members: [{
-              _id: 0,
-              host: 'localhost:27017'
-            }]
-          })
-        \"
-      "
+      config-server:
+        condition: service_healthy
+      shard1-server:
+        condition: service_healthy
+      shard2-server:
+        condition: service_healthy
+    restart: unless-stopped
+
+  # MongoDB setup initialization
+  mongo-setup:
+    image: mongo:7.0.15
+    container_name: mongo-setup
+    restart: on-failure
+    networks:
+      - mongo-network
+    depends_on:
+      - mongos
+    volumes:
+      - ./scripts:/scripts
+    entrypoint: [ "/scripts/setup.sh" ]
+
+networks:
+  mongo-network:
+    driver: bridge
 
 volumes:
-  mongo-data:
+  config-server-data:
+  shard1-server-data:
+  shard2-server-data:

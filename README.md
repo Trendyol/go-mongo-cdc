@@ -154,6 +154,7 @@ connector, err := cdc.NewConnectorWithConfigFile(
 | Field | Type | Description | Default |
 |-------|------|-------------|---------|
 | `Port` | int | Prometheus metrics port | 8080 |
+| `EnableShardMetricsMapping` | bool | Enable hostname-to-localhost port mapping for sharded clusters (local dev only) | false |
 
 ### Checkpoint Configuration
 
@@ -345,6 +346,18 @@ The system provides comprehensive Prometheus metrics for monitoring and alerting
 | `go_mongo_cdc_last_event_time_seconds` | Gauge | Unix timestamp of the last processed event |
 | `go_mongo_cdc_event_lag_duration_seconds` | Gauge | Duration in seconds since the last event was processed |
 
+### MongoDB Operational Metrics
+
+| Metric Name | Type | Description |
+|-------------|------|-------------|
+| `go_mongo_cdc_mongodb_oplog_size_bytes` | Gauge | MongoDB oplog size in bytes |
+| `go_mongo_cdc_mongodb_oplog_used_bytes` | Gauge | MongoDB oplog used size in bytes |
+| `go_mongo_cdc_mongodb_oplog_used_percent` | Gauge | MongoDB oplog used percentage (0-100) |
+| `go_mongo_cdc_mongodb_oplog_window_seconds` | Gauge | MongoDB oplog time window in seconds (retention) |
+| `go_mongo_cdc_mongodb_replication_lag_seconds` | Gauge | MongoDB replication lag in seconds |
+| `go_mongo_cdc_mongodb_connections_active` | Gauge | MongoDB active connections |
+| `go_mongo_cdc_mongodb_connections_available` | Gauge | MongoDB available connections |
+
 ### System Metrics
 
 | Metric Name | Type | Description |
@@ -418,6 +431,33 @@ groups:
         annotations:
           summary: "CDC worker is unhealthy"
           description: "CDC worker health check is failing"
+      
+      - alert: MongoDBOplogHighUsage
+        expr: go_mongo_cdc_mongodb_oplog_used_percent > 80
+        for: 5m
+        labels:
+          severity: warning
+        annotations:
+          summary: "MongoDB oplog usage is high"
+          description: "Oplog usage is {{ $value }}%, which exceeds 80%"
+      
+      - alert: MongoDBReplicationLagHigh
+        expr: go_mongo_cdc_mongodb_replication_lag_seconds > 60
+        for: 5m
+        labels:
+          severity: warning
+        annotations:
+          summary: "MongoDB replication lag is high"
+          description: "Replication lag is {{ $value }} seconds"
+      
+      - alert: MongoDBOplogWindowTooSmall
+        expr: go_mongo_cdc_mongodb_oplog_window_seconds < 3600
+        for: 10m
+        labels:
+          severity: warning
+        annotations:
+          summary: "MongoDB oplog window is too small"
+          description: "Oplog window is {{ $value }} seconds (less than 1 hour)"
 ```
 
 ## 🐳 Docker Usage

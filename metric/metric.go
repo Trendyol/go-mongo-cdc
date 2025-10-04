@@ -1,6 +1,7 @@
 package metric
 
 import (
+	"sync"
 	"sync/atomic"
 	"time"
 )
@@ -33,6 +34,9 @@ type Metric interface {
 	SetWorkerHealthy(isHealthy bool)
 	SetLastEventTime(t time.Time)
 
+	SetMongoDBMetrics(metrics *MongoDBMetrics)
+	SetShardMetrics(shardMetrics []*ShardMetrics)
+
 	GetInsertTotal() int64
 	GetUpdateTotal() int64
 	GetDeleteTotal() int64
@@ -53,6 +57,8 @@ type Metric interface {
 	GetChangeStreamRestartTotal() int64
 	GetWorkerHealthy() bool
 	GetLastEventTime() int64
+	GetMongoDBMetrics() *MongoDBMetrics
+	GetShardMetrics() []*ShardMetrics
 }
 
 type metric struct {
@@ -85,6 +91,12 @@ type metric struct {
 
 	workerHealthy int64
 	lastEventTime int64
+
+	mongoDBMetrics   *MongoDBMetrics
+	mongoDBMetricsMu sync.RWMutex
+
+	shardMetrics   []*ShardMetrics
+	shardMetricsMu sync.RWMutex
 }
 
 func NewMetric(database, collection string) Metric {
@@ -262,4 +274,28 @@ func (m *metric) GetWorkerHealthy() bool {
 
 func (m *metric) GetLastEventTime() int64 {
 	return atomic.LoadInt64(&m.lastEventTime)
+}
+
+func (m *metric) SetMongoDBMetrics(metrics *MongoDBMetrics) {
+	m.mongoDBMetricsMu.Lock()
+	defer m.mongoDBMetricsMu.Unlock()
+	m.mongoDBMetrics = metrics
+}
+
+func (m *metric) GetMongoDBMetrics() *MongoDBMetrics {
+	m.mongoDBMetricsMu.RLock()
+	defer m.mongoDBMetricsMu.RUnlock()
+	return m.mongoDBMetrics
+}
+
+func (m *metric) SetShardMetrics(shardMetrics []*ShardMetrics) {
+	m.shardMetricsMu.Lock()
+	defer m.shardMetricsMu.Unlock()
+	m.shardMetrics = shardMetrics
+}
+
+func (m *metric) GetShardMetrics() []*ShardMetrics {
+	m.shardMetricsMu.RLock()
+	defer m.shardMetricsMu.RUnlock()
+	return m.shardMetrics
 }
