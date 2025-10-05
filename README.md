@@ -7,6 +7,7 @@
 * **Real-time Data Capture** - Instantly captures INSERT, UPDATE, DELETE and REPLACE operations using MongoDB Change Streams API
 * **Scalable Partition System** - Intelligent partition management that distributes workload across multiple workers
 * **Automatic Failover** - Automatic partition transfer and load balancing between workers
+* **Oplog Rollover Protection** - Automatic re-snapshot mechanism when oplog history is lost, ensuring zero data loss (similar to Debezium's snapshot.mode = "when_needed")
 * **Smart Resume Token Recovery** - Automatic detection and recovery from expired/invalid resume tokens with graceful fallback
 * **Universal Hash Distribution** - Advanced multi-hash algorithm ensuring optimal distribution for any ID pattern
 * **Bootstrap Mode** - Full collection scanning feature for processing existing data on first run
@@ -32,6 +33,13 @@ import (
 )
 
 func listener(ctx *stream.ListenerContext) error {
+    select {
+    case <-ctx.Context.Done():
+        log.Printf("Shutdown signal received, stopping gracefully")
+        return ctx.Context.Err()
+    default:
+    }
+
     switch ctx.Message.OperationType {
     case message.OperationInsert:
         log.Printf("New document inserted: %+v", ctx.Message.FullDocument)
@@ -45,9 +53,6 @@ func listener(ctx *stream.ListenerContext) error {
 }
 
 func main() {
-    logger, _ := zap.NewDevelopment()
-    defer logger.Sync()
-
     cfg := config.Config{
         MongoDB: config.MongoDB{
             Connection: config.Connection{
@@ -55,10 +60,7 @@ func main() {
                 Database:   "myDB",
                 Collection: "myCollection",
             },
-        },
-        Logger: config.LoggerConfig{
-            Logger: logger,
-        },
+        }
     }
 
     connector, err := cdc.NewConnector(cfg, listener)
@@ -141,10 +143,15 @@ $ go get github.com/Trendyol/go-mongo-cdc
 
 ### Logger Configuration
 
-| Variable           | Type       | Required | Default | Description       |
-|--------------------|------------|----------|---------|-------------------|
-| `logger.logLevel`  | slog.Level | no       | Info    | Log level         |
-| `logger.logger`    | *zap.Logger| no       | nil     | Zap logger instance|
+| Variable           | Type   | Required | Default | Description       |
+|--------------------|--------|----------|---------|-------------------|
+| `logger.logLevel`  | string | no       | info    | Log level         |
+
+### Graceful Shutdown Configuration
+
+| Variable                      | Type          | Required | Default | Description                                                       |
+|-------------------------------|---------------|----------|---------|-------------------------------------------------------------------|
+| `gracefulShutdownTimeout`     | time.Duration | no       | 30s     | Maximum time to wait for in-flight events to complete on shutdown |
 
 ### Configuration Example
 
@@ -185,7 +192,9 @@ partition:
   totalPartition: 15
 
 logger:
-  logLevel: 1
+  logLevel: "info"
+
+gracefulShutdownTimeout: 30s
 ```
 
 ## Exposed Metrics

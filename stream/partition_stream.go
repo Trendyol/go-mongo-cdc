@@ -24,6 +24,8 @@ import (
 	"go.mongodb.org/mongo-driver/mongo/options"
 )
 
+var ErrOplogHistoryLost = errors.New("oplog history lost, re-snapshot required")
+
 type PartitionStream interface {
 	Start(ctx context.Context) error
 	Stop(ctx context.Context) error
@@ -32,6 +34,7 @@ type PartitionStream interface {
 type ListenerFunc func(ctx *ListenerContext) error
 
 type ListenerContext struct {
+	Context     context.Context
 	Message     message.Message
 	PartitionID int
 	Ack         func() error
@@ -67,6 +70,7 @@ type streamWorker struct {
 	tokenMutex      sync.RWMutex
 	lastEventTime   time.Time
 	ackedEventCount int
+	inFlightEvents  sync.WaitGroup
 }
 
 type streamStartInfo struct {
@@ -109,16 +113,16 @@ func (ps *partitionStream) Start(ctx context.Context) error {
 		return err
 	}
 
+	if err := ps.partitionManager.Initialize(ps.ctx); err != nil {
+		return fmt.Errorf("failed to initialize partition manager: %w", err)
+	}
+
 	select {
 	case <-ps.ctx.Done():
 		logger.Log.Debug("Event processing cancelled during initial delay")
 		return ps.ctx.Err()
 	case <-time.After(30 * time.Second): //TODO: sistemin reliable olması icin 30 saniye bekleme suresi iyi daha az olmaması gerekir fakat bazı kullanıcılar 30 dan yuksek vermek isteyebilir bu sebeple configurable yapılabilir
 		logger.Log.Debug("Initial delay completed before acquiring partitions")
-	}
-
-	if err := ps.partitionManager.Initialize(ps.ctx); err != nil {
-		return fmt.Errorf("failed to initialize partition manager: %w", err)
 	}
 
 	ps.partitionManager.SetPartitionsChangedCallback(ps.reconcilePartitionAssignments)
@@ -242,6 +246,28 @@ func (ps *partitionStream) managePartitionWorkerLifecycle(worker *streamWorker) 
 			if errors.Is(err, context.Canceled) {
 				logger.Log.Info(fmt.Sprintf("Partition stream cancelled - partitionId: %d", worker.partitionID))
 				return
+			}
+
+			if errors.Is(err, ErrOplogHistoryLost) {
+				logger.Log.Warn(fmt.Sprintf("Oplog history lost detected, triggering automatic re-snapshot - partitionId: %d", worker.partitionID))
+				ps.metric.IncResumeTokenExpiredTotal()
+
+				if clearErr := ps.checkpointManager.ClearResumeToken(worker.ctx, worker.partitionID); clearErr != nil {
+					logger.Log.Error(fmt.Sprintf("Failed to clear resume token during oplog recovery - partitionId: %d, error: %v", worker.partitionID, clearErr))
+				}
+
+				if clearErr := ps.checkpointManager.ClearBootstrapProgress(worker.ctx, worker.partitionID); clearErr != nil {
+					logger.Log.Error(fmt.Sprintf("Failed to clear bootstrap progress during oplog recovery - partitionId: %d, error: %v", worker.partitionID, clearErr))
+				}
+
+				logger.Log.Info(fmt.Sprintf("Checkpoint cleared, next iteration will trigger full bootstrap - partitionId: %d", worker.partitionID))
+
+				select {
+				case <-time.After(2 * time.Second):
+				case <-worker.ctx.Done():
+					return
+				}
+				continue
 			}
 
 			logger.Log.Error(fmt.Sprintf("Partition stream error, retrying - partitionId: %d, error: %v", worker.partitionID, err))
@@ -637,13 +663,6 @@ func (ps *partitionStream) saveFinalBootstrapProgressOnInterruption(worker *stre
 }
 
 func (ps *partitionStream) dispatchBootstrapDocumentToListener(worker *streamWorker, cursor connection.Cursor, state *bootstrapProcessState) error {
-	if state.processedCount > 0 && state.processedCount%1000 == 0 {
-		if !ps.verifyPartitionOwnership(worker.ctx, worker.partitionID) {
-			logger.Log.Warn(fmt.Sprintf("Partition ownership lost during bootstrap - partitionId: %d, processed: %d", worker.partitionID, state.processedCount))
-			return fmt.Errorf("partition %d ownership lost during bootstrap", worker.partitionID)
-		}
-	}
-
 	var document bson.M
 	if err := cursor.Decode(&document); err != nil {
 		logger.Log.Error(fmt.Sprintf("Error decoding document: %v", err))
@@ -761,15 +780,8 @@ func (ps *partitionStream) startAndManageChangeStream(worker *streamWorker, resu
 	changeStream, err := ps.collection.Watch(worker.ctx, pipeline, opts)
 	if err != nil {
 		if ps.isUnrecoverableResumeError(err) && resumeToken != nil {
-			logger.Log.Warn("Resume token expired or invalid, clearing and starting from current time - partitionId: %d, error: %v",
-				worker.partitionID, err)
-			ps.metric.IncResumeTokenExpiredTotal()
-
-			if clearErr := ps.checkpointManager.ClearResumeToken(worker.ctx, worker.partitionID); clearErr != nil {
-				logger.Log.Error("Failed to clear invalid resume token: %v", clearErr)
-			}
-
-			return ps.startAndManageChangeStream(worker, nil, startAtOperationTime)
+			logger.Log.Warn(fmt.Sprintf("Oplog history lost - resume token no longer valid - partitionId: %d, error: %v", worker.partitionID, err))
+			return ErrOplogHistoryLost
 		}
 
 		return err
@@ -835,7 +847,7 @@ func (ps *partitionStream) saveLatestResumeTokenOnInterruption(worker *streamWor
 }
 
 func (ps *partitionStream) verifyPartitionOwnership(ctx context.Context, partitionID int) bool {
-	partitionsCol := ps.client.Database(ps.cfg.MongoDB.Connection.Database).Collection("partition_assignments")
+	partitionsCol := ps.client.Database(ps.cfg.MongoDB.Connection.Database).Collection(ps.cfg.Partition.PartitionsCollection)
 
 	filter := bson.M{"_id": partitionID}
 	var assignment bson.M
@@ -1069,6 +1081,9 @@ func (ps *partitionStream) isUnrecoverableResumeError(err error) bool {
 }
 
 func (ps *partitionStream) processEvent(worker *streamWorker, event message.ChangeEvent, resumeToken []byte) error {
+	worker.inFlightEvents.Add(1)
+	defer worker.inFlightEvents.Done()
+
 	startTime := time.Now()
 
 	msg, err := message.NewMessage(event)
@@ -1084,6 +1099,7 @@ func (ps *partitionStream) processEvent(worker *streamWorker, event message.Chan
 	ps.metric.SetCDCLatency(cdcLatency)
 
 	listenerCtx := &ListenerContext{
+		Context:     worker.ctx,
 		Message:     msg,
 		PartitionID: worker.partitionID,
 		Ack: func() error {
@@ -1285,22 +1301,42 @@ func (ps *partitionStream) Stop(ctx context.Context) error {
 	}
 
 	ps.streamsMutex.Lock()
+	workers := make([]*streamWorker, 0, len(ps.activeStreams))
 	for partitionID, worker := range ps.activeStreams {
 		logger.Log.Info(fmt.Sprintf("Stopping stream worker %d", partitionID))
 		worker.cancel()
+		workers = append(workers, worker)
 	}
 	ps.streamsMutex.Unlock()
 
-	done := make(chan struct{})
+	timeout := ps.cfg.GracefulShutdownTimeout
+	logger.Log.Info(fmt.Sprintf("Waiting for in-flight events to complete (timeout: %v)", timeout))
+
+	inFlightDone := make(chan struct{})
 	go func() {
-		ps.wg.Wait()
-		close(done)
+		for _, worker := range workers {
+			worker.inFlightEvents.Wait()
+		}
+		close(inFlightDone)
 	}()
 
 	select {
-	case <-done:
+	case <-inFlightDone:
+		logger.Log.Info("All in-flight events completed successfully")
+	case <-time.After(timeout):
+		logger.Log.Warn(fmt.Sprintf("Timeout (%v) waiting for in-flight events - some events may be reprocessed on restart", timeout))
+	}
+
+	workersDone := make(chan struct{})
+	go func() {
+		ps.wg.Wait()
+		close(workersDone)
+	}()
+
+	select {
+	case <-workersDone:
 		logger.Log.Info("All stream workers stopped")
-	case <-time.After(30 * time.Second):
+	case <-time.After(5 * time.Second):
 		logger.Log.Warn("Timeout waiting for stream workers to stop")
 	}
 

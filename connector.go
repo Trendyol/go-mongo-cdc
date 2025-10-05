@@ -36,6 +36,7 @@ type connector struct {
 	cancelCh                chan os.Signal
 	workerID                string
 	isShardedCluster        bool
+	shardMetricsDisabled    bool
 	cfg                     config.Config
 
 	once   sync.Once
@@ -215,16 +216,21 @@ func (c *connector) collectMongoDBMetricsPeriodically(ctx context.Context) {
 			return
 		}
 
-		if c.isShardedCluster {
+		if c.isShardedCluster && !c.shardMetricsDisabled {
 			logger.Log.Debug("Collecting shard metrics...")
 			shardMetrics, err := c.shardedMetricsCollector.CollectShardedMetrics(metricsCtx, client.GetClient())
 			if err != nil {
-				logger.Log.Debug("Failed to collect shard metrics: %v", err)
+				if strings.Contains(err.Error(), "Unauthorized") || strings.Contains(err.Error(), "not authorized") {
+					logger.Log.Warn("Shard metrics collection disabled: insufficient permissions to access config.shards collection. User needs clusterMonitor role or read access to config database.")
+					c.shardMetricsDisabled = true
+				} else {
+					logger.Log.Debug("Failed to collect shard metrics: %v", err)
+				}
 			} else {
 				c.metricInstance.SetShardMetrics(shardMetrics)
 				logger.Log.Debug("Shard metrics collected - shards: %d", len(shardMetrics))
 			}
-		} else {
+		} else if !c.isShardedCluster {
 			mongoMetrics, err := c.mongoMetricsCollector.CollectMongoDBMetrics(metricsCtx, client.GetClient())
 			if err != nil {
 				logger.Log.Debug("Failed to collect MongoDB metrics: %v", err)

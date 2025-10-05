@@ -16,11 +16,12 @@ import (
 )
 
 type Config struct {
-	MongoDB    MongoDB          `json:"mongodb" yaml:"mongodb"`
-	Metric     MetricConfig     `json:"metric" yaml:"metric"`
-	Logger     LoggerConfig     `json:"logger" yaml:"logger"`
-	Checkpoint CheckpointConfig `json:"checkpoint" yaml:"checkpoint"`
-	Partition  PartitionConfig  `json:"partition" yaml:"partition"`
+	MongoDB                 MongoDB          `json:"mongodb" yaml:"mongodb"`
+	Metric                  MetricConfig     `json:"metric" yaml:"metric"`
+	Logger                  LoggerConfig     `json:"logger" yaml:"logger"`
+	Checkpoint              CheckpointConfig `json:"checkpoint" yaml:"checkpoint"`
+	Partition               PartitionConfig  `json:"partition" yaml:"partition"`
+	GracefulShutdownTimeout time.Duration    `json:"gracefulShutdownTimeout" yaml:"gracefulShutdownTimeout"`
 }
 
 type MongoDB struct {
@@ -152,6 +153,10 @@ func (c *Config) SetDefault() {
 	}
 	if c.Partition.TotalPartition == 0 {
 		c.Partition.TotalPartition = 15
+	}
+
+	if c.GracefulShutdownTimeout == 0 {
+		c.GracefulShutdownTimeout = 30 * time.Second
 	}
 }
 

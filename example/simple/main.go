@@ -2,6 +2,7 @@ package main
 
 import (
 	"context"
+
 	"github.com/Trendyol/go-mongo-cdc/logger"
 
 	cdc "github.com/Trendyol/go-mongo-cdc"
@@ -63,6 +64,13 @@ func main() {
 }
 
 func ProcessChangeEvent(lc *stream.ListenerContext) error {
+	select {
+	case <-lc.Context.Done():
+		logger.Log.Info("Shutdown signal received, stopping event processing")
+		return lc.Context.Err()
+	default:
+	}
+
 	switch lc.Message.OperationType {
 	case message.OperationInsert, message.OperationUpdate, message.OperationReplace:
 		if lc.Message.FullDocument != nil {
