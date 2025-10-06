@@ -93,7 +93,7 @@ func (m *manager) Initialize(ctx context.Context) error {
 	m.wg.Add(1)
 	go m.runRebalanceMonitor()
 
-	logger.Log.Info(fmt.Sprintf("Partition manager initialized - workerId: %s, totalPartitions: %d", m.workerID, m.config.TotalPartition))
+	logger.Log.Info("Partition manager initialized - workerId: %s, totalPartitions: %d", m.workerID, m.config.TotalPartition)
 
 	return nil
 }
@@ -139,7 +139,7 @@ func (m *manager) registerWorkerWithRetry(ctx context.Context) error {
 	for {
 		err := m.registerWorker(ctx)
 		if err == nil {
-			logger.Log.Info(fmt.Sprintf("Worker registered successfully - workerId: %s, attempt: %d", m.workerID, backoffStrategy.Attempts()))
+			logger.Log.Info("Worker registered successfully - workerId: %s, attempt: %d", m.workerID, backoffStrategy.Attempts())
 			return nil
 		}
 
@@ -148,8 +148,7 @@ func (m *manager) registerWorkerWithRetry(ctx context.Context) error {
 			return fmt.Errorf("failed to register worker after %d attempts: %w", backoffStrategy.Attempts(), err)
 		}
 
-		logger.Log.Warn(fmt.Sprintf("Worker registration failed, retrying - attempt: %d/%d, delay: %v, error: %v",
-			backoffStrategy.Attempts(), backoffStrategy.Config.MaxRetries, delay, err))
+		logger.Log.Warn("Worker registration failed, retrying - attempt: %d/%d, delay: %v, error: %v", backoffStrategy.Attempts(), backoffStrategy.Config.MaxRetries, delay, err)
 
 		select {
 		case <-ctx.Done():
@@ -162,7 +161,7 @@ func (m *manager) registerWorkerWithRetry(ctx context.Context) error {
 func (m *manager) registerWorker(ctx context.Context) error {
 	serverTime, err := m.getServerTime(ctx)
 	if err != nil {
-		logger.Log.Warn(fmt.Sprintf("Failed to get server time, falling back to local time: %v", err))
+		logger.Log.Warn("Failed to get server time, falling back to local time: %v", err)
 		serverTime = time.Now()
 	}
 
@@ -181,8 +180,7 @@ func (m *manager) registerWorker(ctx context.Context) error {
 		return err
 	}
 
-	logger.Log.Debug(fmt.Sprintf("Worker registered - workerId: %s, matched: %d, modified: %d, upserted: %v",
-		m.workerID, result.MatchedCount(), result.ModifiedCount(), result.UpsertedID() != nil))
+	logger.Log.Debug("Worker registered - workerId: %s, matched: %d, modified: %d, upserted: %v", m.workerID, result.MatchedCount(), result.ModifiedCount(), result.UpsertedID() != nil)
 
 	return nil
 }
@@ -201,11 +199,11 @@ func (m *manager) heartbeatLoop() {
 			ctx, cancel := context.WithTimeout(context.Background(), 5*time.Second)
 
 			if err := m.sendHeartbeat(ctx); err != nil {
-				logger.Log.Error(fmt.Sprintf("Failed to send heartbeat: %v", err))
+				logger.Log.Error("Failed to send heartbeat: %v", err)
 			}
 
 			if err := m.updatePartitionHeartbeats(ctx); err != nil {
-				logger.Log.Error(fmt.Sprintf("Failed to update partition heartbeats: %v", err))
+				logger.Log.Error("Failed to update partition heartbeats: %v", err)
 			}
 
 			cancel()
@@ -282,7 +280,7 @@ func (m *manager) triggerRebalanceIfNeeded() {
 
 	currentWorkerCount, err := m.getActiveWorkerCount(ctx)
 	if err != nil {
-		logger.Log.Error(fmt.Sprintf("Failed to get current worker count: %v", err))
+		logger.Log.Error("Failed to get current worker count: %v", err)
 		return
 	}
 
@@ -290,15 +288,15 @@ func (m *manager) triggerRebalanceIfNeeded() {
 
 	if needsRebalance {
 		if currentWorkerCount != m.lastKnownWorkerCount {
-			logger.Log.Info(fmt.Sprintf("Worker count change detected - previousCount: %d, currentCount: %d", m.lastKnownWorkerCount, currentWorkerCount))
+			logger.Log.Info("Worker count change detected - previousCount: %d, currentCount: %d", m.lastKnownWorkerCount, currentWorkerCount)
 		} else {
-			logger.Log.Debug(fmt.Sprintf("Retrying partition acquisition - workerCount: %d", currentWorkerCount))
+			logger.Log.Debug("Retrying partition acquisition - workerCount: %d", currentWorkerCount)
 		}
 
 		if err := m.ResyncPartitions(ctx); err != nil {
-			logger.Log.Error(fmt.Sprintf("Failed to refresh partitions - workerCount: %d, error: %v", currentWorkerCount, err))
+			logger.Log.Error("Failed to refresh partitions - workerCount: %d, error: %v", currentWorkerCount, err)
 		} else {
-			logger.Log.Info(fmt.Sprintf("Successfully rebalanced partitions - workerCount: %d", currentWorkerCount))
+			logger.Log.Info("Successfully rebalanced partitions - workerCount: %d", currentWorkerCount)
 
 			m.lastKnownWorkerCount = currentWorkerCount
 		}
@@ -313,21 +311,20 @@ func (m *manager) needsRebalance(ctx context.Context) bool {
 
 	activeWorkers, err := m.getActiveWorkerCount(ctx)
 	if err != nil {
-		logger.Log.Warn(fmt.Sprintf("Failed to get active worker count for assignment check: %v", err))
+		logger.Log.Warn("Failed to get active worker count for assignment check: %v", err)
 		return false
 	}
 
 	workerIndex, err := m.determineWorkerIndex(ctx)
 	if err != nil {
-		logger.Log.Warn(fmt.Sprintf("Failed to get worker index for assignment check: %v", err))
+		logger.Log.Warn("Failed to get worker index for assignment check: %v", err)
 		return false
 	}
 
 	expectedPartitions := m.calculateExpectedPartitionsForWorker(workerIndex, activeWorkers)
 
 	if len(currentPartitions) != len(expectedPartitions) {
-		logger.Log.Debug(fmt.Sprintf("Partition assignment count mismatch - workerId: %s, current: %d %v, expected: %d %v, workerIndex: %d, activeWorkers: %d",
-			m.workerID, len(currentPartitions), currentPartitions, len(expectedPartitions), expectedPartitions, workerIndex, activeWorkers))
+		logger.Log.Debug("Partition assignment count mismatch - workerId: %s, current: %d %v, expected: %d %v, workerIndex: %d, activeWorkers: %d", m.workerID, len(currentPartitions), currentPartitions, len(expectedPartitions), expectedPartitions, workerIndex, activeWorkers)
 		return true
 	}
 
@@ -338,8 +335,7 @@ func (m *manager) needsRebalance(ctx context.Context) bool {
 
 	for _, p := range currentPartitions {
 		if _, ok := expectedPartitionsSet[p]; !ok {
-			logger.Log.Debug(fmt.Sprintf("Partition assignment content mismatch - workerId: %s, has unexpected partition %d. Current: %v, Expected: %v, workerIndex: %d, activeWorkers: %d",
-				m.workerID, p, currentPartitions, expectedPartitions, workerIndex, activeWorkers))
+			logger.Log.Debug("Partition assignment content mismatch - workerId: %s, has unexpected partition %d. Current: %v, Expected: %v, workerIndex: %d, activeWorkers: %d", m.workerID, p, currentPartitions, expectedPartitions, workerIndex, activeWorkers)
 			return true
 		}
 	}
@@ -348,10 +344,10 @@ func (m *manager) needsRebalance(ctx context.Context) bool {
 }
 
 func (m *manager) AcquirePartitions(ctx context.Context) ([]int, error) {
-	logger.Log.Debug(fmt.Sprintf("Starting partition acquisition - workerId: %s", m.workerID))
+	logger.Log.Debug("Starting partition acquisition - workerId: %s", m.workerID)
 
 	if err := m.cleanupDeadWorkers(ctx); err != nil {
-		logger.Log.Error(fmt.Sprintf("Failed to cleanup dead workers: %v", err))
+		logger.Log.Error("Failed to cleanup dead workers: %v", err)
 	}
 
 	activeWorkers, err := m.getActiveWorkerCount(ctx)
@@ -364,29 +360,27 @@ func (m *manager) AcquirePartitions(ctx context.Context) ([]int, error) {
 		return nil, fmt.Errorf("failed to get worker index: %w", err)
 	}
 
-	logger.Log.Debug(fmt.Sprintf("Partition acquisition context - workerId: %s, activeWorkers: %d, workerIndex: %d", m.workerID, activeWorkers, workerIndex))
+	logger.Log.Debug("Partition acquisition context - workerId: %s, activeWorkers: %d, workerIndex: %d", m.workerID, activeWorkers, workerIndex)
 
 	expectedPartitions := m.calculateExpectedPartitionsForWorker(workerIndex, activeWorkers)
 
 	acquiredPartitions := make([]int, 0, len(expectedPartitions))
 	failedPartitions := make([]int, 0, len(expectedPartitions))
 
-	logger.Log.Info(fmt.Sprintf("Attempting to acquire partitions - expected: %v, activeWorkers: %d, workerIndex: %d",
-		expectedPartitions, activeWorkers, workerIndex))
+	logger.Log.Info("Attempting to acquire partitions - expected: %v, activeWorkers: %d, workerIndex: %d", expectedPartitions, activeWorkers, workerIndex)
 
 	for _, partitionID := range expectedPartitions {
 		if err := m.tryAcquireOrTakeoverPartitionWithRetry(ctx, partitionID); err != nil {
-			logger.Log.Info(fmt.Sprintf("Failed to acquire partition %d after retries: %v", partitionID, err))
+			logger.Log.Info("Failed to acquire partition %d after retries: %v", partitionID, err)
 			failedPartitions = append(failedPartitions, partitionID)
 			continue
 		}
 		acquiredPartitions = append(acquiredPartitions, partitionID)
-		logger.Log.Debug(fmt.Sprintf("Successfully acquired partition %d - workerId: %s", partitionID, m.workerID))
+		logger.Log.Debug("Successfully acquired partition %d - workerId: %s", partitionID, m.workerID)
 	}
 
 	if len(failedPartitions) > 0 {
-		logger.Log.Info(fmt.Sprintf("Failed to acquire some partitions - failed: %v, acquired: %v",
-			failedPartitions, acquiredPartitions))
+		logger.Log.Info("Failed to acquire some partitions - failed: %v, acquired: %v", failedPartitions, acquiredPartitions)
 	}
 
 	m.mu.Lock()
@@ -394,10 +388,10 @@ func (m *manager) AcquirePartitions(ctx context.Context) ([]int, error) {
 	m.mu.Unlock()
 
 	if err := m.updateWorkerPartitions(ctx, acquiredPartitions); err != nil {
-		logger.Log.Error(fmt.Sprintf("Failed to update worker partitions: %v", err))
+		logger.Log.Error("Failed to update worker partitions: %v", err)
 	}
 
-	logger.Log.Info(fmt.Sprintf("Acquired partitions - count: %d, partitions: %v, workerIndex: %d, activeWorkers: %d", len(acquiredPartitions), acquiredPartitions, workerIndex, activeWorkers))
+	logger.Log.Info("Acquired partitions - count: %d, partitions: %v, workerIndex: %d, activeWorkers: %d", len(acquiredPartitions), acquiredPartitions, workerIndex, activeWorkers)
 
 	return acquiredPartitions, nil
 }
@@ -432,7 +426,7 @@ func (m *manager) calculateExpectedPartitionsForWorker(workerIndex int, activeWo
 func (m *manager) cleanupDeadWorkers(ctx context.Context) error {
 	serverTime, err := m.getServerTime(ctx)
 	if err != nil {
-		logger.Log.Warn(fmt.Sprintf("Failed to get server time for cleanup, falling back to local time: %v", err))
+		logger.Log.Warn("Failed to get server time for cleanup, falling back to local time: %v", err)
 		serverTime = time.Now()
 	}
 
@@ -455,27 +449,27 @@ func (m *manager) cleanupDeadWorkers(ctx context.Context) error {
 	}
 
 	if len(deadWorkerIDs) > 0 {
-		logger.Log.Info(fmt.Sprintf("Found dead workers, cleaning up - workerIds: %v, cutoff: %v", deadWorkerIDs, cutoff))
+		logger.Log.Info("Found dead workers, cleaning up - workerIds: %v, cutoff: %v", deadWorkerIDs, cutoff)
 
 		partitionFilter := bson.M{"workerId": bson.M{"$in": deadWorkerIDs}}
 		partitionResult, err := m.partitionsCol.DeleteMany(ctx, partitionFilter)
 		if err != nil {
-			logger.Log.Error(fmt.Sprintf("Failed to release dead worker partitions: %v", err))
+			logger.Log.Error("Failed to release dead worker partitions: %v", err)
 		} else {
-			logger.Log.Debug(fmt.Sprintf("Released %d partitions from dead workers", partitionResult.DeletedCount()))
+			logger.Log.Debug("Released %d partitions from dead workers", partitionResult.DeletedCount())
 		}
 
 		workerFilter := bson.M{"_id": bson.M{"$in": deadWorkerIDs}}
 		workerResult, err := m.workersCol.DeleteMany(ctx, workerFilter)
 		if err != nil {
-			logger.Log.Error(fmt.Sprintf("Failed to delete dead workers: %v", err))
+			logger.Log.Error("Failed to delete dead workers: %v", err)
 		} else {
-			logger.Log.Debug(fmt.Sprintf("Deleted %d dead workers", workerResult.DeletedCount()))
+			logger.Log.Debug("Deleted %d dead workers", workerResult.DeletedCount())
 		}
 
-		logger.Log.Info(fmt.Sprintf("Cleaned up dead workers - workerIds: %v", deadWorkerIDs))
+		logger.Log.Info("Cleaned up dead workers - workerIds: %v", deadWorkerIDs)
 	} else {
-		logger.Log.Debug(fmt.Sprintf("No dead workers found - cutoff: %v", cutoff))
+		logger.Log.Debug("No dead workers found - cutoff: %v", cutoff)
 	}
 
 	return nil
@@ -484,7 +478,7 @@ func (m *manager) cleanupDeadWorkers(ctx context.Context) error {
 func (m *manager) getActiveWorkerCount(ctx context.Context) (int, error) {
 	serverTime, err := m.getServerTime(ctx)
 	if err != nil {
-		logger.Log.Warn(fmt.Sprintf("Failed to get server time for active worker count, falling back to local time: %v", err))
+		logger.Log.Warn("Failed to get server time for active worker count, falling back to local time: %v", err)
 		serverTime = time.Now()
 	}
 
@@ -502,7 +496,7 @@ func (m *manager) getActiveWorkerCount(ctx context.Context) (int, error) {
 func (m *manager) determineWorkerIndex(ctx context.Context) (int, error) {
 	serverTime, err := m.getServerTime(ctx)
 	if err != nil {
-		logger.Log.Warn(fmt.Sprintf("Failed to get server time for worker index, falling back to local time: %v", err))
+		logger.Log.Warn("Failed to get server time for worker index, falling back to local time: %v", err)
 		serverTime = time.Now()
 	}
 
@@ -547,17 +541,16 @@ func (m *manager) determineWorkerIndex(ctx context.Context) (int, error) {
 			return index, nil
 		}
 
-		logger.Log.Warn(fmt.Sprintf("Worker not found in active workers list, retrying - myWorkerId: %s, allActiveWorkers: %v, attempt: %d/%d",
-			m.workerID, allWorkers, backoffStrategy.Attempts()+1, backoffStrategy.Config.MaxRetries))
+		logger.Log.Warn("Worker not found in active workers list, retrying - myWorkerId: %s, allActiveWorkers: %v, attempt: %d/%d", m.workerID, allWorkers, backoffStrategy.Attempts()+1, backoffStrategy.Config.MaxRetries)
 
 		delay, keepTrying := backoffStrategy.NextDelay()
 		if !keepTrying {
-			logger.Log.Error(fmt.Sprintf("Worker not found in active workers list after %d attempts - myWorkerId: %s", backoffStrategy.Attempts(), m.workerID))
+			logger.Log.Error("Worker not found in active workers list after %d attempts - myWorkerId: %s", backoffStrategy.Attempts(), m.workerID)
 			return -1, fmt.Errorf("worker not found in active workers list after %d attempts", backoffStrategy.Attempts())
 		}
 
 		if heartbeatErr := m.sendHeartbeat(ctx); heartbeatErr != nil {
-			logger.Log.Error(fmt.Sprintf("Failed to send heartbeat during worker index retry: %v", heartbeatErr))
+			logger.Log.Error("Failed to send heartbeat during worker index retry: %v", heartbeatErr)
 		}
 
 		select {
@@ -587,8 +580,7 @@ func (m *manager) tryAcquireOrTakeoverPartitionWithRetry(ctx context.Context, pa
 			return fmt.Errorf("failed to acquire partition %d after %d attempts: %w", partitionID, backoffStrategy.Attempts(), err)
 		}
 
-		logger.Log.Debug(fmt.Sprintf("Partition acquisition failed, retrying - partition: %d, attempt: %d/%d, delay: %v, error: %v",
-			partitionID, backoffStrategy.Attempts(), backoffStrategy.Config.MaxRetries, delay, err))
+		logger.Log.Debug("Partition acquisition failed, retrying - partition: %d, attempt: %d/%d, delay: %v, error: %v", partitionID, backoffStrategy.Attempts(), backoffStrategy.Config.MaxRetries, delay, err)
 
 		select {
 		case <-ctx.Done():
@@ -601,7 +593,7 @@ func (m *manager) tryAcquireOrTakeoverPartitionWithRetry(ctx context.Context, pa
 func (m *manager) tryAcquireOrTakeoverPartition(ctx context.Context, partitionID int) error {
 	serverTime, err := m.getServerTime(ctx)
 	if err != nil {
-		logger.Log.Warn(fmt.Sprintf("Failed to get server time for partition acquisition, falling back to local time: %v", err))
+		logger.Log.Warn("Failed to get server time for partition acquisition, falling back to local time: %v", err)
 		serverTime = time.Now()
 	}
 
@@ -632,14 +624,14 @@ func (m *manager) tryAcquireOrTakeoverPartition(ctx context.Context, partitionID
 
 	if err != nil {
 		if err == mongo.ErrNoDocuments {
-			logger.Log.Debug(fmt.Sprintf("Partition %d is owned by another active worker", partitionID))
+			logger.Log.Debug("Partition %d is owned by another active worker", partitionID)
 			return fmt.Errorf("partition %d is already owned by another active worker", partitionID)
 		}
 		return fmt.Errorf("failed to acquire partition %d: %w", partitionID, err)
 	}
 
 	if result.WorkerID == m.workerID {
-		logger.Log.Debug(fmt.Sprintf("Successfully acquired partition %d", partitionID))
+		logger.Log.Debug("Successfully acquired partition %d", partitionID)
 		return nil
 	}
 
@@ -658,9 +650,9 @@ func (m *manager) releasePartition(ctx context.Context, partitionID int) error {
 	}
 
 	if result.DeletedCount() == 0 {
-		logger.Log.Warn(fmt.Sprintf("Partition was not owned by this worker during release - partition %d, workerId: %s", partitionID, m.workerID))
+		logger.Log.Warn("Partition was not owned by this worker during release - partition %d, workerId: %s", partitionID, m.workerID)
 	} else {
-		logger.Log.Debug(fmt.Sprintf("Successfully released partition %d - workerId: %s", partitionID, m.workerID))
+		logger.Log.Debug("Successfully released partition %d - workerId: %s", partitionID, m.workerID)
 	}
 
 	return nil
@@ -679,11 +671,11 @@ func (m *manager) updateWorkerPartitions(ctx context.Context, partitions []int) 
 
 	result, err := m.workersCol.UpdateOne(ctx, filter, update)
 	if err != nil {
-		logger.Log.Error(fmt.Sprintf("Failed to update worker partitions - workerId: %s, partitions: %v, error: %v", m.workerID, partitions, err))
+		logger.Log.Error("Failed to update worker partitions - workerId: %s, partitions: %v, error: %v", m.workerID, partitions, err)
 		return err
 	}
 
-	logger.Log.Debug(fmt.Sprintf("Updated worker partitions - workerId: %s, partitions: %v, matched: %d, modified: %d", m.workerID, partitions, result.MatchedCount(), result.ModifiedCount()))
+	logger.Log.Debug("Updated worker partitions - workerId: %s, partitions: %v, matched: %d, modified: %d", m.workerID, partitions, result.MatchedCount(), result.ModifiedCount())
 	return nil
 }
 
@@ -713,11 +705,11 @@ func (m *manager) ResyncPartitions(ctx context.Context) error {
 	}
 
 	if len(partitionsToRelease) > 0 {
-		logger.Log.Info(fmt.Sprintf("Releasing partitions from MongoDB - partitionsToRelease: %v", partitionsToRelease))
+		logger.Log.Info("Releasing partitions from MongoDB - partitionsToRelease: %v", partitionsToRelease)
 
 		for _, partitionID := range partitionsToRelease {
 			if err := m.releasePartition(ctx, partitionID); err != nil {
-				logger.Log.Error(fmt.Sprintf("Failed to release partition from MongoDB - partition %d, error: %v", partitionID, err))
+				logger.Log.Error("Failed to release partition from MongoDB - partition %d, error: %v", partitionID, err)
 			}
 		}
 	}
@@ -743,7 +735,7 @@ func (m *manager) ReleasePartitions(ctx context.Context) error {
 		return nil
 	}
 
-	logger.Log.Info(fmt.Sprintf("Releasing all partitions - count: %d, partitions: %v", len(partitions), partitions))
+	logger.Log.Info("Releasing all partitions - count: %d, partitions: %v", len(partitions), partitions)
 
 	m.mu.Lock()
 	m.assignedPartitions = []int{}
@@ -755,7 +747,7 @@ func (m *manager) ReleasePartitions(ctx context.Context) error {
 		return err
 	}
 
-	logger.Log.Info(fmt.Sprintf("Released %d partitions from MongoDB", result.DeletedCount()))
+	logger.Log.Info("Released %d partitions from MongoDB", result.DeletedCount())
 
 	return m.updateWorkerPartitions(ctx, []int{})
 }
@@ -821,7 +813,7 @@ func (m *manager) Stop(ctx context.Context) error {
 	m.mu.Unlock()
 
 	if err := m.ReleasePartitions(ctx); err != nil {
-		logger.Log.Error(fmt.Sprintf("Failed to release partitions during stop: %v", err))
+		logger.Log.Error("Failed to release partitions during stop: %v", err)
 	}
 
 	close(m.stopCh)
@@ -841,7 +833,7 @@ func (m *manager) Stop(ctx context.Context) error {
 
 	filter := bson.M{"_id": m.workerID}
 	if _, err := m.workersCol.DeleteOne(ctx, filter); err != nil {
-		logger.Log.Error(fmt.Sprintf("Failed to unregister worker: %v", err))
+		logger.Log.Error("Failed to unregister worker: %v", err)
 	}
 
 	logger.Log.Info("Partition manager stopped")

@@ -128,7 +128,7 @@ func (ps *partitionStream) Start(ctx context.Context) error {
 	ps.partitionManager.SetPartitionsChangedCallback(ps.reconcilePartitionAssignments)
 
 	if err := ps.acquireAndStartInitialPartitions(); err != nil {
-		logger.Log.Error(fmt.Sprintf("Failed to acquire initial partitions: %v", err))
+		logger.Log.Error("Failed to acquire initial partitions: %v", err)
 		return err
 	}
 
@@ -186,7 +186,7 @@ func (ps *partitionStream) reconcilePartitionAssignments(newPartitions []int) {
 		}
 
 		if !found {
-			logger.Log.Debug(fmt.Sprintf("Stopping stream for partition %d", partitionID))
+			logger.Log.Debug("Stopping stream for partition %d", partitionID)
 			worker.cancel()
 			delete(ps.activeStreams, partitionID)
 			ps.metric.IncPartitionReleaseTotal()
@@ -196,7 +196,7 @@ func (ps *partitionStream) reconcilePartitionAssignments(newPartitions []int) {
 
 	for _, partitionID := range newPartitions {
 		if _, exists := ps.activeStreams[partitionID]; !exists {
-			logger.Log.Debug(fmt.Sprintf("Starting stream for partition %d", partitionID))
+			logger.Log.Debug("Starting stream for partition %d", partitionID)
 
 			worker := &streamWorker{
 				partitionID:   partitionID,
@@ -219,7 +219,7 @@ func (ps *partitionStream) reconcilePartitionAssignments(newPartitions []int) {
 	}
 
 	ps.metric.SetActivePartitionCount(len(ps.activeStreams))
-	logger.Log.Debug(fmt.Sprintf("Active partitions updated - count: %d, partitions: %v", len(ps.activeStreams), newPartitions))
+	logger.Log.Debug("Active partitions updated - count: %d, partitions: %v", len(ps.activeStreams), newPartitions)
 }
 
 func (ps *partitionStream) managePartitionWorkerLifecycle(worker *streamWorker) {
@@ -239,28 +239,28 @@ func (ps *partitionStream) managePartitionWorkerLifecycle(worker *streamWorker) 
 		default:
 			err := ps.startOrResumePartitionStream(worker)
 			if err == nil {
-				logger.Log.Debug(fmt.Sprintf("Partition stream completed normally - partitionId: %d", worker.partitionID))
+				logger.Log.Debug("Partition stream completed normally - partitionId: %d", worker.partitionID)
 				return
 			}
 
 			if errors.Is(err, context.Canceled) {
-				logger.Log.Info(fmt.Sprintf("Partition stream cancelled - partitionId: %d", worker.partitionID))
+				logger.Log.Info("Partition stream cancelled - partitionId: %d", worker.partitionID)
 				return
 			}
 
 			if errors.Is(err, ErrOplogHistoryLost) {
-				logger.Log.Warn(fmt.Sprintf("Oplog history lost detected, triggering automatic re-snapshot - partitionId: %d", worker.partitionID))
+				logger.Log.Warn("Oplog history lost detected, triggering automatic re-snapshot - partitionId: %d", worker.partitionID)
 				ps.metric.IncResumeTokenExpiredTotal()
 
 				if clearErr := ps.checkpointManager.ClearResumeToken(worker.ctx, worker.partitionID); clearErr != nil {
-					logger.Log.Error(fmt.Sprintf("Failed to clear resume token during oplog recovery - partitionId: %d, error: %v", worker.partitionID, clearErr))
+					logger.Log.Error("Failed to clear resume token during oplog recovery - partitionId: %d, error: %v", worker.partitionID, clearErr)
 				}
 
 				if clearErr := ps.checkpointManager.ClearBootstrapProgress(worker.ctx, worker.partitionID); clearErr != nil {
-					logger.Log.Error(fmt.Sprintf("Failed to clear bootstrap progress during oplog recovery - partitionId: %d, error: %v", worker.partitionID, clearErr))
+					logger.Log.Error("Failed to clear bootstrap progress during oplog recovery - partitionId: %d, error: %v", worker.partitionID, clearErr)
 				}
 
-				logger.Log.Info(fmt.Sprintf("Checkpoint cleared, next iteration will trigger full bootstrap - partitionId: %d", worker.partitionID))
+				logger.Log.Info("Checkpoint cleared, next iteration will trigger full bootstrap - partitionId: %d", worker.partitionID)
 
 				select {
 				case <-time.After(2 * time.Second):
@@ -270,13 +270,13 @@ func (ps *partitionStream) managePartitionWorkerLifecycle(worker *streamWorker) 
 				continue
 			}
 
-			logger.Log.Error(fmt.Sprintf("Partition stream error, retrying - partitionId: %d, error: %v", worker.partitionID, err))
+			logger.Log.Error("Partition stream error, retrying - partitionId: %d, error: %v", worker.partitionID, err)
 			ps.metric.IncChangeStreamErrorTotal()
 			ps.metric.IncChangeStreamRestartTotal()
 
 			delay, _ := backoffStrategy.NextDelay()
 
-			logger.Log.Debug(fmt.Sprintf("Backing off for %v before retry - partitionId: %d", delay, worker.partitionID))
+			logger.Log.Debug("Backing off for %v before retry - partitionId: %d", delay, worker.partitionID)
 
 			select {
 			case <-time.After(delay):
@@ -289,7 +289,7 @@ func (ps *partitionStream) managePartitionWorkerLifecycle(worker *streamWorker) 
 
 func (ps *partitionStream) startOrResumePartitionStream(worker *streamWorker) error {
 	if !ps.verifyPartitionOwnership(worker.ctx, worker.partitionID) {
-		logger.Log.Warn(fmt.Sprintf("Partition ownership verification failed at start - partitionId: %d", worker.partitionID))
+		logger.Log.Warn("Partition ownership verification failed at start - partitionId: %d", worker.partitionID)
 		return fmt.Errorf("partition %d not owned by this worker", worker.partitionID)
 	}
 
@@ -299,14 +299,14 @@ func (ps *partitionStream) startOrResumePartitionStream(worker *streamWorker) er
 	}
 
 	if startInfo.shouldBootstrap {
-		logger.Log.Info(fmt.Sprintf("Starting bootstrap flow for partition %d", worker.partitionID))
+		logger.Log.Info("Starting bootstrap flow for partition %d", worker.partitionID)
 		ps.metric.SetBootstrapStatus(true)
 		err := ps.executeFullBootstrapFlow(worker)
 		ps.metric.SetBootstrapStatus(false)
 		return err
 	}
 
-	logger.Log.Info(fmt.Sprintf("Starting change stream for partition %d", worker.partitionID))
+	logger.Log.Info("Starting change stream for partition %d", worker.partitionID)
 	return ps.startAndManageChangeStream(worker, startInfo.resumeToken, startInfo.startAtOperationTime)
 }
 
@@ -316,20 +316,20 @@ func (ps *partitionStream) determineStreamStartState(partitionID int) (*streamSt
 
 	resumeToken, clusterTime, err := ps.checkpointManager.GetResumeToken(ctx, partitionID)
 	if err != nil {
-		logger.Log.Error(fmt.Sprintf("Failed to get resume token - partitionId: %d, error: %v", partitionID, err))
+		logger.Log.Error("Failed to get resume token - partitionId: %d, error: %v", partitionID, err)
 		return nil, err
 	}
 
 	bootstrapLastID, err := ps.checkpointManager.GetBootstrapProgress(ctx, partitionID)
 	if err != nil {
-		logger.Log.Error(fmt.Sprintf("Failed to get bootstrap progress - partitionId: %d, error: %v", partitionID, err))
+		logger.Log.Error("Failed to get bootstrap progress - partitionId: %d, error: %v", partitionID, err)
 		return nil, err
 	}
 
 	shouldBootstrap := bootstrapLastID != nil || (resumeToken == nil && clusterTime == nil)
 
 	if bootstrapLastID != nil {
-		logger.Log.Info(fmt.Sprintf("Found incomplete bootstrap, will continue - partitionId: %d, lastId: %v", partitionID, bootstrapLastID))
+		logger.Log.Info("Found incomplete bootstrap, will continue - partitionId: %d, lastId: %v", partitionID, bootstrapLastID)
 	}
 
 	return &streamStartInfo{
@@ -341,13 +341,13 @@ func (ps *partitionStream) determineStreamStartState(partitionID int) (*streamSt
 
 func (ps *partitionStream) executeFullBootstrapFlow(worker *streamWorker) error {
 	if !ps.verifyPartitionOwnership(worker.ctx, worker.partitionID) {
-		logger.Log.Warn(fmt.Sprintf("Partition ownership verification failed before bootstrap - partitionId: %d", worker.partitionID))
+		logger.Log.Warn("Partition ownership verification failed before bootstrap - partitionId: %d", worker.partitionID)
 		return fmt.Errorf("partition %d not owned by this worker during bootstrap verification", worker.partitionID)
 	}
 
 	opTime, err := ps.fetchCurrentDbOperationTimeWithRetry(worker.ctx, 3)
 	if err != nil {
-		logger.Log.Warn(fmt.Sprintf("Could not get server operation time before bootstrap - partitionId: %d, error: %v", worker.partitionID, err))
+		logger.Log.Warn("Could not get server operation time before bootstrap - partitionId: %d, error: %v", worker.partitionID, err)
 	}
 
 	if err := ps.runBootstrapWithRetries(worker); err != nil {
@@ -356,11 +356,11 @@ func (ps *partitionStream) executeFullBootstrapFlow(worker *streamWorker) error 
 
 	if opTime != nil {
 		if err := ps.checkpointManager.SaveBootstrapClusterTime(worker.ctx, worker.partitionID, *opTime); err != nil {
-			logger.Log.Warn(fmt.Sprintf("Failed to save bootstrap cluster time - partitionId: %d, error: %v", worker.partitionID, err))
+			logger.Log.Warn("Failed to save bootstrap cluster time - partitionId: %d, error: %v", worker.partitionID, err)
 		}
 	}
 
-	logger.Log.Info(fmt.Sprintf("Bootstrap completed, transitioning to change stream for partition %d", worker.partitionID))
+	logger.Log.Info("Bootstrap completed, transitioning to change stream for partition %d", worker.partitionID)
 
 	return ps.startAndManageChangeStream(worker, nil, opTime)
 }
@@ -396,15 +396,15 @@ func (ps *partitionStream) fetchCurrentDbOperationTimeWithRetry(ctx context.Cont
 
 		opTime, err := ps.fetchCurrentDbOperationTime(ctx)
 		if err == nil && opTime != nil {
-			logger.Log.Debug(fmt.Sprintf("Successfully obtained operation time from database after %d attempts", backoffStrategy.Attempts()))
+			logger.Log.Debug("Successfully obtained operation time from database after %d attempts", backoffStrategy.Attempts())
 			return opTime, nil
 		}
 
 		lastErr = err
 		if err != nil {
-			logger.Log.Warn(fmt.Sprintf("Failed to get operation time, attempt %d/%d: %v", backoffStrategy.Attempts()+1, maxRetries, err))
+			logger.Log.Warn("Failed to get operation time, attempt %d/%d: %v", backoffStrategy.Attempts()+1, maxRetries, err)
 		} else {
-			logger.Log.Warn(fmt.Sprintf("Operation time is nil, attempt %d/%d", backoffStrategy.Attempts()+1, maxRetries))
+			logger.Log.Warn("Operation time is nil, attempt %d/%d", backoffStrategy.Attempts()+1, maxRetries)
 		}
 
 		delay, keepTrying := backoffStrategy.NextDelay()
@@ -419,7 +419,7 @@ func (ps *partitionStream) fetchCurrentDbOperationTimeWithRetry(ctx context.Cont
 		}
 	}
 
-	logger.Log.Warn(fmt.Sprintf("Failed to get operation time from database after %d attempts, using current time as fallback. Last error: %v", backoffStrategy.Attempts(), lastErr))
+	logger.Log.Warn("Failed to get operation time from database after %d attempts, using current time as fallback. Last error: %v", backoffStrategy.Attempts(), lastErr)
 
 	now := time.Now().Unix()
 	var t uint32
@@ -432,7 +432,7 @@ func (ps *partitionStream) fetchCurrentDbOperationTimeWithRetry(ctx context.Cont
 	}
 
 	fallbackOpTime := &primitive.Timestamp{T: t, I: 1}
-	logger.Log.Info(fmt.Sprintf("Using fallback operation time: %v", fallbackOpTime))
+	logger.Log.Info("Using fallback operation time: %v", fallbackOpTime)
 
 	return fallbackOpTime, nil
 }
@@ -453,12 +453,12 @@ func (ps *partitionStream) getBootstrapProgressWithRetry(partitionID int, maxRet
 		cancel()
 
 		if err == nil {
-			logger.Log.Debug(fmt.Sprintf("Successfully obtained bootstrap progress after %d attempts - partitionId: %d", backoffStrategy.Attempts(), partitionID))
+			logger.Log.Debug("Successfully obtained bootstrap progress after %d attempts - partitionId: %d", backoffStrategy.Attempts(), partitionID)
 			return bootstrapLastID, nil
 		}
 
 		lastErr = err
-		logger.Log.Warn(fmt.Sprintf("Failed to get bootstrap progress, attempt %d/%d - partitionId: %d, error: %v", backoffStrategy.Attempts()+1, maxRetries, partitionID, err))
+		logger.Log.Warn("Failed to get bootstrap progress, attempt %d/%d - partitionId: %d, error: %v", backoffStrategy.Attempts()+1, maxRetries, partitionID, err)
 
 		delay, keepTrying := backoffStrategy.NextDelay()
 		if !keepTrying {
@@ -484,20 +484,20 @@ func (ps *partitionStream) runBootstrapWithRetries(worker *streamWorker) error {
 		default:
 		}
 
-		logger.Log.Debug(fmt.Sprintf("Bootstrap attempt %d/%d for partition %d", backoffStrategy.Attempts()+1, backoffStrategy.Config.MaxRetries, worker.partitionID))
+		logger.Log.Debug("Bootstrap attempt %d/%d for partition %d", backoffStrategy.Attempts()+1, backoffStrategy.Config.MaxRetries, worker.partitionID)
 
 		err := ps.bootstrapPartition(worker)
 		if err == nil {
-			logger.Log.Info(fmt.Sprintf("Bootstrap successful for partition %d after %d attempts", worker.partitionID, backoffStrategy.Attempts()))
+			logger.Log.Info("Bootstrap successful for partition %d after %d attempts", worker.partitionID, backoffStrategy.Attempts())
 			return nil
 		}
 
 		if errors.Is(err, context.Canceled) {
-			logger.Log.Info(fmt.Sprintf("Bootstrap cancelled for partition %d", worker.partitionID))
+			logger.Log.Info("Bootstrap cancelled for partition %d", worker.partitionID)
 			return err
 		}
 
-		logger.Log.Warn(fmt.Sprintf("Bootstrap attempt %d/%d failed for partition %d: %v", backoffStrategy.Attempts(), backoffStrategy.Config.MaxRetries, worker.partitionID, err))
+		logger.Log.Warn("Bootstrap attempt %d/%d failed for partition %d: %v", backoffStrategy.Attempts(), backoffStrategy.Config.MaxRetries, worker.partitionID, err)
 
 		delay, keepTrying := backoffStrategy.NextDelay()
 		if !keepTrying {
@@ -513,7 +513,7 @@ func (ps *partitionStream) runBootstrapWithRetries(worker *streamWorker) error {
 }
 
 func (ps *partitionStream) bootstrapPartition(worker *streamWorker) error {
-	logger.Log.Debug(fmt.Sprintf("Starting bootstrap for partition %d", worker.partitionID))
+	logger.Log.Debug("Starting bootstrap for partition %d", worker.partitionID)
 
 	bootstrapLastID, filter, err := ps.loadBootstrapStateAndCreateFilter(worker.partitionID)
 	if err != nil {
@@ -532,7 +532,7 @@ func (ps *partitionStream) bootstrapPartition(worker *streamWorker) error {
 func (ps *partitionStream) loadBootstrapStateAndCreateFilter(partitionID int) (interface{}, bson.D, error) {
 	bootstrapLastID, err := ps.getBootstrapProgressWithRetry(partitionID, 3)
 	if err != nil {
-		logger.Log.Error(fmt.Sprintf("CRITICAL: Failed to get bootstrap progress after retries - partitionId: %d, error: %v", partitionID, err))
+		logger.Log.Error("CRITICAL: Failed to get bootstrap progress after retries - partitionId: %d, error: %v", partitionID, err)
 		return nil, nil, err
 	}
 
@@ -540,9 +540,9 @@ func (ps *partitionStream) loadBootstrapStateAndCreateFilter(partitionID int) (i
 	if bootstrapLastID != nil {
 		comparisonFilter := ps.buildResumeAfterIdFilter("_id", bootstrapLastID)
 		filter = append(filter, comparisonFilter...)
-		logger.Log.Info(fmt.Sprintf("Resuming bootstrap from saved progress - partitionId: %d, lastId: %v (type: %T)", partitionID, bootstrapLastID, bootstrapLastID))
+		logger.Log.Info("Resuming bootstrap from saved progress - partitionId: %d, lastId: %v (type: %T)", partitionID, bootstrapLastID, bootstrapLastID)
 	} else {
-		logger.Log.Info(fmt.Sprintf("Starting fresh bootstrap - partitionId: %d", partitionID))
+		logger.Log.Info("Starting fresh bootstrap - partitionId: %d", partitionID)
 	}
 
 	return bootstrapLastID, filter, nil
@@ -567,7 +567,7 @@ func (ps *partitionStream) queryDocumentsForBootstrap(worker *streamWorker, filt
 func (ps *partitionStream) shouldUseNumericStringSorting(worker *streamWorker, bootstrapLastID interface{}) bool {
 	if bootstrapLastID != nil {
 		if lastIDStr, ok := bootstrapLastID.(string); ok && ps.isNumericString(lastIDStr) {
-			logger.Log.Info(fmt.Sprintf("Resuming with numeric string ID '%s' - using mathematical sorting", lastIDStr))
+			logger.Log.Info("Resuming with numeric string ID '%s' - using mathematical sorting", lastIDStr)
 			return true
 		}
 		return false
@@ -575,7 +575,7 @@ func (ps *partitionStream) shouldUseNumericStringSorting(worker *streamWorker, b
 
 	isNumericStringCollection, err := ps.detectNumericStringCollection(worker.ctx)
 	if err != nil {
-		logger.Log.Warn(fmt.Sprintf("Failed to detect ID type, using default sorting - partitionId: %d, error: %v", worker.partitionID, err))
+		logger.Log.Warn("Failed to detect ID type, using default sorting - partitionId: %d, error: %v", worker.partitionID, err)
 		return false
 	}
 
@@ -655,9 +655,9 @@ func (ps *partitionStream) saveFinalBootstrapProgressOnInterruption(worker *stre
 		ctx, cancel := context.WithTimeout(context.Background(), ps.cfg.Checkpoint.TokenSaveTimeout)
 		defer cancel()
 		if err := ps.checkpointManager.SaveBootstrapProgress(ctx, worker.partitionID, state.lastProcessedID); err != nil {
-			logger.Log.Error(fmt.Sprintf("Failed to save final bootstrap progress on interruption - partitionId: %d, lastId: %v, error: %v", worker.partitionID, state.lastProcessedID, err))
+			logger.Log.Error("Failed to save final bootstrap progress on interruption - partitionId: %d, lastId: %v, error: %v", worker.partitionID, state.lastProcessedID, err)
 		} else {
-			logger.Log.Info(fmt.Sprintf("Saved bootstrap progress on interruption - partitionId: %d, lastId: %v, processed: %d", worker.partitionID, state.lastProcessedID, state.processedCount))
+			logger.Log.Info("Saved bootstrap progress on interruption - partitionId: %d, lastId: %v, processed: %d", worker.partitionID, state.lastProcessedID, state.processedCount)
 		}
 	}
 }
@@ -665,13 +665,13 @@ func (ps *partitionStream) saveFinalBootstrapProgressOnInterruption(worker *stre
 func (ps *partitionStream) dispatchBootstrapDocumentToListener(worker *streamWorker, cursor connection.Cursor, state *bootstrapProcessState) error {
 	var document bson.M
 	if err := cursor.Decode(&document); err != nil {
-		logger.Log.Error(fmt.Sprintf("Error decoding document: %v", err))
+		logger.Log.Error("Error decoding document: %v", err)
 		return nil
 	}
 
 	syntheticEvent := ps.createInsertEventFromDocument(document)
 	if err := ps.processEvent(worker, syntheticEvent, nil); err != nil {
-		logger.Log.Error(fmt.Sprintf("Error processing synthetic event - documentId: %v, error: %v", document["_id"], err))
+		logger.Log.Error("Error processing synthetic event - documentId: %v, error: %v", document["_id"], err)
 		return nil
 	}
 
@@ -681,7 +681,7 @@ func (ps *partitionStream) dispatchBootstrapDocumentToListener(worker *streamWor
 
 	if ps.shouldSaveBootstrapProgress(worker, state) {
 		if !ps.verifyPartitionOwnership(worker.ctx, worker.partitionID) {
-			logger.Log.Warn(fmt.Sprintf("Partition ownership lost before checkpoint save - partitionId: %d, processed: %d", worker.partitionID, state.processedCount))
+			logger.Log.Warn("Partition ownership lost before checkpoint save - partitionId: %d, processed: %d", worker.partitionID, state.processedCount)
 			return fmt.Errorf("partition %d ownership lost before checkpoint", worker.partitionID)
 		}
 
@@ -720,12 +720,12 @@ func (ps *partitionStream) shouldSaveBootstrapProgress(worker *streamWorker, sta
 	timeSinceLastCheckpoint := time.Since(state.lastCheckpointTime)
 
 	if state.processedCount%ps.cfg.Checkpoint.BootstrapSaveCount == 0 {
-		logger.Log.Debug(fmt.Sprintf("Bootstrap progress (count-based) - partitionId: %d, processed: %d", worker.partitionID, state.processedCount))
+		logger.Log.Debug("Bootstrap progress (count-based) - partitionId: %d, processed: %d", worker.partitionID, state.processedCount)
 		return true
 	}
 
 	if timeSinceLastCheckpoint >= ps.cfg.Checkpoint.BootstrapSaveInterval {
-		logger.Log.Debug(fmt.Sprintf("Bootstrap progress (time-based) - partitionId: %d, processed: %d, elapsed: %v", worker.partitionID, state.processedCount, timeSinceLastCheckpoint))
+		logger.Log.Debug("Bootstrap progress (time-based) - partitionId: %d, processed: %d, elapsed: %v", worker.partitionID, state.processedCount, timeSinceLastCheckpoint)
 		return true
 	}
 
@@ -737,32 +737,32 @@ func (ps *partitionStream) saveBootstrapProgress(worker *streamWorker, document 
 	defer saveCancel()
 
 	if err := ps.checkpointManager.SaveBootstrapProgress(saveCtx, worker.partitionID, document["_id"]); err != nil {
-		logger.Log.Error(fmt.Sprintf("Failed to save bootstrap progress - partitionId: %d, documentId: %v, error: %v", worker.partitionID, document["_id"], err))
+		logger.Log.Error("Failed to save bootstrap progress - partitionId: %d, documentId: %v, error: %v", worker.partitionID, document["_id"], err)
 		return nil
 	}
 
-	logger.Log.Debug(fmt.Sprintf("Saved bootstrap progress - partitionId: %d, documentId: %v, processed: %d", worker.partitionID, document["_id"], state.processedCount))
+	logger.Log.Debug("Saved bootstrap progress - partitionId: %d, documentId: %v, processed: %d", worker.partitionID, document["_id"], state.processedCount)
 	state.lastCheckpointTime = time.Now()
 
 	return nil
 }
 
 func (ps *partitionStream) finalizeBootstrapAndClearCheckpoint(worker *streamWorker, state *bootstrapProcessState) error {
-	logger.Log.Debug(fmt.Sprintf("Bootstrap completed - partitionId: %d, totalProcessed: %d", worker.partitionID, state.processedCount))
+	logger.Log.Debug("Bootstrap completed - partitionId: %d, totalProcessed: %d", worker.partitionID, state.processedCount)
 	state.bootstrapCompleted = true
 
 	if err := ps.checkpointManager.ClearBootstrapProgress(worker.ctx, worker.partitionID); err != nil {
-		logger.Log.Error(fmt.Sprintf("Failed to clear bootstrap progress - partitionId: %d, error: %v", worker.partitionID, err))
+		logger.Log.Error("Failed to clear bootstrap progress - partitionId: %d, error: %v", worker.partitionID, err)
 		return err
 	}
 
-	logger.Log.Info(fmt.Sprintf("Bootstrap progress cleared successfully - partitionId: %d", worker.partitionID))
+	logger.Log.Info("Bootstrap progress cleared successfully - partitionId: %d", worker.partitionID)
 	return nil
 }
 
 func (ps *partitionStream) startAndManageChangeStream(worker *streamWorker, resumeToken []byte, startAtOperationTime *primitive.Timestamp) error {
 	if !ps.verifyPartitionOwnership(worker.ctx, worker.partitionID) {
-		logger.Log.Warn(fmt.Sprintf("Partition ownership verification failed before change stream - partitionId: %d", worker.partitionID))
+		logger.Log.Warn("Partition ownership verification failed before change stream - partitionId: %d", worker.partitionID)
 		return fmt.Errorf("partition %d not owned by this worker before change stream", worker.partitionID)
 	}
 
@@ -771,16 +771,16 @@ func (ps *partitionStream) startAndManageChangeStream(worker *streamWorker, resu
 
 	if resumeToken != nil {
 		opts.SetResumeAfter(bson.Raw(resumeToken))
-		logger.Log.Info(fmt.Sprintf("Resuming from token - partitionId: %d", worker.partitionID))
+		logger.Log.Info("Resuming from token - partitionId: %d", worker.partitionID)
 	} else if startAtOperationTime != nil {
 		opts.SetStartAtOperationTime(startAtOperationTime)
-		logger.Log.Debug(fmt.Sprintf("Starting from operation time - partitionId: %d, operationTime: %v", worker.partitionID, startAtOperationTime))
+		logger.Log.Debug("Starting from operation time - partitionId: %d, operationTime: %v", worker.partitionID, startAtOperationTime)
 	}
 
 	changeStream, err := ps.collection.Watch(worker.ctx, pipeline, opts)
 	if err != nil {
 		if ps.isUnrecoverableResumeError(err) && resumeToken != nil {
-			logger.Log.Warn(fmt.Sprintf("Oplog history lost - resume token no longer valid - partitionId: %d, error: %v", worker.partitionID, err))
+			logger.Log.Warn("Oplog history lost - resume token no longer valid - partitionId: %d, error: %v", worker.partitionID, err)
 			return ErrOplogHistoryLost
 		}
 
@@ -803,7 +803,7 @@ func (ps *partitionStream) startAndManageChangeStream(worker *streamWorker, resu
 
 	defer ps.saveLatestResumeTokenOnInterruption(worker)
 
-	logger.Log.Debug(fmt.Sprintf("Change stream is now listening for partition %d", worker.partitionID))
+	logger.Log.Debug("Change stream is now listening for partition %d", worker.partitionID)
 
 	for changeStream.Next(worker.ctx) {
 		worker.tokenMutex.Lock()
@@ -812,13 +812,13 @@ func (ps *partitionStream) startAndManageChangeStream(worker *streamWorker, resu
 
 		var event message.ChangeEvent
 		if err := changeStream.Decode(&event); err != nil {
-			logger.Log.Error(fmt.Sprintf("Error decoding change event - partitionId: %d, error: %v", worker.partitionID, err))
+			logger.Log.Error("Error decoding change event - partitionId: %d, error: %v", worker.partitionID, err)
 			continue
 		}
 
 		currentToken := changeStream.ResumeToken()
 		if err := ps.processEvent(worker, event, currentToken); err != nil {
-			logger.Log.Error(fmt.Sprintf("Error processing event - partitionId: %d, op: %s, error: %v", worker.partitionID, event.OperationType, err))
+			logger.Log.Error("Error processing event - partitionId: %d, op: %s, error: %v", worker.partitionID, event.OperationType, err)
 			continue
 		}
 	}
@@ -840,9 +840,9 @@ func (ps *partitionStream) saveLatestResumeTokenOnInterruption(worker *streamWor
 	defer cancel()
 
 	if err := ps.checkpointManager.SaveResumeToken(ctx, worker.partitionID, lastToken, lastClusterTime); err != nil {
-		logger.Log.Error(fmt.Sprintf("Failed to save final resume token on interruption - partitionId: %d, error: %v", worker.partitionID, err))
+		logger.Log.Error("Failed to save final resume token on interruption - partitionId: %d, error: %v", worker.partitionID, err)
 	} else {
-		logger.Log.Info(fmt.Sprintf("Saved final resume token on interruption - partitionId: %d", worker.partitionID))
+		logger.Log.Info("Saved final resume token on interruption - partitionId: %d", worker.partitionID)
 	}
 }
 
@@ -854,20 +854,19 @@ func (ps *partitionStream) verifyPartitionOwnership(ctx context.Context, partiti
 	err := partitionsCol.FindOne(ctx, filter).Decode(&assignment)
 
 	if err != nil {
-		logger.Log.Debug(fmt.Sprintf("Partition assignment not found - partitionId: %d, error: %v", partitionID, err))
+		logger.Log.Debug("Partition assignment not found - partitionId: %d, error: %v", partitionID, err)
 		return false
 	}
 
 	if workerID, ok := assignment["workerId"].(string); ok {
 		owned := workerID == ps.workerID
 		if !owned {
-			logger.Log.Debug(fmt.Sprintf("Partition owned by different worker - partitionId: %d, owner: %s, current: %s",
-				partitionID, workerID, ps.workerID))
+			logger.Log.Debug("Partition owned by different worker - partitionId: %d, owner: %s, current: %s", partitionID, workerID, ps.workerID)
 		}
 		return owned
 	}
 
-	logger.Log.Debug(fmt.Sprintf("Partition assignment invalid format - partitionId: %d", partitionID))
+	logger.Log.Debug("Partition assignment invalid format - partitionId: %d", partitionID)
 	return false
 }
 
@@ -1048,7 +1047,7 @@ func (ps *partitionStream) buildResumeAfterIdFilter(fieldName string, lastValue 
 		// For any other complex type, convert to string representation for comparison
 		// This handles UUID strings, complex objects, etc.
 		valueStr := fmt.Sprintf("%v", v)
-		logger.Log.Info(fmt.Sprintf("Using string-based comparison for complex type %T (value: %s)", v, valueStr))
+		logger.Log.Info("Using string-based comparison for complex type %T (value: %s)", v, valueStr)
 
 		return bson.D{
 			{Key: "$or", Value: bson.A{
@@ -1200,7 +1199,7 @@ func (ps *partitionStream) startPeriodicTokenSaver(ctx context.Context, worker *
 				ps.metric.SetCheckpointSaveLatency(saveLatency)
 
 				if err != nil {
-					logger.Log.Error(fmt.Sprintf("Failed to save resume token periodically - partitionId: %d, error: %v", worker.partitionID, err))
+					logger.Log.Error("Failed to save resume token periodically - partitionId: %d, error: %v", worker.partitionID, err)
 					ps.metric.IncCheckpointSaveErrorTotal()
 				} else {
 					ps.metric.IncCheckpointSaveTotal()
@@ -1222,11 +1221,9 @@ func (ps *partitionStream) startIdleHeartbeat(ctx context.Context, worker *strea
 			worker.tokenMutex.RUnlock()
 
 			if idleDuration > ps.cfg.Checkpoint.MaxIdleTime {
-				logger.Log.Info(fmt.Sprintf("Stream is idle, updating highwatermark - partitionId: %d, idleDuration: %v",
-					worker.partitionID, idleDuration))
+				logger.Log.Info("Stream is idle, updating highwatermark - partitionId: %d, idleDuration: %v", worker.partitionID, idleDuration)
 				if err := ps.updateResumeTokenToHighwatermark(worker); err != nil {
-					logger.Log.Warn(fmt.Sprintf("Failed to update highwatermark - partitionId: %d, error: %v",
-						worker.partitionID, err))
+					logger.Log.Warn("Failed to update highwatermark - partitionId: %d, error: %v", worker.partitionID, err)
 				}
 			}
 		}
@@ -1293,7 +1290,7 @@ func (ps *partitionStream) Stop(ctx context.Context) error {
 	logger.Log.Info("Stopping partition stream")
 
 	if err := ps.partitionManager.ReleasePartitions(ctx); err != nil {
-		logger.Log.Error(fmt.Sprintf("Failed to release partitions during shutdown: %v", err))
+		logger.Log.Error("Failed to release partitions during shutdown: %v", err)
 	}
 
 	if ps.cancel != nil {
@@ -1303,14 +1300,14 @@ func (ps *partitionStream) Stop(ctx context.Context) error {
 	ps.streamsMutex.Lock()
 	workers := make([]*streamWorker, 0, len(ps.activeStreams))
 	for partitionID, worker := range ps.activeStreams {
-		logger.Log.Info(fmt.Sprintf("Stopping stream worker %d", partitionID))
+		logger.Log.Info("Stopping stream worker %d", partitionID)
 		worker.cancel()
 		workers = append(workers, worker)
 	}
 	ps.streamsMutex.Unlock()
 
 	timeout := ps.cfg.GracefulShutdownTimeout
-	logger.Log.Info(fmt.Sprintf("Waiting for in-flight events to complete (timeout: %v)", timeout))
+	logger.Log.Info("Waiting for in-flight events to complete (timeout: %v)", timeout)
 
 	inFlightDone := make(chan struct{})
 	go func() {
@@ -1324,7 +1321,7 @@ func (ps *partitionStream) Stop(ctx context.Context) error {
 	case <-inFlightDone:
 		logger.Log.Info("All in-flight events completed successfully")
 	case <-time.After(timeout):
-		logger.Log.Warn(fmt.Sprintf("Timeout (%v) waiting for in-flight events - some events may be reprocessed on restart", timeout))
+		logger.Log.Warn("Timeout (%v) waiting for in-flight events - some events may be reprocessed on restart", timeout)
 	}
 
 	workersDone := make(chan struct{})
@@ -1341,7 +1338,7 @@ func (ps *partitionStream) Stop(ctx context.Context) error {
 	}
 
 	if err := ps.partitionManager.Stop(ctx); err != nil {
-		logger.Log.Error(fmt.Sprintf("Failed to stop partition manager: %v", err))
+		logger.Log.Error("Failed to stop partition manager: %v", err)
 		return err
 	}
 

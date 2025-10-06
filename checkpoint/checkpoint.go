@@ -156,7 +156,7 @@ func (m *manager) SaveBootstrapProgress(ctx context.Context, partitionID int, la
 	_, err := m.collection.UpdateOne(ctx, filter, update, opts)
 
 	if err != nil {
-		logger.Log.Error(fmt.Sprintf("Failed to save bootstrap progress - partitionId: %d, lastId: %v, error: %v", partitionID, lastID, err))
+		logger.Log.Error("Failed to save bootstrap progress - partitionId: %d, lastId: %v, error: %v", partitionID, lastID, err)
 	}
 
 	return err
@@ -216,14 +216,12 @@ func (m *manager) ClearResumeToken(ctx context.Context, partitionID int) error {
 
 	result, err := m.collection.UpdateOne(ctx, filter, update)
 	if err != nil {
-		logger.Log.Error("Failed to clear resume token - partitionId: %d, checkpointId: %s, error: %v",
-			partitionID, checkpointID, err)
+		logger.Log.Error("Failed to clear resume token - partitionId: %d, checkpointId: %s, error: %v", partitionID, checkpointID, err)
 		return err
 	}
 
 	if result.MatchedCount() > 0 {
-		logger.Log.Info("Resume token cleared successfully - partitionId: %d, checkpointId: %s",
-			partitionID, checkpointID)
+		logger.Log.Info("Resume token cleared successfully - partitionId: %d, checkpointId: %s", partitionID, checkpointID)
 	}
 
 	return nil
