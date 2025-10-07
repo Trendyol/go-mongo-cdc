@@ -66,6 +66,7 @@ type CheckpointConfig struct {
 	ChangeStreamBatchSize int           `json:"changeStreamBatchSize" yaml:"changeStreamBatchSize"`
 	BootstrapSaveCount    int           `json:"bootstrapSaveCount" yaml:"bootstrapSaveCount"`
 	BootstrapSaveInterval time.Duration `json:"bootstrapSaveInterval" yaml:"bootstrapSaveInterval"`
+	BootstrapBatchSize    int           `json:"bootstrapBatchSize" yaml:"bootstrapBatchSize"`
 	IdleHeartbeatInterval time.Duration `json:"idleHeartbeatInterval" yaml:"idleHeartbeatInterval"`
 	MaxIdleTime           time.Duration `json:"maxIdleTime" yaml:"maxIdleTime"`
 }
@@ -93,15 +94,15 @@ func (c *Config) SetDefault() {
 	}
 
 	if c.MongoDB.Timeouts.ConnectTimeoutMS == 0 {
-		c.MongoDB.Timeouts.ConnectTimeoutMS = 10000 // 10 seconds
+		c.MongoDB.Timeouts.ConnectTimeoutMS = 30000 // 30 seconds
 	}
 
 	if c.MongoDB.Timeouts.ServerSelectionTimeoutMS == 0 {
-		c.MongoDB.Timeouts.ServerSelectionTimeoutMS = 30000 // 30 seconds
+		c.MongoDB.Timeouts.ServerSelectionTimeoutMS = 60000 // 60 seconds
 	}
 
 	if c.MongoDB.Timeouts.SocketTimeoutMS == 0 {
-		c.MongoDB.Timeouts.SocketTimeoutMS = 30000 // 30 seconds
+		c.MongoDB.Timeouts.SocketTimeoutMS = 120000 // 120 seconds
 	}
 
 	if c.Metric.Port == 0 {
@@ -124,6 +125,9 @@ func (c *Config) SetDefault() {
 	}
 	if c.Checkpoint.BootstrapSaveInterval == 0 {
 		c.Checkpoint.BootstrapSaveInterval = 5 * time.Second
+	}
+	if c.Checkpoint.BootstrapBatchSize == 0 {
+		c.Checkpoint.BootstrapBatchSize = 500
 	}
 	if c.Checkpoint.IdleHeartbeatInterval == 0 {
 		c.Checkpoint.IdleHeartbeatInterval = 3 * time.Minute

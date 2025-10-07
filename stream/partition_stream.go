@@ -71,6 +71,8 @@ type streamWorker struct {
 	lastEventTime   time.Time
 	ackedEventCount int
 	inFlightEvents  sync.WaitGroup
+	stopping        bool
+	stoppingMutex   sync.RWMutex
 }
 
 type streamStartInfo struct {
@@ -311,7 +313,7 @@ func (ps *partitionStream) startOrResumePartitionStream(worker *streamWorker) er
 }
 
 func (ps *partitionStream) determineStreamStartState(partitionID int) (*streamStartInfo, error) {
-	ctx, cancel := context.WithTimeout(context.Background(), 10*time.Second)
+	ctx, cancel := context.WithTimeout(context.Background(), 30*time.Second)
 	defer cancel()
 
 	resumeToken, clusterTime, err := ps.checkpointManager.GetResumeToken(ctx, partitionID)
@@ -447,7 +449,7 @@ func (ps *partitionStream) getBootstrapProgressWithRetry(partitionID int, maxRet
 
 	var lastErr error
 	for {
-		ctx, cancel := context.WithTimeout(context.Background(), 10*time.Second)
+		ctx, cancel := context.WithTimeout(context.Background(), 30*time.Second)
 
 		bootstrapLastID, err := ps.checkpointManager.GetBootstrapProgress(ctx, partitionID)
 		cancel()
@@ -551,14 +553,20 @@ func (ps *partitionStream) loadBootstrapStateAndCreateFilter(partitionID int) (i
 func (ps *partitionStream) queryDocumentsForBootstrap(worker *streamWorker, filter bson.D, bootstrapLastID interface{}) (connection.Cursor, error) {
 	useNumericStringSorting := ps.shouldUseNumericStringSorting(worker, bootstrapLastID)
 
-	opts := options.Find().SetSort(bson.D{{Key: "_id", Value: 1}})
+	batchSize := int32(ps.cfg.Checkpoint.BootstrapBatchSize)
+
+	opts := options.Find().
+		SetSort(bson.D{{Key: "_id", Value: 1}}).
+		SetBatchSize(batchSize).
+		SetNoCursorTimeout(false).
+		SetMaxTime(5 * time.Minute)
 
 	if useNumericStringSorting {
 		opts.SetCollation(&options.Collation{
 			Locale:          "en",
 			NumericOrdering: true,
 		})
-		logger.Log.Debug("Using collation-based numeric string sorting")
+		logger.Log.Debug("Using collation-based numeric string sorting - partitionId: %d", worker.partitionID)
 	}
 
 	return ps.collection.Find(worker.ctx, filter, opts)
@@ -671,7 +679,11 @@ func (ps *partitionStream) dispatchBootstrapDocumentToListener(worker *streamWor
 
 	syntheticEvent := ps.createInsertEventFromDocument(document)
 	if err := ps.processEvent(worker, syntheticEvent, nil); err != nil {
-		logger.Log.Error("Error processing synthetic event - documentId: %v, error: %v", document["_id"], err)
+		if errors.Is(err, context.Canceled) || strings.Contains(err.Error(), "worker is stopping") {
+			logger.Log.Debug("Bootstrap event skipped due to shutdown - documentId: %v", document["_id"])
+		} else {
+			logger.Log.Error("Error processing synthetic event - documentId: %v, error: %v", document["_id"], err)
+		}
 		return nil
 	}
 
@@ -1080,7 +1092,13 @@ func (ps *partitionStream) isUnrecoverableResumeError(err error) bool {
 }
 
 func (ps *partitionStream) processEvent(worker *streamWorker, event message.ChangeEvent, resumeToken []byte) error {
+	worker.stoppingMutex.RLock()
+	if worker.stopping {
+		worker.stoppingMutex.RUnlock()
+		return fmt.Errorf("worker is stopping, skipping event")
+	}
 	worker.inFlightEvents.Add(1)
+	worker.stoppingMutex.RUnlock()
 	defer worker.inFlightEvents.Done()
 
 	startTime := time.Now()
@@ -1289,9 +1307,7 @@ func (ps *partitionStream) updateResumeTokenToHighwatermark(worker *streamWorker
 func (ps *partitionStream) Stop(ctx context.Context) error {
 	logger.Log.Info("Stopping partition stream")
 
-	if err := ps.partitionManager.ReleasePartitions(ctx); err != nil {
-		logger.Log.Error("Failed to release partitions during shutdown: %v", err)
-	}
+	ps.partitionManager.SetPartitionsChangedCallback(nil)
 
 	if ps.cancel != nil {
 		ps.cancel()
@@ -1301,10 +1317,15 @@ func (ps *partitionStream) Stop(ctx context.Context) error {
 	workers := make([]*streamWorker, 0, len(ps.activeStreams))
 	for partitionID, worker := range ps.activeStreams {
 		logger.Log.Info("Stopping stream worker %d", partitionID)
+		worker.stoppingMutex.Lock()
+		worker.stopping = true
+		worker.stoppingMutex.Unlock()
 		worker.cancel()
 		workers = append(workers, worker)
 	}
 	ps.streamsMutex.Unlock()
+
+	time.Sleep(100 * time.Millisecond)
 
 	timeout := ps.cfg.GracefulShutdownTimeout
 	logger.Log.Info("Waiting for in-flight events to complete (timeout: %v)", timeout)
@@ -1335,6 +1356,8 @@ func (ps *partitionStream) Stop(ctx context.Context) error {
 		logger.Log.Info("All stream workers stopped")
 	case <-time.After(5 * time.Second):
 		logger.Log.Warn("Timeout waiting for stream workers to stop")
+	case <-ctx.Done():
+		logger.Log.Warn("Context cancelled while waiting for stream workers to stop")
 	}
 
 	if err := ps.partitionManager.Stop(ctx); err != nil {

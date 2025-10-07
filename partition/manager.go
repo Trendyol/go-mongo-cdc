@@ -472,6 +472,62 @@ func (m *manager) cleanupDeadWorkers(ctx context.Context) error {
 		logger.Log.Debug("No dead workers found - cutoff: %v", cutoff)
 	}
 
+	if err := m.cleanupOrphanPartitions(ctx); err != nil {
+		logger.Log.Error("Failed to cleanup orphan partitions: %v", err)
+	}
+
+	return nil
+}
+
+func (m *manager) cleanupOrphanPartitions(ctx context.Context) error {
+	activeWorkersCursor, err := m.workersCol.Find(ctx, bson.M{})
+	if err != nil {
+		return err
+	}
+	defer activeWorkersCursor.Close(ctx)
+
+	activeWorkerIDs := make(map[string]bool)
+	for activeWorkersCursor.Next(ctx) {
+		var worker WorkerInfo
+		if err := activeWorkersCursor.Decode(&worker); err != nil {
+			continue
+		}
+		activeWorkerIDs[worker.ID] = true
+	}
+
+	partitionsCursor, err := m.partitionsCol.Find(ctx, bson.M{})
+	if err != nil {
+		return err
+	}
+	defer partitionsCursor.Close(ctx)
+
+	var orphanPartitionIDs []int
+	for partitionsCursor.Next(ctx) {
+		var partition PartitionAssignment
+		if err := partitionsCursor.Decode(&partition); err != nil {
+			continue
+		}
+
+		if !activeWorkerIDs[partition.WorkerID] {
+			orphanPartitionIDs = append(orphanPartitionIDs, partition.PartitionID)
+		}
+	}
+
+	if len(orphanPartitionIDs) > 0 {
+		logger.Log.Info("Found orphan partitions (assigned to non-existent workers), cleaning up - partitions: %v", orphanPartitionIDs)
+
+		orphanFilter := bson.M{"_id": bson.M{"$in": orphanPartitionIDs}}
+		result, err := m.partitionsCol.DeleteMany(ctx, orphanFilter)
+		if err != nil {
+			logger.Log.Error("Failed to delete orphan partitions: %v", err)
+			return err
+		}
+
+		logger.Log.Info("Cleaned up %d orphan partitions", result.DeletedCount())
+	} else {
+		logger.Log.Debug("No orphan partitions found")
+	}
+
 	return nil
 }
 
@@ -562,32 +618,27 @@ func (m *manager) determineWorkerIndex(ctx context.Context) (int, error) {
 }
 
 func (m *manager) tryAcquireOrTakeoverPartitionWithRetry(ctx context.Context, partitionID int) error {
-	backoffStrategy := backoff.New(backoff.Config{
-		BaseDelay:  250 * time.Millisecond,
-		MaxDelay:   5 * time.Second,
-		Factor:     2.0,
-		MaxRetries: 5,
-	})
+	maxRetries := 5
+	retryDelay := 2 * time.Second
 
-	for {
+	for attempt := 1; attempt <= maxRetries; attempt++ {
 		err := m.tryAcquireOrTakeoverPartition(ctx, partitionID)
 		if err == nil {
 			return nil
 		}
 
-		delay, ok := backoffStrategy.NextDelay()
-		if !ok {
-			return fmt.Errorf("failed to acquire partition %d after %d attempts: %w", partitionID, backoffStrategy.Attempts(), err)
+		if attempt == maxRetries {
+			return fmt.Errorf("failed to acquire partition %d after %d attempts: %w", partitionID, maxRetries, err)
 		}
-
-		logger.Log.Debug("Partition acquisition failed, retrying - partition: %d, attempt: %d/%d, delay: %v, error: %v", partitionID, backoffStrategy.Attempts(), backoffStrategy.Config.MaxRetries, delay, err)
 
 		select {
 		case <-ctx.Done():
 			return ctx.Err()
-		case <-time.After(delay):
+		case <-time.After(retryDelay):
 		}
 	}
+
+	return fmt.Errorf("failed to acquire partition %d after %d attempts", partitionID, maxRetries)
 }
 
 func (m *manager) tryAcquireOrTakeoverPartition(ctx context.Context, partitionID int) error {
@@ -812,10 +863,6 @@ func (m *manager) Stop(ctx context.Context) error {
 	m.isRunning = false
 	m.mu.Unlock()
 
-	if err := m.ReleasePartitions(ctx); err != nil {
-		logger.Log.Error("Failed to release partitions during stop: %v", err)
-	}
-
 	close(m.stopCh)
 
 	done := make(chan struct{})
@@ -827,8 +874,32 @@ func (m *manager) Stop(ctx context.Context) error {
 	select {
 	case <-done:
 		logger.Log.Debug("Heartbeat and monitor loops stopped gracefully")
-	case <-time.After(2 * time.Second):
+	case <-time.After(15 * time.Second):
 		logger.Log.Warn("Timeout waiting for background loops to stop")
+	}
+
+	maxRetries := 3
+	retryDelay := 2 * time.Second
+	var releaseErr error
+
+	for attempt := 1; attempt <= maxRetries; attempt++ {
+		releaseErr = m.ReleasePartitions(ctx)
+		if releaseErr == nil {
+			logger.Log.Info("Successfully released all partitions on attempt %d", attempt)
+			break
+		}
+
+		if attempt < maxRetries {
+			logger.Log.Warn("Failed to release partitions (attempt %d/%d), retrying in %v: %v", attempt, maxRetries, retryDelay, releaseErr)
+			select {
+			case <-ctx.Done():
+				logger.Log.Error("Context cancelled during partition release retry")
+				break
+			case <-time.After(retryDelay):
+			}
+		} else {
+			logger.Log.Error("Failed to release partitions after %d attempts: %v", maxRetries, releaseErr)
+		}
 	}
 
 	filter := bson.M{"_id": m.workerID}

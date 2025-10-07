@@ -29,9 +29,9 @@ func main() {
 				MaxIdleTimeMS: 300000, // 5 minutes
 			},
 			Timeouts: config.Timeouts{
-				ConnectTimeoutMS:         10000, // 10 seconds
-				ServerSelectionTimeoutMS: 30000, // 30 seconds
-				SocketTimeoutMS:          30000, // 30 seconds
+				ConnectTimeoutMS:         30000,  // 30 seconds
+				ServerSelectionTimeoutMS: 60000,  // 60 seconds
+				SocketTimeoutMS:          120000, // 120 seconds
 			},
 		},
 		Metric: config.MetricConfig{
@@ -43,6 +43,7 @@ func main() {
 			ChangeStreamBatchSize: 1,
 			BootstrapSaveCount:    1000,
 			BootstrapSaveInterval: 5 * time.Second,
+			BootstrapBatchSize:    500,
 		},
 		Partition: config.PartitionConfig{
 			HeartbeatInterval:      10 * time.Second,

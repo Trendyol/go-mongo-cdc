@@ -83,8 +83,8 @@ func (m *manager) SaveResumeToken(ctx context.Context, partitionID int, token []
 	opts := options.Update().SetUpsert(true)
 
 	backoffStrategy := backoff.New(backoff.Config{
-		BaseDelay:  2 * time.Second,
-		MaxDelay:   10 * time.Second,
+		BaseDelay:  100 * time.Millisecond,
+		MaxDelay:   5 * time.Second,
 		Factor:     2.0,
 		MaxRetries: 3,
 	})
@@ -153,13 +153,32 @@ func (m *manager) SaveBootstrapProgress(ctx context.Context, partitionID int, la
 	}
 
 	opts := options.Update().SetUpsert(true)
-	_, err := m.collection.UpdateOne(ctx, filter, update, opts)
 
-	if err != nil {
-		logger.Log.Error("Failed to save bootstrap progress - partitionId: %d, lastId: %v, error: %v", partitionID, lastID, err)
+	backoffStrategy := backoff.New(backoff.Config{
+		BaseDelay:  100 * time.Millisecond,
+		MaxDelay:   2 * time.Second,
+		Factor:     2.0,
+		MaxRetries: 3,
+	})
+
+	for {
+		_, err := m.collection.UpdateOne(ctx, filter, update, opts)
+		if err == nil {
+			return nil
+		}
+
+		delay, keepTrying := backoffStrategy.NextDelay()
+		if !keepTrying {
+			logger.Log.Error("Failed to save bootstrap progress after retries - partitionId: %d, lastId: %v, error: %v", partitionID, lastID, err)
+			return err
+		}
+
+		select {
+		case <-ctx.Done():
+			return ctx.Err()
+		case <-time.After(delay):
+		}
 	}
-
-	return err
 }
 
 func (m *manager) GetBootstrapProgress(ctx context.Context, partitionID int) (interface{}, error) {
