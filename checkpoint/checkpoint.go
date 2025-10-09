@@ -82,12 +82,7 @@ func (m *manager) SaveResumeToken(ctx context.Context, partitionID int, token []
 
 	opts := options.Update().SetUpsert(true)
 
-	backoffStrategy := backoff.New(backoff.Config{
-		BaseDelay:  100 * time.Millisecond,
-		MaxDelay:   5 * time.Second,
-		Factor:     2.0,
-		MaxRetries: 3,
-	})
+	b := backoff.New(backoff.FastConfig)
 
 	for {
 		_, err := m.collection.UpdateOne(ctx, filter, update, opts)
@@ -96,25 +91,22 @@ func (m *manager) SaveResumeToken(ctx context.Context, partitionID int, token []
 			return nil
 		}
 
-		delay, keepTrying := backoffStrategy.NextDelay()
-		if !keepTrying {
-			logger.Log.Error(
-				"Failed to save resume token after all retries - partitionId: %d, checkpointId: %s, error: %v",
-				partitionID, checkpointID, err,
-			)
-			return err
+		attempts := b.Attempts()
+		if sleepErr := b.Sleep(ctx); sleepErr != nil {
+			if sleepErr == backoff.ErrMaxRetriesExceeded {
+				logger.Log.Error(
+					"Failed to save resume token after all retries - partitionId: %d, checkpointId: %s, error: %v",
+					partitionID, checkpointID, err,
+				)
+				return err
+			}
+			return sleepErr
 		}
 
 		logger.Log.Warn(
 			"Failed to save resume token, retrying... - partitionId: %d, attempt: %d, maxRetries: %d, error: %v",
-			partitionID, backoffStrategy.Attempts(), backoffStrategy.Config.MaxRetries, err,
+			partitionID, attempts+1, b.Config.MaxRetries, err,
 		)
-
-		select {
-		case <-ctx.Done():
-			return ctx.Err()
-		case <-time.After(delay):
-		}
 	}
 }
 
@@ -154,12 +146,7 @@ func (m *manager) SaveBootstrapProgress(ctx context.Context, partitionID int, la
 
 	opts := options.Update().SetUpsert(true)
 
-	backoffStrategy := backoff.New(backoff.Config{
-		BaseDelay:  100 * time.Millisecond,
-		MaxDelay:   2 * time.Second,
-		Factor:     2.0,
-		MaxRetries: 3,
-	})
+	b := backoff.New(backoff.FastConfig)
 
 	for {
 		_, err := m.collection.UpdateOne(ctx, filter, update, opts)
@@ -167,16 +154,12 @@ func (m *manager) SaveBootstrapProgress(ctx context.Context, partitionID int, la
 			return nil
 		}
 
-		delay, keepTrying := backoffStrategy.NextDelay()
-		if !keepTrying {
-			logger.Log.Error("Failed to save bootstrap progress after retries - partitionId: %d, lastId: %v, error: %v", partitionID, lastID, err)
-			return err
-		}
-
-		select {
-		case <-ctx.Done():
-			return ctx.Err()
-		case <-time.After(delay):
+		if sleepErr := b.Sleep(ctx); sleepErr != nil {
+			if sleepErr == backoff.ErrMaxRetriesExceeded {
+				logger.Log.Error("Failed to save bootstrap progress after retries - partitionId: %d, lastId: %v, error: %v", partitionID, lastID, err)
+				return err
+			}
+			return sleepErr
 		}
 	}
 }

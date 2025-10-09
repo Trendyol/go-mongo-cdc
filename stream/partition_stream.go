@@ -227,12 +227,7 @@ func (ps *partitionStream) reconcilePartitionAssignments(newPartitions []int) {
 func (ps *partitionStream) managePartitionWorkerLifecycle(worker *streamWorker) {
 	defer ps.wg.Done()
 
-	backoffStrategy := backoff.New(backoff.Config{
-		BaseDelay:  1 * time.Second,
-		MaxDelay:   30 * time.Second,
-		Factor:     2.0,
-		MaxRetries: 3,
-	})
+	b := backoff.New(backoff.StreamRetryConfig)
 
 	for {
 		select {
@@ -269,6 +264,7 @@ func (ps *partitionStream) managePartitionWorkerLifecycle(worker *streamWorker) 
 				case <-worker.ctx.Done():
 					return
 				}
+				b.Reset()
 				continue
 			}
 
@@ -276,8 +272,7 @@ func (ps *partitionStream) managePartitionWorkerLifecycle(worker *streamWorker) 
 			ps.metric.IncChangeStreamErrorTotal()
 			ps.metric.IncChangeStreamRestartTotal()
 
-			delay, _ := backoffStrategy.NextDelay()
-
+			delay, _ := b.NextDelay()
 			logger.Log.Debug("Backing off for %v before retry - partitionId: %d", delay, worker.partitionID)
 
 			select {
@@ -381,12 +376,9 @@ func (ps *partitionStream) fetchCurrentDbOperationTime(ctx context.Context) (*pr
 }
 
 func (ps *partitionStream) fetchCurrentDbOperationTimeWithRetry(ctx context.Context, maxRetries int) (*primitive.Timestamp, error) {
-	backoffStrategy := backoff.New(backoff.Config{
-		BaseDelay:  1 * time.Second,
-		MaxDelay:   5 * time.Second,
-		Factor:     2.0,
-		MaxRetries: maxRetries,
-	})
+	cfg := backoff.DefaultConfig
+	cfg.MaxRetries = maxRetries
+	b := backoff.New(cfg)
 
 	var lastErr error
 	for {
@@ -398,30 +390,27 @@ func (ps *partitionStream) fetchCurrentDbOperationTimeWithRetry(ctx context.Cont
 
 		opTime, err := ps.fetchCurrentDbOperationTime(ctx)
 		if err == nil && opTime != nil {
-			logger.Log.Debug("Successfully obtained operation time from database after %d attempts", backoffStrategy.Attempts())
+			logger.Log.Debug("Successfully obtained operation time from database after %d attempts", b.Attempts())
 			return opTime, nil
 		}
 
 		lastErr = err
+		attempts := b.Attempts()
 		if err != nil {
-			logger.Log.Warn("Failed to get operation time, attempt %d/%d: %v", backoffStrategy.Attempts()+1, maxRetries, err)
+			logger.Log.Warn("Failed to get operation time, attempt %d/%d: %v", attempts+1, maxRetries, err)
 		} else {
-			logger.Log.Warn("Operation time is nil, attempt %d/%d", backoffStrategy.Attempts()+1, maxRetries)
+			logger.Log.Warn("Operation time is nil, attempt %d/%d", attempts+1, maxRetries)
 		}
 
-		delay, keepTrying := backoffStrategy.NextDelay()
-		if !keepTrying {
-			break
-		}
-
-		select {
-		case <-ctx.Done():
-			return nil, ctx.Err()
-		case <-time.After(delay):
+		if sleepErr := b.Sleep(ctx); sleepErr != nil {
+			if sleepErr == backoff.ErrMaxRetriesExceeded {
+				break
+			}
+			return nil, sleepErr
 		}
 	}
 
-	logger.Log.Warn("Failed to get operation time from database after %d attempts, using current time as fallback. Last error: %v", backoffStrategy.Attempts(), lastErr)
+	logger.Log.Warn("Failed to get operation time from database after %d attempts, using current time as fallback. Last error: %v", b.Attempts(), lastErr)
 
 	now := time.Now().Unix()
 	var t uint32
@@ -440,12 +429,9 @@ func (ps *partitionStream) fetchCurrentDbOperationTimeWithRetry(ctx context.Cont
 }
 
 func (ps *partitionStream) getBootstrapProgressWithRetry(partitionID int, maxRetries int) (interface{}, error) {
-	backoffStrategy := backoff.New(backoff.Config{
-		BaseDelay:  1 * time.Second,
-		MaxDelay:   5 * time.Second,
-		Factor:     2.0,
-		MaxRetries: maxRetries,
-	})
+	cfg := backoff.DefaultConfig
+	cfg.MaxRetries = maxRetries
+	b := backoff.New(cfg)
 
 	var lastErr error
 	for {
@@ -455,16 +441,17 @@ func (ps *partitionStream) getBootstrapProgressWithRetry(partitionID int, maxRet
 		cancel()
 
 		if err == nil {
-			logger.Log.Debug("Successfully obtained bootstrap progress after %d attempts - partitionId: %d", backoffStrategy.Attempts(), partitionID)
+			logger.Log.Debug("Successfully obtained bootstrap progress after %d attempts - partitionId: %d", b.Attempts(), partitionID)
 			return bootstrapLastID, nil
 		}
 
 		lastErr = err
-		logger.Log.Warn("Failed to get bootstrap progress, attempt %d/%d - partitionId: %d, error: %v", backoffStrategy.Attempts()+1, maxRetries, partitionID, err)
+		attempts := b.Attempts()
+		logger.Log.Warn("Failed to get bootstrap progress, attempt %d/%d - partitionId: %d, error: %v", attempts+1, maxRetries, partitionID, err)
 
-		delay, keepTrying := backoffStrategy.NextDelay()
-		if !keepTrying {
-			return nil, fmt.Errorf("failed to get bootstrap progress after %d attempts for partition %d, last error: %v", backoffStrategy.Attempts(), partitionID, lastErr)
+		delay, ok := b.NextDelay()
+		if !ok {
+			return nil, fmt.Errorf("failed to get bootstrap progress after %d attempts for partition %d, last error: %v", attempts, partitionID, lastErr)
 		}
 
 		time.Sleep(delay)
@@ -472,12 +459,7 @@ func (ps *partitionStream) getBootstrapProgressWithRetry(partitionID int, maxRet
 }
 
 func (ps *partitionStream) runBootstrapWithRetries(worker *streamWorker) error {
-	backoffStrategy := backoff.New(backoff.Config{
-		BaseDelay:  5 * time.Second,
-		MaxDelay:   30 * time.Second,
-		Factor:     2.0,
-		MaxRetries: 3,
-	})
+	b := backoff.New(backoff.SlowConfig)
 
 	for {
 		select {
@@ -486,11 +468,12 @@ func (ps *partitionStream) runBootstrapWithRetries(worker *streamWorker) error {
 		default:
 		}
 
-		logger.Log.Debug("Bootstrap attempt %d/%d for partition %d", backoffStrategy.Attempts()+1, backoffStrategy.Config.MaxRetries, worker.partitionID)
+		attempts := b.Attempts()
+		logger.Log.Debug("Bootstrap attempt %d/%d for partition %d", attempts+1, b.Config.MaxRetries, worker.partitionID)
 
 		err := ps.bootstrapPartition(worker)
 		if err == nil {
-			logger.Log.Info("Bootstrap successful for partition %d after %d attempts", worker.partitionID, backoffStrategy.Attempts())
+			logger.Log.Info("Bootstrap successful for partition %d after %d attempts", worker.partitionID, attempts)
 			return nil
 		}
 
@@ -499,17 +482,13 @@ func (ps *partitionStream) runBootstrapWithRetries(worker *streamWorker) error {
 			return err
 		}
 
-		logger.Log.Warn("Bootstrap attempt %d/%d failed for partition %d: %v", backoffStrategy.Attempts(), backoffStrategy.Config.MaxRetries, worker.partitionID, err)
+		logger.Log.Warn("Bootstrap attempt %d/%d failed for partition %d: %v", attempts, b.Config.MaxRetries, worker.partitionID, err)
 
-		delay, keepTrying := backoffStrategy.NextDelay()
-		if !keepTrying {
-			return fmt.Errorf("bootstrap failed after %d attempts for partition %d", backoffStrategy.Attempts(), worker.partitionID)
-		}
-
-		select {
-		case <-worker.ctx.Done():
-			return worker.ctx.Err()
-		case <-time.After(delay):
+		if sleepErr := b.Sleep(worker.ctx); sleepErr != nil {
+			if sleepErr == backoff.ErrMaxRetriesExceeded {
+				return fmt.Errorf("bootstrap failed after %d attempts for partition %d", attempts, worker.partitionID)
+			}
+			return sleepErr
 		}
 	}
 }
@@ -732,12 +711,12 @@ func (ps *partitionStream) shouldSaveBootstrapProgress(worker *streamWorker, sta
 	timeSinceLastCheckpoint := time.Since(state.lastCheckpointTime)
 
 	if state.processedCount%ps.cfg.Checkpoint.BootstrapSaveCount == 0 {
-		logger.Log.Debug("Bootstrap progress (count-based) - partitionId: %d, processed: %d", worker.partitionID, state.processedCount)
+		//logger.Log.Debug("Bootstrap progress (count-based) - partitionId: %d, processed: %d", worker.partitionID, state.processedCount)
 		return true
 	}
 
 	if timeSinceLastCheckpoint >= ps.cfg.Checkpoint.BootstrapSaveInterval {
-		logger.Log.Debug("Bootstrap progress (time-based) - partitionId: %d, processed: %d, elapsed: %v", worker.partitionID, state.processedCount, timeSinceLastCheckpoint)
+		//logger.Log.Debug("Bootstrap progress (time-based) - partitionId: %d, processed: %d, elapsed: %v", worker.partitionID, state.processedCount, timeSinceLastCheckpoint)
 		return true
 	}
 
@@ -753,7 +732,7 @@ func (ps *partitionStream) saveBootstrapProgress(worker *streamWorker, document 
 		return nil
 	}
 
-	logger.Log.Debug("Saved bootstrap progress - partitionId: %d, documentId: %v, processed: %d", worker.partitionID, document["_id"], state.processedCount)
+	//logger.Log.Debug("Saved bootstrap progress - partitionId: %d, documentId: %v, processed: %d", worker.partitionID, document["_id"], state.processedCount)
 	state.lastCheckpointTime = time.Now()
 
 	return nil

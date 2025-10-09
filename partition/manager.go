@@ -129,32 +129,24 @@ func (m *manager) createIndexes(ctx context.Context) error {
 }
 
 func (m *manager) registerWorkerWithRetry(ctx context.Context) error {
-	backoffStrategy := backoff.New(backoff.Config{
-		BaseDelay:  500 * time.Millisecond,
-		MaxDelay:   5 * time.Second,
-		Factor:     2.0,
-		MaxRetries: 3,
-	})
+	b := backoff.New(backoff.DefaultConfig)
 
 	for {
 		err := m.registerWorker(ctx)
 		if err == nil {
-			logger.Log.Info("Worker registered successfully - workerId: %s, attempt: %d", m.workerID, backoffStrategy.Attempts())
+			logger.Log.Info("Worker registered successfully - workerId: %s, attempt: %d", m.workerID, b.Attempts())
 			return nil
 		}
 
-		delay, keepTrying := backoffStrategy.NextDelay()
-		if !keepTrying {
-			return fmt.Errorf("failed to register worker after %d attempts: %w", backoffStrategy.Attempts(), err)
+		attempts := b.Attempts()
+		if sleepErr := b.Sleep(ctx); sleepErr != nil {
+			if sleepErr == backoff.ErrMaxRetriesExceeded {
+				return fmt.Errorf("failed to register worker after %d attempts: %w", attempts, err)
+			}
+			return sleepErr
 		}
 
-		logger.Log.Warn("Worker registration failed, retrying - attempt: %d/%d, delay: %v, error: %v", backoffStrategy.Attempts(), backoffStrategy.Config.MaxRetries, delay, err)
-
-		select {
-		case <-ctx.Done():
-			return ctx.Err()
-		case <-time.After(delay):
-		}
+		logger.Log.Warn("Worker registration failed, retrying - attempt: %d/%d, error: %v", attempts+1, b.Config.MaxRetries, err)
 	}
 }
 
@@ -560,12 +552,7 @@ func (m *manager) determineWorkerIndex(ctx context.Context) (int, error) {
 	filter := bson.M{"lastHeartbeat": bson.M{"$gte": cutoff}}
 	opts := options.Find().SetSort(bson.D{{Key: "_id", Value: 1}})
 
-	backoffStrategy := backoff.New(backoff.Config{
-		BaseDelay:  1 * time.Second,
-		MaxDelay:   5 * time.Second,
-		Factor:     1.5,
-		MaxRetries: 3,
-	})
+	b := backoff.New(backoff.DefaultConfig)
 
 	for {
 		cursor, err := m.workersCol.Find(ctx, filter, opts)
@@ -597,22 +584,19 @@ func (m *manager) determineWorkerIndex(ctx context.Context) (int, error) {
 			return index, nil
 		}
 
-		logger.Log.Warn("Worker not found in active workers list, retrying - myWorkerId: %s, allActiveWorkers: %v, attempt: %d/%d", m.workerID, allWorkers, backoffStrategy.Attempts()+1, backoffStrategy.Config.MaxRetries)
-
-		delay, keepTrying := backoffStrategy.NextDelay()
-		if !keepTrying {
-			logger.Log.Error("Worker not found in active workers list after %d attempts - myWorkerId: %s", backoffStrategy.Attempts(), m.workerID)
-			return -1, fmt.Errorf("worker not found in active workers list after %d attempts", backoffStrategy.Attempts())
-		}
+		attempts := b.Attempts()
+		logger.Log.Warn("Worker not found in active workers list, retrying - myWorkerId: %s, allActiveWorkers: %v, attempt: %d/%d", m.workerID, allWorkers, attempts+1, b.Config.MaxRetries)
 
 		if heartbeatErr := m.sendHeartbeat(ctx); heartbeatErr != nil {
 			logger.Log.Error("Failed to send heartbeat during worker index retry: %v", heartbeatErr)
 		}
 
-		select {
-		case <-ctx.Done():
-			return -1, ctx.Err()
-		case <-time.After(delay):
+		if sleepErr := b.Sleep(ctx); sleepErr != nil {
+			if sleepErr == backoff.ErrMaxRetriesExceeded {
+				logger.Log.Error("Worker not found in active workers list after %d attempts - myWorkerId: %s", attempts, m.workerID)
+				return -1, fmt.Errorf("worker not found in active workers list after %d attempts", attempts)
+			}
+			return -1, sleepErr
 		}
 	}
 }

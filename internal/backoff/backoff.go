@@ -1,36 +1,33 @@
 package backoff
 
 import (
-	crand "crypto/rand"
-	"math/big"
+	"context"
+	"math/rand"
 	"time"
 )
 
-// Config holds the configuration for the backoff strategy.
 type Config struct {
 	BaseDelay  time.Duration
 	MaxDelay   time.Duration
 	Factor     float64
-	MaxRetries int // 0 for infinite retries
+	MaxRetries int
 }
 
-// Backoff manages the state of an exponential backoff operation.
 type Backoff struct {
 	Config       Config
 	currentDelay time.Duration
 	attempts     int
+	rng          *rand.Rand
 }
 
-// New creates a new Backoff instance with the given configuration.
 func New(config Config) *Backoff {
 	return &Backoff{
 		Config:       config,
 		currentDelay: config.BaseDelay,
+		rng:          rand.New(rand.NewSource(time.Now().UnixNano())),
 	}
 }
 
-// NextDelay calculates and returns the next backoff duration.
-// It returns false if the max number of retries has been exceeded.
 func (b *Backoff) NextDelay() (time.Duration, bool) {
 	if b.Config.MaxRetries > 0 && b.attempts >= b.Config.MaxRetries {
 		return 0, false
@@ -38,18 +35,12 @@ func (b *Backoff) NextDelay() (time.Duration, bool) {
 
 	delay := b.currentDelay
 
-	// Add jitter (up to 20% of the current delay)
-	maxJitter := delay / 5
-	jitter := time.Duration(0)
+	maxJitter := int64(delay / 5)
 	if maxJitter > 0 {
-		n, err := crand.Int(crand.Reader, big.NewInt(int64(maxJitter)))
-		if err == nil {
-			jitter = time.Duration(n.Int64())
-		}
+		jitter := b.rng.Int63n(maxJitter)
+		delay += time.Duration(jitter)
 	}
-	delay += jitter
 
-	// Increase delay for the next attempt
 	b.currentDelay = time.Duration(float64(b.currentDelay) * b.Config.Factor)
 	if b.currentDelay > b.Config.MaxDelay {
 		b.currentDelay = b.Config.MaxDelay
@@ -60,13 +51,66 @@ func (b *Backoff) NextDelay() (time.Duration, bool) {
 	return delay, true
 }
 
-// Attempts returns the current number of attempts.
+func (b *Backoff) Sleep(ctx context.Context) error {
+	delay, ok := b.NextDelay()
+	if !ok {
+		return ErrMaxRetriesExceeded
+	}
+
+	timer := time.NewTimer(delay)
+	defer timer.Stop()
+
+	select {
+	case <-ctx.Done():
+		return ctx.Err()
+	case <-timer.C:
+		return nil
+	}
+}
+
 func (b *Backoff) Attempts() int {
 	return b.attempts
 }
 
-// Reset resets the backoff state.
 func (b *Backoff) Reset() {
 	b.currentDelay = b.Config.BaseDelay
 	b.attempts = 0
 }
+
+var ErrMaxRetriesExceeded = &MaxRetriesExceededError{}
+
+type MaxRetriesExceededError struct{}
+
+func (e *MaxRetriesExceededError) Error() string {
+	return "max retries exceeded"
+}
+
+var (
+	DefaultConfig = Config{
+		BaseDelay:  1 * time.Second,
+		MaxDelay:   5 * time.Second,
+		Factor:     2.0,
+		MaxRetries: 3,
+	}
+
+	FastConfig = Config{
+		BaseDelay:  100 * time.Millisecond,
+		MaxDelay:   2 * time.Second,
+		Factor:     2.0,
+		MaxRetries: 3,
+	}
+
+	SlowConfig = Config{
+		BaseDelay:  5 * time.Second,
+		MaxDelay:   30 * time.Second,
+		Factor:     2.0,
+		MaxRetries: 3,
+	}
+
+	StreamRetryConfig = Config{
+		BaseDelay:  1 * time.Second,
+		MaxDelay:   30 * time.Second,
+		Factor:     2.0,
+		MaxRetries: 3,
+	}
+)
