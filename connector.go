@@ -114,6 +114,8 @@ func (c *connector) Start(ctx context.Context) {
 	ctx, cancel := context.WithCancel(ctx)
 	defer cancel()
 
+	signal.Notify(c.cancelCh, syscall.SIGTERM, syscall.SIGINT, syscall.SIGABRT, syscall.SIGQUIT)
+
 	g, gCtx := errgroup.WithContext(ctx)
 
 	g.Go(func() error {
@@ -139,10 +141,9 @@ func (c *connector) Start(ctx context.Context) {
 	})
 
 	g.Go(func() error {
-		signal.Notify(c.cancelCh, syscall.SIGTERM, syscall.SIGINT, syscall.SIGABRT, syscall.SIGQUIT)
 		select {
-		case <-c.cancelCh:
-			logger.Log.Info("Shutdown signal received, cancelling context...")
+		case sig := <-c.cancelCh:
+			logger.Log.Info("Shutdown signal received: %v, cancelling context...", sig)
 			cancel()
 			return context.Canceled
 		case <-gCtx.Done():
@@ -204,11 +205,12 @@ func (c *connector) collectMongoDBMetricsPeriodically(ctx context.Context) {
 	collectMetrics := func() {
 		select {
 		case <-ctx.Done():
+			logger.Log.Debug("Metrics collection cancelled")
 			return
 		default:
 		}
 
-		metricsCtx, cancel := context.WithTimeout(context.Background(), 5*time.Second)
+		metricsCtx, cancel := context.WithTimeout(ctx, 5*time.Second)
 		defer cancel()
 
 		client, ok := c.mongoClient.(*connection.MongoClient)

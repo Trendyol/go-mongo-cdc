@@ -160,7 +160,7 @@ func (c *Config) SetDefault() {
 	}
 
 	if c.GracefulShutdownTimeout == 0 {
-		c.GracefulShutdownTimeout = 30 * time.Second
+		c.GracefulShutdownTimeout = 5 * time.Second
 	}
 }
 

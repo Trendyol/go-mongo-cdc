@@ -186,6 +186,7 @@ func (m *manager) heartbeatLoop() {
 	for {
 		select {
 		case <-m.stopCh:
+			logger.Log.Debug("Heartbeat loop stopped")
 			return
 		case <-ticker.C:
 			ctx, cancel := context.WithTimeout(context.Background(), 5*time.Second)
