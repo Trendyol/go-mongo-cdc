@@ -41,18 +41,11 @@ type Collector struct {
 	listenerErrorTotal      *prometheus.Desc
 	partitionRebalanceTotal *prometheus.Desc
 
-	oplogSize            *prometheus.Desc
-	oplogUsedSize        *prometheus.Desc
-	oplogUsedPercent     *prometheus.Desc
-	oplogTimeDiff        *prometheus.Desc
 	replicationLag       *prometheus.Desc
 	activeConnections    *prometheus.Desc
 	availableConnections *prometheus.Desc
 
-	shardOplogSize        *prometheus.Desc
-	shardOplogUsedSize    *prometheus.Desc
-	shardOplogUsedPercent *prometheus.Desc
-	shardReplicationLag   *prometheus.Desc
+	shardReplicationLag *prometheus.Desc
 
 	buildInfo *prometheus.Desc
 }
@@ -224,30 +217,6 @@ func NewCollector(m Metric) *Collector {
 			nil,
 		),
 
-		oplogSize: prometheus.NewDesc(
-			prometheus.BuildFQName(namespace, "mongodb", "oplog_size_bytes"),
-			"MongoDB oplog size in bytes",
-			nil,
-			nil,
-		),
-		oplogUsedSize: prometheus.NewDesc(
-			prometheus.BuildFQName(namespace, "mongodb", "oplog_used_bytes"),
-			"MongoDB oplog used size in bytes",
-			nil,
-			nil,
-		),
-		oplogUsedPercent: prometheus.NewDesc(
-			prometheus.BuildFQName(namespace, "mongodb", "oplog_used_percent"),
-			"MongoDB oplog used percentage",
-			nil,
-			nil,
-		),
-		oplogTimeDiff: prometheus.NewDesc(
-			prometheus.BuildFQName(namespace, "mongodb", "oplog_window_seconds"),
-			"MongoDB oplog time window in seconds",
-			nil,
-			nil,
-		),
 		replicationLag: prometheus.NewDesc(
 			prometheus.BuildFQName(namespace, "mongodb", "replication_lag_seconds"),
 			"MongoDB replication lag in seconds",
@@ -267,24 +236,6 @@ func NewCollector(m Metric) *Collector {
 			nil,
 		),
 
-		shardOplogSize: prometheus.NewDesc(
-			prometheus.BuildFQName(namespace, "mongodb_shard", "oplog_size_bytes"),
-			"MongoDB shard oplog size in bytes",
-			[]string{"shard"},
-			nil,
-		),
-		shardOplogUsedSize: prometheus.NewDesc(
-			prometheus.BuildFQName(namespace, "mongodb_shard", "oplog_used_bytes"),
-			"MongoDB shard oplog used size in bytes",
-			[]string{"shard"},
-			nil,
-		),
-		shardOplogUsedPercent: prometheus.NewDesc(
-			prometheus.BuildFQName(namespace, "mongodb_shard", "oplog_used_percent"),
-			"MongoDB shard oplog used percentage",
-			[]string{"shard"},
-			nil,
-		),
 		shardReplicationLag: prometheus.NewDesc(
 			prometheus.BuildFQName(namespace, "mongodb_shard", "replication_lag_seconds"),
 			"MongoDB shard replication lag in seconds",
@@ -484,30 +435,6 @@ func (c *Collector) Collect(ch chan<- prometheus.Metric) {
 	mongoMetrics := c.metric.GetMongoDBMetrics()
 	if mongoMetrics != nil {
 		ch <- prometheus.MustNewConstMetric(
-			c.oplogSize,
-			prometheus.GaugeValue,
-			float64(mongoMetrics.OplogSize),
-		)
-
-		ch <- prometheus.MustNewConstMetric(
-			c.oplogUsedSize,
-			prometheus.GaugeValue,
-			float64(mongoMetrics.OplogUsedSize),
-		)
-
-		ch <- prometheus.MustNewConstMetric(
-			c.oplogUsedPercent,
-			prometheus.GaugeValue,
-			mongoMetrics.OplogUsedPercent,
-		)
-
-		ch <- prometheus.MustNewConstMetric(
-			c.oplogTimeDiff,
-			prometheus.GaugeValue,
-			float64(mongoMetrics.OplogTimeDiff),
-		)
-
-		ch <- prometheus.MustNewConstMetric(
 			c.replicationLag,
 			prometheus.GaugeValue,
 			float64(mongoMetrics.ReplicationLag),
@@ -532,27 +459,6 @@ func (c *Collector) Collect(ch chan<- prometheus.Metric) {
 			if sm.Metrics == nil {
 				continue
 			}
-
-			ch <- prometheus.MustNewConstMetric(
-				c.shardOplogSize,
-				prometheus.GaugeValue,
-				float64(sm.Metrics.OplogSize),
-				sm.ShardName,
-			)
-
-			ch <- prometheus.MustNewConstMetric(
-				c.shardOplogUsedSize,
-				prometheus.GaugeValue,
-				float64(sm.Metrics.OplogUsedSize),
-				sm.ShardName,
-			)
-
-			ch <- prometheus.MustNewConstMetric(
-				c.shardOplogUsedPercent,
-				prometheus.GaugeValue,
-				sm.Metrics.OplogUsedPercent,
-				sm.ShardName,
-			)
 
 			ch <- prometheus.MustNewConstMetric(
 				c.shardReplicationLag,

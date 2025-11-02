@@ -86,13 +86,13 @@ $ go get github.com/Trendyol/go-mongo-cdc
 
 #### Connection Settings (`mongodb.connection`)
 
-| Variable                      | Type   | Required | Default | Description                         |
-|-------------------------------|--------|----------|---------|-------------------------------------|
-| `mongodb.connection.uri`      | string | yes      |         | MongoDB connection URI              |
-| `mongodb.connection.database` | string | yes      |         | MongoDB database name               |
-| `mongodb.connection.collection` | string | yes    |         | MongoDB collection                  |
-| `mongodb.connection.username` | string | no       |         | MongoDB username for authentication |
-| `mongodb.connection.password` | string | no       |         | MongoDB password for authentication |
+| Variable                        | Type   | Required | Default | Description                         |
+|---------------------------------|--------|----------|---------|-------------------------------------|
+| `mongodb.connection.uri`        | string | yes      |         | MongoDB connection URI              |
+| `mongodb.connection.database`   | string | yes      |         | MongoDB database name               |
+| `mongodb.connection.collection` | string | yes      |         | MongoDB collection                  |
+| `mongodb.connection.username`   | string | no       |         | MongoDB username for authentication |
+| `mongodb.connection.password`   | string | no       |         | MongoDB password for authentication |
 
 #### Connection Pool Settings (`mongodb.connectionPool`)
 
@@ -106,40 +106,43 @@ $ go get github.com/Trendyol/go-mongo-cdc
 
 | Variable                                    | Type  | Required | Default | Description                              |
 |---------------------------------------------|-------|----------|---------|------------------------------------------|
-| `mongodb.timeouts.connectTimeoutMS`         | int64 | no       | 10000   | Connection timeout in milliseconds       |
-| `mongodb.timeouts.serverSelectionTimeoutMS` | int64 | no       | 30000   | Server selection timeout in milliseconds |
-| `mongodb.timeouts.socketTimeoutMS`          | int64 | no       | 30000   | Socket timeout in milliseconds           |
+| `mongodb.timeouts.connectTimeoutMS`         | int64 | no       | 30000   | Connection timeout in milliseconds       |
+| `mongodb.timeouts.serverSelectionTimeoutMS` | int64 | no       | 60000   | Server selection timeout in milliseconds |
+| `mongodb.timeouts.socketTimeoutMS`          | int64 | no       | 120000  | Socket timeout in milliseconds           |
 
 ### Metric Configuration
 
-| Variable                      | Type | Required | Default | Description                                                         |
-|-------------------------------|------|----------|---------|---------------------------------------------------------------------|
-| `metric.port`                 | int  | no       | 8080    | Prometheus metrics port                                             |
-| `metric.enableShardMetricsMapping` | bool | no  | false   | Enable hostname-to-localhost port mapping for sharded clusters (local dev only) |
-| `metric.collectionInterval`   | time.Duration | no | 30s | MongoDB metrics collection interval                          |
+**Note:** Monitoring oplog is critical for Change Streams. If the oplog window is too small or oplog history is lost, Change Streams may fail. We recommend using MongoDB's native metrics exposed through MongoDB Exporter or MongoDB's built-in monitoring tools to track oplog health (size, used percentage, window). This library provides replication lag and connection metrics through the standard MongoDB connection.
+
+| Variable                           | Type          | Required | Default | Description                                                                     |
+|------------------------------------|---------------|----------|---------|---------------------------------------------------------------------------------|
+| `metric.port`                      | int           | no       | 8080    | Prometheus metrics port                                                         |
+| `metric.enableShardMetricsMapping` | bool          | no       | false   | Enable hostname-to-localhost port mapping for sharded clusters (local dev only) |
+| `metric.collectionInterval`        | time.Duration | no       | 20s     | MongoDB metrics collection interval                                             |
 
 ### Checkpoint Configuration
 
-| Variable                          | Type          | Required | Default         | Description                                  |
-|-----------------------------------|---------------|----------|-----------------|----------------------------------------------|
-| `checkpoint.tokenSaveInterval`    | time.Duration | no       | 10s             | Token save interval                          |
-| `checkpoint.tokenSaveTimeout`     | time.Duration | no       | 10s             | Token save timeout                           |
-| `checkpoint.changeStreamBatchSize`| int           | no       | 100             | Change stream batch size                     |
-| `checkpoint.bootstrapSaveCount`   | int           | no       | 1000            | Number of documents to process before saving |
-| `checkpoint.bootstrapSaveInterval`| time.Duration | no       | 5s              | Bootstrap checkpoint save interval           |
-| `checkpoint.idleHeartbeatInterval`| time.Duration | no       | 3m              | Idle heartbeat interval                      |
-| `checkpoint.maxIdleTime`          | time.Duration | no       | 15m             | Maximum idle time before partition release   |
+| Variable                           | Type          | Required | Default | Description                                  |
+|------------------------------------|---------------|----------|---------|----------------------------------------------|
+| `checkpoint.tokenSaveInterval`     | time.Duration | no       | 10s     | Token save interval                          |
+| `checkpoint.tokenSaveTimeout`      | time.Duration | no       | 10s     | Token save timeout                           |
+| `checkpoint.changeStreamBatchSize` | int           | no       | 500     | Change stream batch size                     |
+| `checkpoint.bootstrapSaveCount`    | int           | no       | 2500    | Number of documents to process before saving |
+| `checkpoint.bootstrapSaveInterval` | time.Duration | no       | 10s     | Bootstrap checkpoint save interval           |
+| `checkpoint.bootstrapBatchSize`    | int           | no       | 2500    | Bootstrap batch size                         |
+| `checkpoint.idleHeartbeatInterval` | time.Duration | no       | 3m      | Idle heartbeat interval                      |
+| `checkpoint.maxIdleTime`           | time.Duration | no       | 15m     | Maximum idle time before partition release   |
 
 ### Partition Configuration
 
-| Variable                              | Type          | Required | Default              | Description                       |
-|---------------------------------------|---------------|----------|----------------------|-----------------------------------|
-| `partition.heartbeatInterval`         | time.Duration | no       | 10s                  | Worker heartbeat interval         |
-| `partition.workerTimeout`             | time.Duration | no       | 90s                  | Worker timeout duration           |
-| `partition.workersCollection`         | string        | no       | workers              | Workers collection name           |
-| `partition.partitionsCollection`      | string        | no       | partition_assignments| Partition assignments collection  |
-| `partition.rebalanceCheckInterval`    | time.Duration | no       | 15s                  | Partition rebalance check interval|
-| `partition.totalPartition`            | int           | no       | 15                   | Total number of partitions        |
+| Variable                           | Type          | Required | Default               | Description                                                                                                                                                                                                                                                         |
+|------------------------------------|---------------|----------|-----------------------|---------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------|
+| `partition.heartbeatInterval`      | time.Duration | no       | 10s                   | Worker heartbeat interval                                                                                                                                                                                                                                           |
+| `partition.workerTimeout`          | time.Duration | no       | 90s                   | Worker timeout duration                                                                                                                                                                                                                                             |
+| `partition.workersCollection`      | string        | no       | workers               | Workers collection name                                                                                                                                                                                                                                             |
+| `partition.partitionsCollection`   | string        | no       | partition_assignments | Partition assignments collection                                                                                                                                                                                                                                    |
+| `partition.rebalanceCheckInterval` | time.Duration | no       | 10s                   | Partition rebalance check interval                                                                                                                                                                                                                                  |
+| `partition.totalPartition`         | int           | no       | 15                    | Total number of partitions. **Important:** This value is stored on first initialization and cannot be changed afterwards. Changing this value after initialization will cause system startup failures as it disrupts partition distribution balance across workers. |
 
 ### Logger Configuration
 
@@ -151,7 +154,7 @@ $ go get github.com/Trendyol/go-mongo-cdc
 
 | Variable                      | Type          | Required | Default | Description                                                       |
 |-------------------------------|---------------|----------|---------|-------------------------------------------------------------------|
-| `gracefulShutdownTimeout`     | time.Duration | no       | 30s     | Maximum time to wait for in-flight events to complete on shutdown |
+| `gracefulShutdownTimeout`     | time.Duration | no       | 10s     | Maximum time to wait for in-flight events to complete on shutdown |
 
 ### Configuration Example
 
@@ -168,33 +171,34 @@ mongodb:
     minPoolSize: 5
     maxIdleTimeMS: 300000
   timeouts:
-    connectTimeoutMS: 10000
-    serverSelectionTimeoutMS: 30000
-    socketTimeoutMS: 30000
+    connectTimeoutMS: 30000
+    serverSelectionTimeoutMS: 60000
+    socketTimeoutMS: 120000
 
 metric:
   port: 8080
   enableShardMetricsMapping: false
-  collectionInterval: 30s
+  collectionInterval: 20s
 
 checkpoint:
   tokenSaveInterval: 10s
-  changeStreamBatchSize: 100
-  bootstrapSaveCount: 1000
-  bootstrapSaveInterval: 5s
+  changeStreamBatchSize: 500
+  bootstrapSaveCount: 2500
+  bootstrapSaveInterval: 10s
+  bootstrapBatchSize: 2500
 
 partition:
   heartbeatInterval: 10s
   workerTimeout: 90s
   workersCollection: "workers"
   partitionsCollection: "partition_assignments"
-  rebalanceCheckInterval: 15s
+  rebalanceCheckInterval: 10s
   totalPartition: 15
 
 logger:
   logLevel: "info"
 
-gracefulShutdownTimeout: 30s
+gracefulShutdownTimeout: 10s
 ```
 
 ## Exposed Metrics
@@ -222,13 +226,10 @@ gracefulShutdownTimeout: 30s
 | `go_mongo_cdc_worker_healthy`                     | Gauge   | Worker health status (1=healthy, 0=unhealthy)                   | N/A    |
 | `go_mongo_cdc_last_event_time_seconds`            | Gauge   | Unix timestamp of the last processed event                      | N/A    |
 | `go_mongo_cdc_event_lag_duration_seconds`         | Gauge   | Duration in seconds since the last event was processed          | N/A    |
-| `go_mongo_cdc_mongodb_oplog_size_bytes`           | Gauge   | MongoDB oplog size in bytes                                     | N/A    |
-| `go_mongo_cdc_mongodb_oplog_used_bytes`           | Gauge   | MongoDB oplog used size in bytes                                | N/A    |
-| `go_mongo_cdc_mongodb_oplog_used_percent`         | Gauge   | MongoDB oplog used percentage (0-100)                           | N/A    |
-| `go_mongo_cdc_mongodb_oplog_window_seconds`       | Gauge   | MongoDB oplog time window in seconds (retention)                | N/A    |
 | `go_mongo_cdc_mongodb_replication_lag_seconds`    | Gauge   | MongoDB replication lag in seconds                              | N/A    |
 | `go_mongo_cdc_mongodb_connections_active`         | Gauge   | MongoDB active connections                                      | N/A    |
 | `go_mongo_cdc_mongodb_connections_available`      | Gauge   | MongoDB available connections                                   | N/A    |
+| `go_mongo_cdc_mongodb_shard_replication_lag_seconds` | Gauge | MongoDB shard replication lag in seconds (sharded clusters)    | shard  |
 
 ## Examples
 

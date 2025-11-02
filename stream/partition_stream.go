@@ -257,7 +257,7 @@ func (ps *partitionStream) managePartitionWorkerLifecycle(worker *streamWorker) 
 			}
 
 			if errors.Is(err, context.Canceled) {
-				logger.Log.Info("Partition stream cancelled - partitionId: %d", worker.partitionID)
+				logger.Log.Debug("Partition stream cancelled - partitionId: %d", worker.partitionID)
 				return
 			}
 
@@ -273,7 +273,7 @@ func (ps *partitionStream) managePartitionWorkerLifecycle(worker *streamWorker) 
 					logger.Log.Error("Failed to clear bootstrap progress during oplog recovery - partitionId: %d, error: %v", worker.partitionID, clearErr)
 				}
 
-				logger.Log.Info("Checkpoint cleared, next iteration will trigger full bootstrap - partitionId: %d", worker.partitionID)
+				logger.Log.Debug("Checkpoint cleared, next iteration will trigger full bootstrap - partitionId: %d", worker.partitionID)
 
 				select {
 				case <-time.After(2 * time.Second):
@@ -439,7 +439,7 @@ func (ps *partitionStream) fetchCurrentDbOperationTimeWithRetry(ctx context.Cont
 	}
 
 	fallbackOpTime := &primitive.Timestamp{T: t, I: 1}
-	logger.Log.Info("Using fallback operation time: %v", fallbackOpTime)
+	logger.Log.Debug("Using fallback operation time: %v", fallbackOpTime)
 
 	return fallbackOpTime, nil
 }
@@ -494,7 +494,7 @@ func (ps *partitionStream) runBootstrapWithRetries(worker *streamWorker) error {
 		}
 
 		if errors.Is(err, context.Canceled) {
-			logger.Log.Info("Bootstrap cancelled for partition %d", worker.partitionID)
+			logger.Log.Debug("Bootstrap cancelled for partition %d", worker.partitionID)
 			return err
 		}
 
@@ -570,7 +570,7 @@ func (ps *partitionStream) queryDocumentsForBootstrap(worker *streamWorker, filt
 func (ps *partitionStream) shouldUseNumericStringSorting(worker *streamWorker, bootstrapLastID interface{}) bool {
 	if bootstrapLastID != nil {
 		if lastIDStr, ok := bootstrapLastID.(string); ok && ps.isNumericString(lastIDStr) {
-			logger.Log.Info("Resuming with numeric string ID '%s' - using mathematical sorting", lastIDStr)
+			logger.Log.Debug("Resuming with numeric string ID '%s' - using mathematical sorting", lastIDStr)
 			return true
 		}
 		return false
@@ -583,7 +583,7 @@ func (ps *partitionStream) shouldUseNumericStringSorting(worker *streamWorker, b
 	}
 
 	if isNumericStringCollection {
-		logger.Log.Info("Detected numeric string IDs in collection - using mathematical sorting for fresh bootstrap")
+		logger.Log.Debug("Detected numeric string IDs in collection - using mathematical sorting for fresh bootstrap")
 		return true
 	}
 
@@ -663,7 +663,7 @@ func (ps *partitionStream) saveFinalBootstrapProgressOnInterruption(worker *stre
 		if err := ps.checkpointManager.SaveBootstrapProgress(ctx, worker.partitionID, state.lastProcessedID); err != nil {
 			logger.Log.Error("Failed to save final bootstrap progress on interruption - partitionId: %d, lastId: %v, error: %v", worker.partitionID, state.lastProcessedID, err)
 		} else {
-			logger.Log.Info("Saved bootstrap progress on interruption - partitionId: %d, lastId: %v, processed: %d", worker.partitionID, state.lastProcessedID, state.processedCount)
+			logger.Log.Debug("Saved bootstrap progress on interruption - partitionId: %d, lastId: %v, processed: %d", worker.partitionID, state.lastProcessedID, state.processedCount)
 		}
 	}
 }
@@ -792,7 +792,7 @@ func (ps *partitionStream) finalizeBootstrapAndClearCheckpoint(worker *streamWor
 		return err
 	}
 
-	logger.Log.Info("Bootstrap progress cleared successfully - partitionId: %d", worker.partitionID)
+	logger.Log.Debug("Bootstrap progress cleared successfully - partitionId: %d", worker.partitionID)
 	return nil
 }
 
@@ -878,7 +878,7 @@ func (ps *partitionStream) saveLatestResumeTokenOnInterruption(worker *streamWor
 	if err := ps.checkpointManager.SaveResumeToken(ctx, worker.partitionID, lastToken, lastClusterTime); err != nil {
 		logger.Log.Error("Failed to save final resume token on interruption - partitionId: %d, error: %v", worker.partitionID, err)
 	} else {
-		logger.Log.Info("Saved final resume token on interruption - partitionId: %d", worker.partitionID)
+		logger.Log.Debug("Saved final resume token on interruption - partitionId: %d", worker.partitionID)
 	}
 }
 
@@ -1083,7 +1083,7 @@ func (ps *partitionStream) buildResumeAfterIdFilter(fieldName string, lastValue 
 		// For any other complex type, convert to string representation for comparison
 		// This handles UUID strings, complex objects, etc.
 		valueStr := fmt.Sprintf("%v", v)
-		logger.Log.Info("Using string-based comparison for complex type %T (value: %s)", v, valueStr)
+		logger.Log.Debug("Using string-based comparison for complex type %T (value: %s)", v, valueStr)
 
 		return bson.D{
 			{Key: "$or", Value: bson.A{
@@ -1263,7 +1263,7 @@ func (ps *partitionStream) startIdleHeartbeat(ctx context.Context, worker *strea
 			worker.tokenMutex.RUnlock()
 
 			if idleDuration > ps.cfg.Checkpoint.MaxIdleTime {
-				logger.Log.Info("Stream is idle, updating highwatermark - partitionId: %d, idleDuration: %v", worker.partitionID, idleDuration)
+				logger.Log.Debug("Stream is idle, updating highwatermark - partitionId: %d, idleDuration: %v", worker.partitionID, idleDuration)
 				if err := ps.updateResumeTokenToHighwatermark(worker); err != nil {
 					logger.Log.Warn("Failed to update highwatermark - partitionId: %d, error: %v", worker.partitionID, err)
 				}
@@ -1340,7 +1340,7 @@ func (ps *partitionStream) Stop(ctx context.Context) error {
 	ps.streamsMutex.Lock()
 	workers := make([]*streamWorker, 0, len(ps.activeStreams))
 	for partitionID, worker := range ps.activeStreams {
-		logger.Log.Info("Stopping stream worker %d", partitionID)
+		logger.Log.Debug("Stopping stream worker %d", partitionID)
 		worker.stoppingMutex.Lock()
 		worker.stopping = true
 		worker.stoppingMutex.Unlock()
@@ -1348,8 +1348,6 @@ func (ps *partitionStream) Stop(ctx context.Context) error {
 		workers = append(workers, worker)
 	}
 	ps.streamsMutex.Unlock()
-
-	//time.Sleep(100 * time.Millisecond)
 
 	timeout := ps.cfg.GracefulShutdownTimeout
 	logger.Log.Info("Waiting for in-flight events to complete (timeout: %v)", timeout)

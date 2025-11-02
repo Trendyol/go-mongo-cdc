@@ -223,7 +223,7 @@ func (m *manager) ClearResumeToken(ctx context.Context, partitionID int) error {
 	}
 
 	if result.MatchedCount() > 0 {
-		logger.Log.Info("Resume token cleared successfully - partitionId: %d, checkpointId: %s", partitionID, checkpointID)
+		logger.Log.Debug("Resume token cleared successfully - partitionId: %d, checkpointId: %s", partitionID, checkpointID)
 	}
 
 	return nil

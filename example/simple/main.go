@@ -40,17 +40,18 @@ func main() {
 		},
 		Checkpoint: config.CheckpointConfig{
 			TokenSaveInterval:     10 * time.Second,
-			ChangeStreamBatchSize: 1,
-			BootstrapSaveCount:    1000,
-			BootstrapSaveInterval: 5 * time.Second,
-			BootstrapBatchSize:    500,
+			ChangeStreamBatchSize: 500,
+			BootstrapSaveCount:    5000,
+			BootstrapSaveInterval: 10 * time.Second,
+			BootstrapBatchSize:    5000,
 		},
 		Partition: config.PartitionConfig{
 			HeartbeatInterval:      10 * time.Second,
 			WorkerTimeout:          90 * time.Second,
-			RebalanceCheckInterval: 15 * time.Second,
+			RebalanceCheckInterval: 10 * time.Second,
 			TotalPartition:         30,
 		},
+		Logger: config.LoggerConfig{LogLevel: "debug"},
 	}
 
 	connector, err := cdc.NewConnector(cfg, ProcessChangeEvent)

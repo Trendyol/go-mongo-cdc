@@ -42,6 +42,7 @@ type manager struct {
 	client        connection.Client
 	workersCol    connection.Collection
 	partitionsCol connection.Collection
+	metadataCol   connection.Collection
 	config        config.PartitionConfig
 	database      string
 
@@ -72,6 +73,11 @@ func (m *manager) Initialize(ctx context.Context) error {
 	db := m.client.Database(m.database)
 	m.workersCol = db.Collection(m.config.WorkersCollection)
 	m.partitionsCol = db.Collection(m.config.PartitionsCollection)
+	m.metadataCol = db.Collection("partition_metadata")
+
+	if err := m.validateAndStoreTotalPartition(ctx); err != nil {
+		return fmt.Errorf("failed to validate totalPartition: %w", err)
+	}
 
 	if err := m.createIndexes(ctx); err != nil {
 		return fmt.Errorf("failed to create indexes: %w", err)
@@ -95,6 +101,41 @@ func (m *manager) Initialize(ctx context.Context) error {
 
 	logger.Log.Info("Partition manager initialized - workerId: %s, totalPartitions: %d", m.workerID, m.config.TotalPartition)
 
+	return nil
+}
+
+func (m *manager) validateAndStoreTotalPartition(ctx context.Context) error {
+	type Metadata struct {
+		ID             string `bson:"_id"`
+		TotalPartition int    `bson:"totalPartition"`
+	}
+
+	filter := bson.M{"_id": "totalPartition"}
+	var existing Metadata
+	err := m.metadataCol.FindOne(ctx, filter).Decode(&existing)
+
+	if err == mongo.ErrNoDocuments {
+		metadata := Metadata{
+			ID:             "totalPartition",
+			TotalPartition: m.config.TotalPartition,
+		}
+		_, insertErr := m.metadataCol.InsertOne(ctx, metadata)
+		if insertErr != nil {
+			return fmt.Errorf("failed to store initial totalPartition: %w", insertErr)
+		}
+		logger.Log.Debug("Stored initial totalPartition: %d", m.config.TotalPartition)
+		return nil
+	}
+
+	if err != nil {
+		return fmt.Errorf("failed to check existing totalPartition: %w", err)
+	}
+
+	if existing.TotalPartition != m.config.TotalPartition {
+		return fmt.Errorf("totalPartition cannot be changed after initial setup - stored: %d, config: %d", existing.TotalPartition, m.config.TotalPartition)
+	}
+
+	logger.Log.Debug("totalPartition validation passed: %d", m.config.TotalPartition)
 	return nil
 }
 
@@ -250,7 +291,7 @@ func (m *manager) updatePartitionHeartbeats(ctx context.Context) error {
 func (m *manager) runRebalanceMonitor() {
 	defer m.wg.Done()
 
-	logger.Log.Info("Starting worker changes monitoring")
+	logger.Log.Debug("Starting worker changes monitoring")
 
 	checkInterval := m.config.RebalanceCheckInterval
 	ticker := time.NewTicker(checkInterval)
@@ -259,7 +300,7 @@ func (m *manager) runRebalanceMonitor() {
 	for {
 		select {
 		case <-m.stopCh:
-			logger.Log.Info("Stopping worker changes monitoring")
+			logger.Log.Debug("Stopping worker changes monitoring")
 			return
 		case <-ticker.C:
 			m.triggerRebalanceIfNeeded()
@@ -281,7 +322,7 @@ func (m *manager) triggerRebalanceIfNeeded() {
 
 	if needsRebalance {
 		if currentWorkerCount != m.lastKnownWorkerCount {
-			logger.Log.Info("Worker count change detected - previousCount: %d, currentCount: %d", m.lastKnownWorkerCount, currentWorkerCount)
+			logger.Log.Debug("Worker count change detected - previousCount: %d, currentCount: %d", m.lastKnownWorkerCount, currentWorkerCount)
 		} else {
 			logger.Log.Debug("Retrying partition acquisition - workerCount: %d", currentWorkerCount)
 		}
@@ -360,11 +401,11 @@ func (m *manager) AcquirePartitions(ctx context.Context) ([]int, error) {
 	acquiredPartitions := make([]int, 0, len(expectedPartitions))
 	failedPartitions := make([]int, 0, len(expectedPartitions))
 
-	logger.Log.Info("Attempting to acquire partitions - expected: %v, activeWorkers: %d, workerIndex: %d", expectedPartitions, activeWorkers, workerIndex)
+	logger.Log.Debug("Attempting to acquire partitions - expected: %v, activeWorkers: %d, workerIndex: %d", expectedPartitions, activeWorkers, workerIndex)
 
 	for _, partitionID := range expectedPartitions {
 		if err := m.tryAcquireOrTakeoverPartitionWithRetry(ctx, partitionID); err != nil {
-			logger.Log.Info("Failed to acquire partition %d after retries: %v", partitionID, err)
+			logger.Log.Debug("Failed to acquire partition %d after retries: %v", partitionID, err)
 			failedPartitions = append(failedPartitions, partitionID)
 			continue
 		}
@@ -373,7 +414,7 @@ func (m *manager) AcquirePartitions(ctx context.Context) ([]int, error) {
 	}
 
 	if len(failedPartitions) > 0 {
-		logger.Log.Info("Failed to acquire some partitions - failed: %v, acquired: %v", failedPartitions, acquiredPartitions)
+		logger.Log.Debug("Failed to acquire some partitions - failed: %v, acquired: %v", failedPartitions, acquiredPartitions)
 	}
 
 	m.mu.Lock()
@@ -384,7 +425,7 @@ func (m *manager) AcquirePartitions(ctx context.Context) ([]int, error) {
 		logger.Log.Error("Failed to update worker partitions: %v", err)
 	}
 
-	logger.Log.Info("Acquired partitions - count: %d, partitions: %v, workerIndex: %d, activeWorkers: %d", len(acquiredPartitions), acquiredPartitions, workerIndex, activeWorkers)
+	logger.Log.Debug("Acquired partitions - count: %d, partitions: %v, workerIndex: %d, activeWorkers: %d", len(acquiredPartitions), acquiredPartitions, workerIndex, activeWorkers)
 
 	return acquiredPartitions, nil
 }
@@ -442,7 +483,7 @@ func (m *manager) cleanupDeadWorkers(ctx context.Context) error {
 	}
 
 	if len(deadWorkerIDs) > 0 {
-		logger.Log.Info("Found dead workers, cleaning up - workerIds: %v, cutoff: %v", deadWorkerIDs, cutoff)
+		logger.Log.Debug("Found dead workers, cleaning up - workerIds: %v, cutoff: %v", deadWorkerIDs, cutoff)
 
 		partitionFilter := bson.M{"workerId": bson.M{"$in": deadWorkerIDs}}
 		partitionResult, err := m.partitionsCol.DeleteMany(ctx, partitionFilter)
@@ -460,7 +501,7 @@ func (m *manager) cleanupDeadWorkers(ctx context.Context) error {
 			logger.Log.Debug("Deleted %d dead workers", workerResult.DeletedCount())
 		}
 
-		logger.Log.Info("Cleaned up dead workers - workerIds: %v", deadWorkerIDs)
+		logger.Log.Debug("Cleaned up dead workers - workerIds: %v", deadWorkerIDs)
 	} else {
 		logger.Log.Debug("No dead workers found - cutoff: %v", cutoff)
 	}
@@ -507,7 +548,7 @@ func (m *manager) cleanupOrphanPartitions(ctx context.Context) error {
 	}
 
 	if len(orphanPartitionIDs) > 0 {
-		logger.Log.Info("Found orphan partitions (assigned to non-existent workers), cleaning up - partitions: %v", orphanPartitionIDs)
+		logger.Log.Debug("Found orphan partitions (assigned to non-existent workers), cleaning up - partitions: %v", orphanPartitionIDs)
 
 		orphanFilter := bson.M{"_id": bson.M{"$in": orphanPartitionIDs}}
 		result, err := m.partitionsCol.DeleteMany(ctx, orphanFilter)
@@ -516,7 +557,7 @@ func (m *manager) cleanupOrphanPartitions(ctx context.Context) error {
 			return err
 		}
 
-		logger.Log.Info("Cleaned up %d orphan partitions", result.DeletedCount())
+		logger.Log.Debug("Cleaned up %d orphan partitions", result.DeletedCount())
 	} else {
 		logger.Log.Debug("No orphan partitions found")
 	}
@@ -741,7 +782,7 @@ func (m *manager) ResyncPartitions(ctx context.Context) error {
 	}
 
 	if len(partitionsToRelease) > 0 {
-		logger.Log.Info("Releasing partitions from MongoDB - partitionsToRelease: %v", partitionsToRelease)
+		logger.Log.Debug("Releasing partitions from MongoDB - partitionsToRelease: %v", partitionsToRelease)
 
 		for _, partitionID := range partitionsToRelease {
 			if err := m.releasePartition(ctx, partitionID); err != nil {
@@ -771,7 +812,7 @@ func (m *manager) ReleasePartitions(ctx context.Context) error {
 		return nil
 	}
 
-	logger.Log.Info("Releasing all partitions - count: %d, partitions: %v", len(partitions), partitions)
+	logger.Log.Debug("Releasing all partitions - count: %d, partitions: %v", len(partitions), partitions)
 
 	m.mu.Lock()
 	m.assignedPartitions = []int{}
@@ -783,7 +824,7 @@ func (m *manager) ReleasePartitions(ctx context.Context) error {
 		return err
 	}
 
-	logger.Log.Info("Released %d partitions from MongoDB", result.DeletedCount())
+	logger.Log.Debug("Released %d partitions from MongoDB", result.DeletedCount())
 
 	return m.updateWorkerPartitions(ctx, []int{})
 }
@@ -870,7 +911,7 @@ func (m *manager) Stop(ctx context.Context) error {
 	for attempt := 1; attempt <= maxRetries; attempt++ {
 		releaseErr = m.ReleasePartitions(ctx)
 		if releaseErr == nil {
-			logger.Log.Info("Successfully released all partitions on attempt %d", attempt)
+			logger.Log.Debug("Successfully released all partitions on attempt %d", attempt)
 			break
 		}
 

@@ -109,7 +109,7 @@ func (c *Config) SetDefault() {
 		c.Metric.Port = 8080
 	}
 	if c.Metric.CollectionInterval == 0 {
-		c.Metric.CollectionInterval = 30 * time.Second
+		c.Metric.CollectionInterval = 20 * time.Second
 	}
 	if c.Logger.LogLevel == "" {
 		c.Logger.LogLevel = logger.INFO
@@ -118,16 +118,16 @@ func (c *Config) SetDefault() {
 		c.Checkpoint.TokenSaveInterval = 10 * time.Second
 	}
 	if c.Checkpoint.BootstrapSaveCount == 0 {
-		c.Checkpoint.BootstrapSaveCount = 1000
+		c.Checkpoint.BootstrapSaveCount = 2500
 	}
 	if c.Checkpoint.TokenSaveTimeout == 0 {
 		c.Checkpoint.TokenSaveTimeout = 10 * time.Second
 	}
 	if c.Checkpoint.BootstrapSaveInterval == 0 {
-		c.Checkpoint.BootstrapSaveInterval = 5 * time.Second
+		c.Checkpoint.BootstrapSaveInterval = 10 * time.Second
 	}
 	if c.Checkpoint.BootstrapBatchSize == 0 {
-		c.Checkpoint.BootstrapBatchSize = 500
+		c.Checkpoint.BootstrapBatchSize = 2500
 	}
 	if c.Checkpoint.IdleHeartbeatInterval == 0 {
 		c.Checkpoint.IdleHeartbeatInterval = 3 * time.Minute
@@ -137,7 +137,7 @@ func (c *Config) SetDefault() {
 	}
 
 	if c.Checkpoint.ChangeStreamBatchSize == 0 {
-		c.Checkpoint.ChangeStreamBatchSize = 100
+		c.Checkpoint.ChangeStreamBatchSize = 500
 	}
 
 	if c.Partition.HeartbeatInterval == 0 {
@@ -153,14 +153,14 @@ func (c *Config) SetDefault() {
 		c.Partition.PartitionsCollection = "partition_assignments"
 	}
 	if c.Partition.RebalanceCheckInterval == 0 {
-		c.Partition.RebalanceCheckInterval = 15 * time.Second
+		c.Partition.RebalanceCheckInterval = 10 * time.Second
 	}
 	if c.Partition.TotalPartition == 0 {
 		c.Partition.TotalPartition = 15
 	}
 
 	if c.GracefulShutdownTimeout == 0 {
-		c.GracefulShutdownTimeout = 5 * time.Second
+		c.GracefulShutdownTimeout = 10 * time.Second
 	}
 }
 

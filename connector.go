@@ -143,11 +143,11 @@ func (c *connector) Start(ctx context.Context) {
 	g.Go(func() error {
 		select {
 		case sig := <-c.cancelCh:
-			logger.Log.Info("Shutdown signal received: %v, cancelling context...", sig)
+			logger.Log.Debug("Shutdown signal received: %v, cancelling context...", sig)
 			cancel()
 			return context.Canceled
 		case <-gCtx.Done():
-			logger.Log.Info("Context cancelled: %v", gCtx.Err())
+			logger.Log.Debug("Context cancelled: %v", gCtx.Err())
 			return gCtx.Err()
 		}
 	})
@@ -169,7 +169,7 @@ func (c *connector) Close() {
 		logger.Log.Info("Closing connections")
 
 		if c.closed {
-			logger.Log.Info("Already closed, skipping cleanup")
+			logger.Log.Debug("Already closed, skipping cleanup")
 			return
 		}
 
@@ -241,11 +241,11 @@ func (c *connector) collectMongoDBMetricsPeriodically(ctx context.Context) {
 
 			c.metricInstance.SetMongoDBMetrics(mongoMetrics)
 
-			if mongoMetrics.OplogSize > 0 {
-				logger.Log.Debug("MongoDB metrics collected - OplogUsed: %.2f%%, ReplicationLag: %ds",
-					mongoMetrics.OplogUsedPercent, mongoMetrics.ReplicationLag)
+			if mongoMetrics.ReplicationLag > 0 {
+				logger.Log.Debug("MongoDB metrics collected - ReplicationLag: %ds",
+					mongoMetrics.ReplicationLag)
 			} else {
-				logger.Log.Debug("MongoDB metrics collected - Oplog/Replication metrics unavailable (expected for mongos/standalone)")
+				logger.Log.Debug("MongoDB metrics collected - Replication metrics unavailable (expected for mongos/standalone)")
 			}
 		}
 	}
