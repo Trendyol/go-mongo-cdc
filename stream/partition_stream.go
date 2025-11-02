@@ -1125,8 +1125,6 @@ func (ps *partitionStream) processEvent(worker *streamWorker, event message.Chan
 	worker.stoppingMutex.RUnlock()
 	defer worker.inFlightEvents.Done()
 
-	startTime := time.Now()
-
 	msg, err := message.NewMessage(event)
 	if err != nil {
 		return err
@@ -1144,9 +1142,6 @@ func (ps *partitionStream) processEvent(worker *streamWorker, event message.Chan
 		Message:     msg,
 		PartitionID: worker.partitionID,
 		Ack: func() error {
-			processingLatency := time.Since(startTime)
-			ps.metric.SetProcessLatency(processingLatency.Nanoseconds())
-
 			if len(resumeToken) > 0 {
 				worker.tokenMutex.Lock()
 				worker.lastAckedToken = append([]byte(nil), resumeToken...)

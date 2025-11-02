@@ -35,8 +35,7 @@ func main() {
 			},
 		},
 		Metric: config.MetricConfig{
-			Port:                      8080,
-			EnableShardMetricsMapping: true,
+			Port: 8080,
 		},
 		Checkpoint: config.CheckpointConfig{
 			TokenSaveInterval:     10 * time.Second,

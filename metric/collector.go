@@ -14,8 +14,7 @@ type Collector struct {
 	deleteTotal  *prometheus.Desc
 	replaceTotal *prometheus.Desc
 
-	processLatency *prometheus.Desc
-	cdcLatency     *prometheus.Desc
+	cdcLatency *prometheus.Desc
 
 	checkpointSaveTotal      *prometheus.Desc
 	checkpointSaveErrorTotal *prometheus.Desc
@@ -39,17 +38,10 @@ type Collector struct {
 	listenerErrorTotal      *prometheus.Desc
 	partitionRebalanceTotal *prometheus.Desc
 
-	replicationLag       *prometheus.Desc
 	activeConnections    *prometheus.Desc
 	availableConnections *prometheus.Desc
 
-	shardReplicationLag *prometheus.Desc
-
 	buildInfo *prometheus.Desc
-}
-
-type ShardMetricsHolder interface {
-	GetShardMetrics() []*ShardMetrics
 }
 
 func NewCollector(m Metric) *Collector {
@@ -83,12 +75,6 @@ func NewCollector(m Metric) *Collector {
 			nil,
 		),
 
-		processLatency: prometheus.NewDesc(
-			prometheus.BuildFQName(namespace, "", "process_latency_seconds"),
-			"Processing latency in seconds",
-			nil,
-			nil,
-		),
 		cdcLatency: prometheus.NewDesc(
 			prometheus.BuildFQName(namespace, "", "cdc_latency_seconds"),
 			"CDC latency in seconds",
@@ -203,12 +189,6 @@ func NewCollector(m Metric) *Collector {
 			nil,
 		),
 
-		replicationLag: prometheus.NewDesc(
-			prometheus.BuildFQName(namespace, "mongodb", "replication_lag_seconds"),
-			"MongoDB replication lag in seconds",
-			nil,
-			nil,
-		),
 		activeConnections: prometheus.NewDesc(
 			prometheus.BuildFQName(namespace, "mongodb", "connections_active"),
 			"MongoDB active connections",
@@ -219,13 +199,6 @@ func NewCollector(m Metric) *Collector {
 			prometheus.BuildFQName(namespace, "mongodb", "connections_available"),
 			"MongoDB available connections",
 			nil,
-			nil,
-		),
-
-		shardReplicationLag: prometheus.NewDesc(
-			prometheus.BuildFQName(namespace, "mongodb_shard", "replication_lag_seconds"),
-			"MongoDB shard replication lag in seconds",
-			[]string{"shard"},
 			nil,
 		),
 
@@ -268,15 +241,9 @@ func (c *Collector) Collect(ch chan<- prometheus.Metric) {
 	)
 
 	ch <- prometheus.MustNewConstMetric(
-		c.processLatency,
-		prometheus.GaugeValue,
-		float64(c.metric.GetProcessLatency()),
-	)
-
-	ch <- prometheus.MustNewConstMetric(
 		c.cdcLatency,
 		prometheus.GaugeValue,
-		float64(c.metric.GetCDCLatency()),
+		float64(c.metric.GetCDCLatency())/1000.0,
 	)
 
 	ch <- prometheus.MustNewConstMetric(
@@ -294,7 +261,7 @@ func (c *Collector) Collect(ch chan<- prometheus.Metric) {
 	ch <- prometheus.MustNewConstMetric(
 		c.checkpointSaveLatency,
 		prometheus.GaugeValue,
-		float64(c.metric.GetCheckpointSaveLatency()),
+		float64(c.metric.GetCheckpointSaveLatency())/1000.0,
 	)
 
 	ch <- prometheus.MustNewConstMetric(
@@ -405,12 +372,6 @@ func (c *Collector) Collect(ch chan<- prometheus.Metric) {
 	mongoMetrics := c.metric.GetMongoDBMetrics()
 	if mongoMetrics != nil {
 		ch <- prometheus.MustNewConstMetric(
-			c.replicationLag,
-			prometheus.GaugeValue,
-			float64(mongoMetrics.ReplicationLag),
-		)
-
-		ch <- prometheus.MustNewConstMetric(
 			c.activeConnections,
 			prometheus.GaugeValue,
 			float64(mongoMetrics.ActiveConnections),
@@ -421,22 +382,6 @@ func (c *Collector) Collect(ch chan<- prometheus.Metric) {
 			prometheus.GaugeValue,
 			float64(mongoMetrics.AvailableConnections),
 		)
-	}
-
-	if holder, ok := c.metric.(ShardMetricsHolder); ok {
-		shardMetrics := holder.GetShardMetrics()
-		for _, sm := range shardMetrics {
-			if sm.Metrics == nil {
-				continue
-			}
-
-			ch <- prometheus.MustNewConstMetric(
-				c.shardReplicationLag,
-				prometheus.GaugeValue,
-				float64(sm.Metrics.ReplicationLag),
-				sm.ShardName,
-			)
-		}
 	}
 
 	ch <- prometheus.MustNewConstMetric(

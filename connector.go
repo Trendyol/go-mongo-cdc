@@ -18,7 +18,6 @@ import (
 	"github.com/Trendyol/go-mongo-cdc/mongo/connection"
 	"github.com/Trendyol/go-mongo-cdc/stream"
 	"github.com/go-playground/errors"
-	"go.mongodb.org/mongo-driver/bson"
 )
 
 type Connector interface {
@@ -27,17 +26,14 @@ type Connector interface {
 }
 
 type connector struct {
-	stream                  stream.PartitionStream
-	prometheusRegistry      metric.Registry
-	mongoClient             connection.Client
-	mongoMetricsCollector   metric.MongoDBMetricsCollector
-	shardedMetricsCollector metric.ShardedMetricsCollector
-	metricInstance          metric.Metric
-	cancelCh                chan os.Signal
-	workerID                string
-	isShardedCluster        bool
-	shardMetricsDisabled    bool
-	cfg                     config.Config
+	stream                stream.PartitionStream
+	prometheusRegistry    metric.Registry
+	mongoClient           connection.Client
+	mongoMetricsCollector metric.MongoDBMetricsCollector
+	metricInstance        metric.Metric
+	cancelCh              chan os.Signal
+	workerID              string
+	cfg                   config.Config
 
 	once   sync.Once
 	closed bool
@@ -90,21 +86,16 @@ func NewConnector(cfg config.Config, listenerFunc stream.ListenerFunc) (Connecto
 	prometheusRegistry := metric.NewRegistry(m)
 
 	mongoMetricsCollector := metric.NewMongoDBMetricsCollector()
-	shardedMetricsCollector := metric.NewShardedMetricsCollector(cfg.Metric.EnableShardMetricsMapping)
-
-	isSharded := detectShardedCluster(mongoClient)
 
 	return &connector{
-		mongoClient:             mongoClient,
-		stream:                  partitionStream,
-		prometheusRegistry:      prometheusRegistry,
-		mongoMetricsCollector:   mongoMetricsCollector,
-		shardedMetricsCollector: shardedMetricsCollector,
-		metricInstance:          m,
-		workerID:                workerID,
-		isShardedCluster:        isSharded,
-		cancelCh:                make(chan os.Signal, 1),
-		cfg:                     cfg,
+		mongoClient:           mongoClient,
+		stream:                partitionStream,
+		prometheusRegistry:    prometheusRegistry,
+		mongoMetricsCollector: mongoMetricsCollector,
+		metricInstance:        m,
+		workerID:              workerID,
+		cancelCh:              make(chan os.Signal, 1),
+		cfg:                   cfg,
 	}, nil
 }
 
@@ -218,35 +209,13 @@ func (c *connector) collectMongoDBMetricsPeriodically(ctx context.Context) {
 			return
 		}
 
-		if c.isShardedCluster && !c.shardMetricsDisabled {
-			logger.Log.Debug("Collecting shard metrics...")
-			shardMetrics, err := c.shardedMetricsCollector.CollectShardedMetrics(metricsCtx, client.GetClient())
-			if err != nil {
-				if strings.Contains(err.Error(), "Unauthorized") || strings.Contains(err.Error(), "not authorized") {
-					logger.Log.Warn("Shard metrics collection disabled: insufficient permissions to access config.shards collection. User needs clusterMonitor role or read access to config database.")
-					c.shardMetricsDisabled = true
-				} else {
-					logger.Log.Debug("Failed to collect shard metrics: %v", err)
-				}
-			} else {
-				c.metricInstance.SetShardMetrics(shardMetrics)
-				logger.Log.Debug("Shard metrics collected - shards: %d", len(shardMetrics))
-			}
-		} else if !c.isShardedCluster {
-			mongoMetrics, err := c.mongoMetricsCollector.CollectMongoDBMetrics(metricsCtx, client.GetClient())
-			if err != nil {
-				logger.Log.Debug("Failed to collect MongoDB metrics: %v", err)
-				return
-			}
-
+		mongoMetrics, err := c.mongoMetricsCollector.CollectMongoDBMetrics(metricsCtx, client.GetClient())
+		if err != nil {
+			logger.Log.Debug("Failed to collect MongoDB metrics: %v", err)
+		} else {
 			c.metricInstance.SetMongoDBMetrics(mongoMetrics)
-
-			if mongoMetrics.ReplicationLag > 0 {
-				logger.Log.Debug("MongoDB metrics collected - ReplicationLag: %ds",
-					mongoMetrics.ReplicationLag)
-			} else {
-				logger.Log.Debug("MongoDB metrics collected - Replication metrics unavailable (expected for mongos/standalone)")
-			}
+			logger.Log.Debug("MongoDB metrics collected - ActiveConnections: %d, AvailableConnections: %d",
+				mongoMetrics.ActiveConnections, mongoMetrics.AvailableConnections)
 		}
 	}
 
@@ -261,24 +230,4 @@ func (c *connector) collectMongoDBMetricsPeriodically(ctx context.Context) {
 			collectMetrics()
 		}
 	}
-}
-
-func detectShardedCluster(client connection.Client) bool {
-	ctx, cancel := context.WithTimeout(context.Background(), 2*time.Second)
-	defer cancel()
-
-	db := client.Database("admin")
-	var result bson.M
-	err := db.RunCommand(ctx, bson.D{{Key: "isMaster", Value: 1}}).Decode(&result)
-	if err != nil {
-		return false
-	}
-
-	if msg, ok := result["msg"]; ok {
-		if msgStr, ok := msg.(string); ok && msgStr == "isdbgrid" {
-			return true
-		}
-	}
-
-	return false
 }

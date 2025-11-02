@@ -58,7 +58,7 @@ func NewMessage(event ChangeEvent) (Message, error) {
 		Database:      event.Namespace.Database,
 		Collection:    event.Namespace.Collection,
 		DocumentID:    event.DocumentKey.ID,
-		EventTime:     time.Now(),
+		EventTime:     time.Unix(int64(event.ClusterTime.T), 0),
 	}
 
 	switch msg.OperationType {

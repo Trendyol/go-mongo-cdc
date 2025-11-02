@@ -1,0 +1,92 @@
+volumes:
+  prometheus_data: { }
+  grafana_data: { }
+  mongodb_data: { }
+
+services:
+  go-mongo-cdc:
+    build:
+      context: ../../
+      dockerfile: example/grafana/Dockerfile
+    ports:
+      - "8080:8080"
+    expose:
+      - 8080
+    depends_on:
+      mongodb:
+        condition: service_healthy
+    networks:
+      - grafana-network
+
+  mongodb:
+    image: mongo:7.0
+    container_name: mongodb
+    command: mongod --replSet rs0 --bind_ip_all
+    ports:
+      - "27017:27017"
+    expose:
+      - 27017
+    volumes:
+      - mongodb_data:/data/db
+    networks:
+      - grafana-network
+    healthcheck:
+      test: ["CMD", "mongosh", "--eval", "db.adminCommand('ping')"]
+      interval: 10s
+      timeout: 5s
+      retries: 5
+      start_period: 10s
+
+  mongo-init:
+    image: mongo:7.0
+    container_name: mongo-init
+    depends_on:
+      mongodb:
+        condition: service_healthy
+    networks:
+      - grafana-network
+    restart: on-failure
+    volumes:
+      - ./scripts:/scripts
+    entrypoint: ["/bin/bash", "/scripts/setup-simple.sh"]
+
+  prometheus:
+    image: prom/prometheus:v2.53.1
+    container_name: prometheus
+    command:
+      - '--config.file=/etc/prometheus/prometheus.yml'
+      - '--storage.tsdb.path=/prometheus'
+      - '--web.console.libraries=/usr/share/prometheus/console_libraries'
+      - '--web.console.templates=/usr/share/prometheus/consoles'
+    ports:
+      - "9090:9090"
+    expose:
+      - 9090
+    volumes:
+      - ./prometheus:/etc/prometheus
+      - prometheus_data:/prometheus
+    networks:
+      - grafana-network
+
+  grafana:
+    image: grafana/grafana:10.0.0
+    container_name: grafana
+    ports:
+      - "3000:3000"
+    expose:
+      - 3000
+    environment:
+      - GF_AUTH_ANONYMOUS_ENABLED=true
+      - GF_AUTH_ANONYMOUS_ORG_ROLE=Admin
+      - GF_AUTH_DISABLE_LOGIN_FORM=true
+      - GF_SECURITY_ADMIN_PASSWORD=admin
+      - GF_SECURITY_ADMIN_USER=admin
+    volumes:
+      - grafana_data:/var/lib/grafana
+      - ./grafana/provisioning:/etc/grafana/provisioning
+    networks:
+      - grafana-network
+
+networks:
+  grafana-network:
+    driver: bridge

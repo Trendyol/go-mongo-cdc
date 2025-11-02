@@ -56,8 +56,7 @@ func main() {
 			},
 		},
 		Metric: config.MetricConfig{
-			Port:                      8080,
-			EnableShardMetricsMapping: true,
+			Port: 8080,
 		},
 		Checkpoint: config.CheckpointConfig{
 			TokenSaveInterval:     10 * time.Second,
@@ -151,11 +150,10 @@ $ go get github.com/Trendyol/go-mongo-cdc
 
 **Note:** Monitoring oplog is critical for Change Streams. If the oplog window is too small or oplog history is lost, Change Streams may fail. We recommend using MongoDB's native metrics exposed through MongoDB Exporter or MongoDB's built-in monitoring tools to track oplog health (size, used percentage, window). This library provides replication lag and connection metrics through the standard MongoDB connection.
 
-| Variable                           | Type          | Required | Default | Description                                                                     |
-|------------------------------------|---------------|----------|---------|---------------------------------------------------------------------------------|
-| `metric.port`                      | int           | no       | 8080    | Prometheus metrics port                                                         |
-| `metric.enableShardMetricsMapping` | bool          | no       | false   | Enable hostname-to-localhost port mapping for sharded clusters (local dev only) |
-| `metric.collectionInterval`        | time.Duration | no       | 20s     | MongoDB metrics collection interval                                             |
+| Variable                    | Type          | Required | Default | Description                             |
+|-----------------------------|---------------|----------|---------|-----------------------------------------|
+| `metric.port`               | int           | no       | 8080    | Prometheus metrics port                 |
+| `metric.collectionInterval` | time.Duration | no       | 20s     | MongoDB metrics collection interval     |
 
 ### Checkpoint Configuration
 
@@ -241,7 +239,6 @@ appPort: :8080
 | `go_mongo_cdc_update_total`                          | Counter | Total number of UPDATE operations processed                   | N/A                 |
 | `go_mongo_cdc_delete_total`                          | Counter | Total number of DELETE operations processed                   | N/A                 |
 | `go_mongo_cdc_replace_total`                         | Counter | Total number of REPLACE operations processed                  | N/A                 |
-| `go_mongo_cdc_process_latency_seconds`               | Gauge   | Current processing latency in seconds                         | N/A                 |
 | `go_mongo_cdc_cdc_latency_seconds`                   | Gauge   | Current CDC latency in seconds                                | N/A                 |
 | `go_mongo_cdc_checkpoint_save_total`                 | Counter | Total number of successful checkpoint saves                   | N/A                 |
 | `go_mongo_cdc_checkpoint_save_error_total`           | Counter | Total number of checkpoint save errors                        | N/A                 |
@@ -260,16 +257,14 @@ appPort: :8080
 | `go_mongo_cdc_time_since_last_checkpoint_seconds`    | Gauge   | Time since last checkpoint was saved in seconds               | N/A                 |
 | `go_mongo_cdc_listener_error_total`                  | Counter | Total number of listener function errors                      | N/A                 |
 | `go_mongo_cdc_partition_rebalance_total`             | Counter | Total number of partition rebalance operations                | N/A                 |
-| `go_mongo_cdc_mongodb_replication_lag_seconds`       | Gauge   | MongoDB replication lag in seconds                            | N/A                 |
 | `go_mongo_cdc_mongodb_connections_active`            | Gauge   | MongoDB active connections                                    | N/A                 |
 | `go_mongo_cdc_mongodb_connections_available`         | Gauge   | MongoDB available connections                                 | N/A                 |
-| `go_mongo_cdc_mongodb_shard_replication_lag_seconds` | Gauge   | MongoDB shard replication lag in seconds (sharded clusters)   | shard               |
 | `go_mongo_cdc_build_info`                            | Gauge   | Build information                                             | version, go_version |
 
 ## Examples
 
 - [Simple Example](example/simple/main.go)
-- [Docker Compose Setup](example/simple/docker-compose.yml)
+- [Grafana Dashboard Example](example/grafana/main.go)
 
 ## Contributing
 

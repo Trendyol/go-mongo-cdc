@@ -12,7 +12,6 @@ type Metric interface {
 	IncDeleteTotal()
 	IncReplaceTotal()
 
-	SetProcessLatency(latencyNs int64)
 	SetCDCLatency(latencyMs int64)
 
 	IncCheckpointSaveTotal()
@@ -37,13 +36,11 @@ type Metric interface {
 	IncPartitionRebalanceTotal()
 
 	SetMongoDBMetrics(metrics *MongoDBMetrics)
-	SetShardMetrics(shardMetrics []*ShardMetrics)
 
 	GetInsertTotal() int64
 	GetUpdateTotal() int64
 	GetDeleteTotal() int64
 	GetReplaceTotal() int64
-	GetProcessLatency() int64
 	GetCDCLatency() int64
 	GetCheckpointSaveTotal() int64
 	GetCheckpointSaveErrorTotal() int64
@@ -62,7 +59,6 @@ type Metric interface {
 	GetListenerErrorTotal() int64
 	GetPartitionRebalanceTotal() int64
 	GetMongoDBMetrics() *MongoDBMetrics
-	GetShardMetrics() []*ShardMetrics
 }
 
 type metric struct {
@@ -74,8 +70,7 @@ type metric struct {
 	deleteTotal  int64
 	replaceTotal int64
 
-	processLatency int64
-	cdcLatency     int64
+	cdcLatency int64
 
 	checkpointSaveTotal      int64
 	checkpointSaveErrorTotal int64
@@ -101,9 +96,6 @@ type metric struct {
 
 	mongoDBMetrics   *MongoDBMetrics
 	mongoDBMetricsMu sync.RWMutex
-
-	shardMetrics   []*ShardMetrics
-	shardMetricsMu sync.RWMutex
 }
 
 func NewMetric(database, collection string) Metric {
@@ -127,11 +119,6 @@ func (m *metric) IncDeleteTotal() {
 
 func (m *metric) IncReplaceTotal() {
 	atomic.AddInt64(&m.replaceTotal, 1)
-}
-
-func (m *metric) SetProcessLatency(latencyNs int64) {
-	latencyMs := latencyNs / 1000000
-	atomic.StoreInt64(&m.processLatency, latencyMs)
 }
 
 func (m *metric) SetCDCLatency(latencyMs int64) {
@@ -204,10 +191,6 @@ func (m *metric) GetDeleteTotal() int64 {
 
 func (m *metric) GetReplaceTotal() int64 {
 	return atomic.LoadInt64(&m.replaceTotal)
-}
-
-func (m *metric) GetProcessLatency() int64 {
-	return atomic.LoadInt64(&m.processLatency)
 }
 
 func (m *metric) GetCDCLatency() int64 {
@@ -304,16 +287,4 @@ func (m *metric) GetMongoDBMetrics() *MongoDBMetrics {
 	m.mongoDBMetricsMu.RLock()
 	defer m.mongoDBMetricsMu.RUnlock()
 	return m.mongoDBMetrics
-}
-
-func (m *metric) SetShardMetrics(shardMetrics []*ShardMetrics) {
-	m.shardMetricsMu.Lock()
-	defer m.shardMetricsMu.Unlock()
-	m.shardMetrics = shardMetrics
-}
-
-func (m *metric) GetShardMetrics() []*ShardMetrics {
-	m.shardMetricsMu.RLock()
-	defer m.shardMetricsMu.RUnlock()
-	return m.shardMetrics
 }

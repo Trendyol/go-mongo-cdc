@@ -1,0 +1,737 @@
+{
+  "annotations": {
+    "list": [
+      {
+        "builtIn": 1,
+        "datasource": {
+          "type": "grafana",
+          "uid": "-- Grafana --"
+        },
+        "enable": true,
+        "hide": true,
+        "iconColor": "rgba(0, 211, 255, 1)",
+        "name": "Annotations & Alerts",
+        "type": "dashboard"
+      }
+    ]
+  },
+  "description": "",
+  "editable": true,
+  "fiscalYearStartMonth": 0,
+  "graphTooltip": 0,
+  "id": 1,
+  "links": [],
+  "liveNow": false,
+  "panels": [
+    {
+      "datasource": {
+        "type": "prometheus",
+        "uid": "PE4E52330B67298A4"
+      },
+      "gridPos": {
+        "h": 8,
+        "w": 12,
+        "x": 0,
+        "y": 0
+      },
+      "id": 1,
+      "targets": [
+        {
+          "datasource": {
+            "type": "prometheus",
+            "uid": "PE4E52330B67298A4"
+          },
+          "editorMode": "code",
+          "expr": "go_mongo_cdc_cdc_latency_seconds * 1000",
+          "format": "time_series",
+          "refId": "A"
+        }
+      ],
+      "title": "CDC Latency",
+      "description": "Latency between event creation in MongoDB and processing by CDC.",
+      "type": "graph",
+      "yaxes": [
+        {
+          "decimals": 3,
+          "format": "ms",
+          "show": true
+        },
+        {
+          "show": true
+        }
+      ]
+    },
+    {
+      "datasource": {
+        "type": "prometheus",
+        "uid": "PE4E52330B67298A4"
+      },
+      "gridPos": {
+        "h": 8,
+        "w": 12,
+        "x": 12,
+        "y": 0
+      },
+      "id": 2,
+      "targets": [
+        {
+          "datasource": {
+            "type": "prometheus",
+            "uid": "PE4E52330B67298A4"
+          },
+          "editorMode": "code",
+          "expr": "go_mongo_cdc_listener_latency_seconds * 1000",
+          "format": "time_series",
+          "refId": "A"
+        }
+      ],
+      "title": "Listener Latency",
+      "description": "Pure listener function execution time (business logic only). Excludes CDC framework overhead.",
+      "type": "graph",
+      "yaxes": [
+        {
+          "decimals": 3,
+          "format": "ms",
+          "show": true
+        },
+        {
+          "show": true
+        }
+      ]
+    },
+    {
+      "datasource": {
+        "type": "prometheus",
+        "uid": "PE4E52330B67298A4"
+      },
+      "gridPos": {
+        "h": 8,
+        "w": 12,
+        "x": 12,
+        "y": 8
+      },
+      "id": 4,
+      "targets": [
+        {
+          "datasource": {
+            "type": "prometheus",
+            "uid": "PE4E52330B67298A4"
+          },
+          "editorMode": "code",
+          "expr": "go_mongo_cdc_event_lag_seconds",
+          "format": "time_series",
+          "refId": "A"
+        }
+      ],
+      "title": "Event Lag",
+      "description": "Time elapsed since the last event. High values indicate CDC has stopped or slowed down.",
+      "type": "graph",
+      "yaxes": [
+        {
+          "format": "s",
+          "show": true
+        },
+        {
+          "show": true
+        }
+      ]
+    },
+    {
+      "datasource": {
+        "type": "prometheus",
+        "uid": "PE4E52330B67298A4"
+      },
+      "gridPos": {
+        "h": 8,
+        "w": 12,
+        "x": 0,
+        "y": 16
+      },
+      "id": 5,
+      "targets": [
+        {
+          "datasource": {
+            "type": "prometheus",
+            "uid": "PE4E52330B67298A4"
+          },
+          "editorMode": "code",
+          "expr": "rate(go_mongo_cdc_insert_total[5m]) * 60",
+          "format": "time_series",
+          "legendFormat": "Insert",
+          "refId": "A"
+        },
+        {
+          "datasource": {
+            "type": "prometheus",
+            "uid": "PE4E52330B67298A4"
+          },
+          "editorMode": "code",
+          "expr": "rate(go_mongo_cdc_update_total[5m]) * 60",
+          "format": "time_series",
+          "legendFormat": "Update",
+          "refId": "B"
+        },
+        {
+          "datasource": {
+            "type": "prometheus",
+            "uid": "PE4E52330B67298A4"
+          },
+          "editorMode": "code",
+          "expr": "rate(go_mongo_cdc_replace_total[5m]) * 60",
+          "format": "time_series",
+          "legendFormat": "Replace",
+          "refId": "C"
+        },
+        {
+          "datasource": {
+            "type": "prometheus",
+            "uid": "PE4E52330B67298A4"
+          },
+          "editorMode": "code",
+          "expr": "rate(go_mongo_cdc_delete_total[5m]) * 60",
+          "format": "time_series",
+          "legendFormat": "Delete",
+          "refId": "D"
+        }
+      ],
+      "title": "Operations Rate (per minute)",
+      "description": "Number of operations processed per minute (Insert, Update, Replace, Delete). Shows CDC throughput.",
+      "type": "graph",
+      "yaxes": [
+        {
+          "decimals": 2,
+          "format": "ops",
+          "show": true
+        },
+        {
+          "show": true
+        }
+      ]
+    },
+    {
+      "datasource": {
+        "type": "prometheus",
+        "uid": "PE4E52330B67298A4"
+      },
+      "gridPos": {
+        "h": 8,
+        "w": 12,
+        "x": 12,
+        "y": 16
+      },
+      "id": 6,
+      "targets": [
+        {
+          "datasource": {
+            "type": "prometheus",
+            "uid": "PE4E52330B67298A4"
+          },
+          "editorMode": "code",
+          "expr": "go_mongo_cdc_checkpoint_save_latency_seconds * 1000",
+          "format": "time_series",
+          "refId": "A"
+        }
+      ],
+      "title": "Checkpoint Save Latency",
+      "description": "Time to save resume token to MongoDB. High values may indicate MongoDB performance issues.",
+      "type": "graph",
+      "yaxes": [
+        {
+          "decimals": 3,
+          "format": "ms",
+          "show": true
+        },
+        {
+          "show": true
+        }
+      ]
+    },
+    {
+      "datasource": {
+        "type": "prometheus",
+        "uid": "PE4E52330B67298A4"
+      },
+      "gridPos": {
+        "h": 8,
+        "w": 12,
+        "x": 0,
+        "y": 24
+      },
+      "id": 7,
+      "targets": [
+        {
+          "datasource": {
+            "type": "prometheus",
+            "uid": "PE4E52330B67298A4"
+          },
+          "editorMode": "code",
+          "expr": "rate(go_mongo_cdc_checkpoint_save_total[5m]) * 60",
+          "format": "time_series",
+          "legendFormat": "Save Rate",
+          "refId": "A"
+        },
+        {
+          "datasource": {
+            "type": "prometheus",
+            "uid": "PE4E52330B67298A4"
+          },
+          "editorMode": "code",
+          "expr": "rate(go_mongo_cdc_checkpoint_save_error_total[5m]) * 60",
+          "format": "time_series",
+          "legendFormat": "Error Rate",
+          "refId": "B"
+        }
+      ],
+      "title": "Checkpoint Operations (per minute)",
+      "description": "Checkpoint save operations per minute. Shows success and error rates.",
+      "type": "graph",
+      "yaxes": [
+        {
+          "decimals": 2,
+          "format": "ops",
+          "show": true
+        },
+        {
+          "show": true
+        }
+      ]
+    },
+    {
+      "datasource": {
+        "type": "prometheus",
+        "uid": "PE4E52330B67298A4"
+      },
+      "gridPos": {
+        "h": 8,
+        "w": 12,
+        "x": 12,
+        "y": 24
+      },
+      "id": 8,
+      "targets": [
+        {
+          "datasource": {
+            "type": "prometheus",
+            "uid": "PE4E52330B67298A4"
+          },
+          "editorMode": "code",
+          "expr": "go_mongo_cdc_time_since_last_checkpoint_seconds",
+          "format": "time_series",
+          "refId": "A"
+        }
+      ],
+      "title": "Time Since Last Checkpoint",
+      "description": "Time elapsed since last checkpoint. Should be periodic according to checkpoint interval.",
+      "type": "graph",
+      "yaxes": [
+        {
+          "format": "s",
+          "show": true
+        },
+        {
+          "show": true
+        }
+      ]
+    },
+    {
+      "datasource": {
+        "type": "prometheus",
+        "uid": "PE4E52330B67298A4"
+      },
+      "gridPos": {
+        "h": 8,
+        "w": 12,
+        "x": 0,
+        "y": 32
+      },
+      "id": 9,
+      "targets": [
+        {
+          "datasource": {
+            "type": "prometheus",
+            "uid": "PE4E52330B67298A4"
+          },
+          "editorMode": "code",
+          "expr": "go_mongo_cdc_active_partition_count",
+          "format": "time_series",
+          "refId": "A"
+        }
+      ],
+      "title": "Active Partition Count",
+      "description": "Number of active partitions assigned to this worker. Used for load balancing.",
+      "type": "graph",
+      "yaxes": [
+        {
+          "decimals": 0,
+          "format": "short",
+          "min": "0",
+          "show": true
+        },
+        {
+          "show": true
+        }
+      ]
+    },
+    {
+      "datasource": {
+        "type": "prometheus",
+        "uid": "PE4E52330B67298A4"
+      },
+      "gridPos": {
+        "h": 8,
+        "w": 12,
+        "x": 12,
+        "y": 32
+      },
+      "id": 10,
+      "targets": [
+        {
+          "datasource": {
+            "type": "prometheus",
+            "uid": "PE4E52330B67298A4"
+          },
+          "editorMode": "code",
+          "expr": "go_mongo_cdc_partition_acquire_total",
+          "format": "time_series",
+          "legendFormat": "Acquire Total",
+          "refId": "A"
+        },
+        {
+          "datasource": {
+            "type": "prometheus",
+            "uid": "PE4E52330B67298A4"
+          },
+          "editorMode": "code",
+          "expr": "go_mongo_cdc_partition_release_total",
+          "format": "time_series",
+          "legendFormat": "Release Total",
+          "refId": "B"
+        },
+        {
+          "datasource": {
+            "type": "prometheus",
+            "uid": "PE4E52330B67298A4"
+          },
+          "editorMode": "code",
+          "expr": "go_mongo_cdc_partition_rebalance_total",
+          "format": "time_series",
+          "legendFormat": "Rebalance Total",
+          "refId": "C"
+        }
+      ],
+      "title": "Partition Operations (Total)",
+      "description": "Partition acquire and release operations. Shows load balancing activity between workers.",
+      "type": "graph",
+      "yaxes": [
+        {
+          "format": "short",
+          "show": true
+        },
+        {
+          "show": true
+        }
+      ]
+    },
+    {
+      "datasource": {
+        "type": "prometheus",
+        "uid": "PE4E52330B67298A4"
+      },
+      "gridPos": {
+        "h": 8,
+        "w": 12,
+        "x": 0,
+        "y": 40
+      },
+      "id": 11,
+      "targets": [
+        {
+          "datasource": {
+            "type": "prometheus",
+            "uid": "PE4E52330B67298A4"
+          },
+          "editorMode": "code",
+          "expr": "go_mongo_cdc_change_stream_error_total",
+          "format": "time_series",
+          "legendFormat": "Error Total",
+          "refId": "A"
+        },
+        {
+          "datasource": {
+            "type": "prometheus",
+            "uid": "PE4E52330B67298A4"
+          },
+          "editorMode": "code",
+          "expr": "go_mongo_cdc_change_stream_restart_total",
+          "format": "time_series",
+          "legendFormat": "Restart Total",
+          "refId": "B"
+        },
+        {
+          "datasource": {
+            "type": "prometheus",
+            "uid": "PE4E52330B67298A4"
+          },
+          "editorMode": "code",
+          "expr": "go_mongo_cdc_resume_token_expired_total",
+          "format": "time_series",
+          "legendFormat": "Token Expired Total",
+          "refId": "C"
+        }
+      ],
+      "title": "Change Stream Errors (Total)",
+      "description": "Change stream errors and restart count. High values may indicate MongoDB connection issues.",
+      "type": "graph",
+      "yaxes": [
+        {
+          "format": "short",
+          "show": true
+        },
+        {
+          "show": true
+        }
+      ]
+    },
+    {
+      "datasource": {
+        "type": "prometheus",
+        "uid": "PE4E52330B67298A4"
+      },
+      "gridPos": {
+        "h": 8,
+        "w": 12,
+        "x": 12,
+        "y": 40
+      },
+      "id": 12,
+      "targets": [
+        {
+          "datasource": {
+            "type": "prometheus",
+            "uid": "PE4E52330B67298A4"
+          },
+          "editorMode": "code",
+          "expr": "go_mongo_cdc_listener_error_total",
+          "format": "time_series",
+          "refId": "A"
+        }
+      ],
+      "title": "Listener Errors",
+      "description": "Number of errors in the listener function. Indicates business logic errors.",
+      "type": "graph",
+      "yaxes": [
+        {
+          "format": "short",
+          "show": true
+        },
+        {
+          "show": true
+        }
+      ]
+    },
+    {
+      "datasource": {
+        "type": "prometheus",
+        "uid": "PE4E52330B67298A4"
+      },
+      "gridPos": {
+        "h": 8,
+        "w": 12,
+        "x": 0,
+        "y": 48
+      },
+      "id": 13,
+      "targets": [
+        {
+          "datasource": {
+            "type": "prometheus",
+            "uid": "PE4E52330B67298A4"
+          },
+          "editorMode": "code",
+          "expr": "go_mongo_cdc_bootstrap_document_total",
+          "format": "time_series",
+          "refId": "A"
+        }
+      ],
+      "title": "Bootstrap Documents",
+      "description": "Total number of documents processed during bootstrap. Reads existing data from collection on initial startup.",
+      "type": "graph",
+      "yaxes": [
+        {
+          "format": "short",
+          "show": true
+        },
+        {
+          "show": true
+        }
+      ]
+    },
+    {
+      "datasource": {
+        "type": "prometheus",
+        "uid": "PE4E52330B67298A4"
+      },
+      "gridPos": {
+        "h": 8,
+        "w": 12,
+        "x": 12,
+        "y": 48
+      },
+      "id": 14,
+      "targets": [
+        {
+          "datasource": {
+            "type": "prometheus",
+            "uid": "PE4E52330B67298A4"
+          },
+          "editorMode": "code",
+          "expr": "go_mongo_cdc_bootstrap_active",
+          "format": "time_series",
+          "refId": "A"
+        }
+      ],
+      "title": "Bootstrap Active",
+      "description": "Indicates if bootstrap is active (1=active, 0=completed). Switches to change stream after bootstrap completes.",
+      "type": "graph",
+      "yaxes": [
+        {
+          "format": "short",
+          "show": true
+        },
+        {
+          "show": true
+        }
+      ]
+    },
+    {
+      "datasource": {
+        "type": "prometheus",
+        "uid": "PE4E52330B67298A4"
+      },
+      "gridPos": {
+        "h": 8,
+        "w": 12,
+        "x": 12,
+        "y": 56
+      },
+      "id": 16,
+      "targets": [
+        {
+          "datasource": {
+            "type": "prometheus",
+            "uid": "PE4E52330B67298A4"
+          },
+          "editorMode": "code",
+          "expr": "go_mongo_cdc_mongodb_connections_active",
+          "format": "time_series",
+          "legendFormat": "Active",
+          "refId": "A"
+        },
+        {
+          "datasource": {
+            "type": "prometheus",
+            "uid": "PE4E52330B67298A4"
+          },
+          "editorMode": "code",
+          "expr": "go_mongo_cdc_mongodb_connections_available",
+          "format": "time_series",
+          "legendFormat": "Available",
+          "refId": "B"
+        }
+      ],
+      "title": "MongoDB Connections",
+      "description": "MongoDB connection pool status. Active: connections in use, Available: connections available.",
+      "type": "graph",
+      "yaxes": [
+        {
+          "format": "short",
+          "show": true
+        },
+        {
+          "show": true
+        }
+      ]
+    },
+    {
+      "datasource": {
+        "type": "prometheus",
+        "uid": "PE4E52330B67298A4"
+      },
+      "gridPos": {
+        "h": 8,
+        "w": 12,
+        "x": 0,
+        "y": 8
+      },
+      "id": 17,
+      "targets": [
+        {
+          "datasource": {
+            "type": "prometheus",
+            "uid": "PE4E52330B67298A4"
+          },
+          "editorMode": "code",
+          "expr": "go_mongo_cdc_last_event_time_seconds * 1000",
+          "format": "time_series",
+          "refId": "A"
+        }
+      ],
+      "title": "Last Event Time",
+      "description": "Exact timestamp of the last processed event. Use to check when CDC last processed data.",
+      "type": "stat",
+      "options": {
+        "reduceOptions": {
+          "values": false,
+          "calcs": ["lastNotNull"]
+        },
+        "text": {}
+      },
+      "fieldConfig": {
+        "defaults": {
+          "unit": "dateTimeAsIso"
+        }
+      }
+    }
+  ],
+  "refresh": "10s",
+  "schemaVersion": 38,
+  "style": "dark",
+  "tags": [],
+  "templating": {
+    "list": []
+  },
+  "time": {
+    "from": "now-5m",
+    "to": "now"
+  },
+  "timepicker": {
+    "refresh_intervals": [
+      "5s",
+      "10s",
+      "30s",
+      "1m",
+      "5m",
+      "15m",
+      "30m",
+      "1h",
+      "2h",
+      "1d"
+    ],
+    "time_options": [
+      "5m",
+      "15m",
+      "1h",
+      "6h",
+      "12h",
+      "24h",
+      "2d",
+      "7d",
+      "30d"
+    ]
+  },
+  "timezone": "browser",
+  "title": "Go MongoDB CDC Dashboard",
+  "uid": "b0d2fcb9-2383-4a78-a57a-8b00dc615902",
+  "version": 7,
+  "weekStart": ""
+}

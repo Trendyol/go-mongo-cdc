@@ -51,9 +51,8 @@ type Timeouts struct {
 }
 
 type MetricConfig struct {
-	Port                      int           `json:"port" yaml:"port"`
-	EnableShardMetricsMapping bool          `json:"enableShardMetricsMapping" yaml:"enableShardMetricsMapping"`
-	CollectionInterval        time.Duration `json:"collectionInterval" yaml:"collectionInterval"`
+	Port               int           `json:"port" yaml:"port"`
+	CollectionInterval time.Duration `json:"collectionInterval" yaml:"collectionInterval"`
 }
 
 type LoggerConfig struct {
