@@ -1,4 +1,4 @@
-# Go MongoDB CDC [![Go Reference](https://pkg.go.dev/badge/github.com/Trendyol/go-mongo-cdc.svg)](https://pkg.go.dev/github.com/Trendyol/go-mongo-cdc) [![Go Report Card](https://goreportcard.com/badge/github.com/Trendyol/go-mongo-cdc)](https://goreportcard.com/report/github.com/Trendyol/go-mongo-cdc)
+# Go MongoDB CDC [![Go Reference](https://pkg.go.dev/badge/github.com/Trendyol/go-mongo-cdc.svg)](https://pkg.go.dev/github.com/Trendyol/go-mongo-cdc) [![Go Report Card](https://goreportcard.com/badge/github.com/Trendyol/go-mongo-cdc)](https://goreportcard.com/report/github.com/Trendyol/go-mongo-cdc) [![OpenSSF Scorecard](https://api.scorecard.dev/projects/github.com/Trendyol/go-mongo-cdc/badge)](https://scorecard.dev/viewer/?uri=github.com/Trendyol/go-mongo-cdc)
 
 **Go MongoDB CDC** captures and processes real-time changes from MongoDB using Change Streams.
 
@@ -22,55 +22,92 @@
 package main
 
 import (
-    "context"
-    "log"
+	"context"
 
-    cdc "github.com/Trendyol/go-mongo-cdc"
-    "github.com/Trendyol/go-mongo-cdc/config"
-    "github.com/Trendyol/go-mongo-cdc/mongo/message"
-    "github.com/Trendyol/go-mongo-cdc/stream"
-    "go.uber.org/zap"
+	"github.com/Trendyol/go-mongo-cdc/logger"
+
+	cdc "github.com/Trendyol/go-mongo-cdc"
+
+	"log"
+	"time"
+
+	"github.com/Trendyol/go-mongo-cdc/config"
+	"github.com/Trendyol/go-mongo-cdc/mongo/message"
+	"github.com/Trendyol/go-mongo-cdc/stream"
 )
 
-func listener(ctx *stream.ListenerContext) error {
-    select {
-    case <-ctx.Context.Done():
-        log.Printf("Shutdown signal received, stopping gracefully")
-        return ctx.Context.Err()
-    default:
-    }
+func main() {
+	cfg := config.Config{
+		MongoDB: config.MongoDB{
+			Connection: config.Connection{
+				URI:        "localhost:27017",
+				Database:   "exampleDB",
+				Collection: "exampleCollection",
+			},
+			ConnectionPool: config.ConnectionPool{
+				MaxPoolSize:   100,
+				MinPoolSize:   5,
+				MaxIdleTimeMS: 300000,
+			},
+			Timeouts: config.Timeouts{
+				ConnectTimeoutMS:         30000,
+				ServerSelectionTimeoutMS: 60000,
+				SocketTimeoutMS:          120000,
+			},
+		},
+		Metric: config.MetricConfig{
+			Port:                      8080,
+			EnableShardMetricsMapping: true,
+		},
+		Checkpoint: config.CheckpointConfig{
+			TokenSaveInterval:     10 * time.Second,
+			ChangeStreamBatchSize: 500,
+			BootstrapSaveCount:    5000,
+			BootstrapSaveInterval: 10 * time.Second,
+			BootstrapBatchSize:    5000,
+		},
+		Partition: config.PartitionConfig{
+			HeartbeatInterval:      10 * time.Second,
+			WorkerTimeout:          90 * time.Second,
+			RebalanceCheckInterval: 10 * time.Second,
+			TotalPartition:         30,
+		},
+		Logger: config.LoggerConfig{LogLevel: "debug"},
+	}
 
-    switch ctx.Message.OperationType {
-    case message.OperationInsert:
-        log.Printf("New document inserted: %+v", ctx.Message.FullDocument)
-    case message.OperationUpdate:
-        log.Printf("Document updated: %+v", ctx.Message.FullDocument)
-    case message.OperationDelete:
-        log.Printf("Document deleted: %+v", ctx.Message.DocumentID)
-    }
+	connector, err := cdc.NewConnector(cfg, ProcessChangeEvent)
+	if err != nil {
+		log.Fatal("failed to create connector:", err)
+	}
 
-    return ctx.Ack()
+	defer connector.Close()
+
+	ctx := context.Background()
+	connector.Start(ctx)
 }
 
-func main() {
-    cfg := config.Config{
-        MongoDB: config.MongoDB{
-            Connection: config.Connection{
-                URI:        "localhost:27017",
-                Database:   "myDB",
-                Collection: "myCollection",
-            },
-        }
-    }
+func ProcessChangeEvent(lc *stream.ListenerContext) error {
+	select {
+	case <-lc.Context.Done():
+		logger.Log.Info("Shutdown signal received, stopping event processing")
+		return lc.Context.Err()
+	default:
+	}
 
-    connector, err := cdc.NewConnector(cfg, listener)
-    if err != nil {
-        log.Fatal("Failed to create CDC connector:", err)
-    }
+	switch lc.Message.OperationType {
+	case message.OperationInsert, message.OperationUpdate, message.OperationReplace:
+		if lc.Message.FullDocument != nil {
+			logger.Log.Info("Document changed - operation: %s, document: %v, partitionId: %d", string(lc.Message.OperationType), lc.Message.DocumentID, lc.PartitionID)
+		}
+	case message.OperationDelete:
+		logger.Log.Info("Document deleted - documentId: %v, partitionId: %d", lc.Message.DocumentID, lc.PartitionID)
+	}
 
-    defer connector.Close()
-
-    connector.Start(context.Background())
+	if err := lc.Ack(); err != nil {
+		logger.Log.Error("Failed to acknowledge message: %v", err)
+		return err
+	}
+	return nil
 }
 ```
 
@@ -159,77 +196,75 @@ $ go get github.com/Trendyol/go-mongo-cdc
 ### Configuration Example
 
 ```yaml
-mongodb:
-  connection:
-    uri: "localhost:27017"
-    database: "exampleDB"
-    collection: "exampleCollection"
-    username: "user"
-    password: "pass"
-  connectionPool:
-    maxPoolSize: 100
-    minPoolSize: 5
-    maxIdleTimeMS: 300000
-  timeouts:
-    connectTimeoutMS: 30000
-    serverSelectionTimeoutMS: 60000
-    socketTimeoutMS: 120000
+cdcconfig:
+  mongodb:
+    connection:
+      uri: "localhost:27017"
+      database: exampleDB
+      collection: exampleCollection
+    connectionPool:
+      maxPoolSize: 100
+      minPoolSize: 3
+      maxIdleTimeMS: 300000
 
-metric:
-  port: 8080
-  enableShardMetricsMapping: false
-  collectionInterval: 20s
+  metric:
+    port: 8085
 
-checkpoint:
-  tokenSaveInterval: 10s
-  changeStreamBatchSize: 500
-  bootstrapSaveCount: 2500
-  bootstrapSaveInterval: 10s
-  bootstrapBatchSize: 2500
+  checkpoint:
+    bootstrapSaveCount: 5000
+    bootstrapBatchSize: 5000
+    bootstrapSaveInterval: 10s
+    tokenSaveInterval: 10s
+    changeStreamBatchSize: 500
 
-partition:
-  heartbeatInterval: 10s
-  workerTimeout: 90s
-  workersCollection: "workers"
-  partitionsCollection: "partition_assignments"
-  rebalanceCheckInterval: 10s
-  totalPartition: 15
+  partition:
+    heartbeatInterval: 10s
+    workerTimeout: 90s
+    rebalanceCheckInterval: 10s
+    totalPartition: 15
+    workersCollection: "workers"
+    partitionsCollection: "partition_assignments"
 
-logger:
-  logLevel: "info"
+  logger:
+    logLevel: "debug"
 
-gracefulShutdownTimeout: 10s
+gracefulShutdownTimeout: 5s
+
+appPort: :8080
 ```
 
 ## Exposed Metrics
 
-| Metric Name                                       | Type    | Description                                                     | Labels |
-|---------------------------------------------------|---------|-----------------------------------------------------------------|--------|
-| `go_mongo_cdc_insert_total`                       | Counter | Total number of INSERT operations processed                     | N/A    |
-| `go_mongo_cdc_update_total`                       | Counter | Total number of UPDATE operations processed                     | N/A    |
-| `go_mongo_cdc_delete_total`                       | Counter | Total number of DELETE operations processed                     | N/A    |
-| `go_mongo_cdc_replace_total`                      | Counter | Total number of REPLACE operations processed                    | N/A    |
-| `go_mongo_cdc_process_latency_ms_current`         | Gauge   | Current processing latency in milliseconds                      | N/A    |
-| `go_mongo_cdc_cdc_latency_ms_current`             | Gauge   | Current CDC latency in milliseconds                             | N/A    |
-| `go_mongo_cdc_checkpoint_save_total`              | Counter | Total number of successful checkpoint saves                     | N/A    |
-| `go_mongo_cdc_checkpoint_save_error_total`        | Counter | Total number of checkpoint save errors                          | N/A    |
-| `go_mongo_cdc_checkpoint_save_latency_ms_current` | Gauge   | Current checkpoint save latency in milliseconds                 | N/A    |
-| `go_mongo_cdc_bootstrap_document_total`           | Counter | Total number of documents processed during bootstrap            | N/A    |
-| `go_mongo_cdc_bootstrap_progress_percent`         | Gauge   | Bootstrap progress percentage (0-100)                           | N/A    |
-| `go_mongo_cdc_bootstrap_active`                   | Gauge   | Bootstrap active status (1=active, 0=inactive)                  | N/A    |
-| `go_mongo_cdc_active_partition_count`             | Gauge   | Number of currently active partitions assigned to this worker   | N/A    |
-| `go_mongo_cdc_partition_acquire_total`            | Counter | Total number of partition acquisitions                          | N/A    |
-| `go_mongo_cdc_partition_release_total`            | Counter | Total number of partition releases                              | N/A    |
-| `go_mongo_cdc_resume_token_expired_total`         | Counter | Total number of expired resume tokens                           | N/A    |
-| `go_mongo_cdc_change_stream_error_total`          | Counter | Total number of change stream errors                            | N/A    |
-| `go_mongo_cdc_change_stream_restart_total`        | Counter | Total number of change stream restarts                          | N/A    |
-| `go_mongo_cdc_worker_healthy`                     | Gauge   | Worker health status (1=healthy, 0=unhealthy)                   | N/A    |
-| `go_mongo_cdc_last_event_time_seconds`            | Gauge   | Unix timestamp of the last processed event                      | N/A    |
-| `go_mongo_cdc_event_lag_duration_seconds`         | Gauge   | Duration in seconds since the last event was processed          | N/A    |
-| `go_mongo_cdc_mongodb_replication_lag_seconds`    | Gauge   | MongoDB replication lag in seconds                              | N/A    |
-| `go_mongo_cdc_mongodb_connections_active`         | Gauge   | MongoDB active connections                                      | N/A    |
-| `go_mongo_cdc_mongodb_connections_available`      | Gauge   | MongoDB available connections                                   | N/A    |
-| `go_mongo_cdc_mongodb_shard_replication_lag_seconds` | Gauge | MongoDB shard replication lag in seconds (sharded clusters)    | shard  |
+| Metric Name                                          | Type    | Description                                                   | Labels              |
+|------------------------------------------------------|---------|---------------------------------------------------------------|---------------------|
+| `go_mongo_cdc_insert_total`                          | Counter | Total number of INSERT operations processed                   | N/A                 |
+| `go_mongo_cdc_update_total`                          | Counter | Total number of UPDATE operations processed                   | N/A                 |
+| `go_mongo_cdc_delete_total`                          | Counter | Total number of DELETE operations processed                   | N/A                 |
+| `go_mongo_cdc_replace_total`                         | Counter | Total number of REPLACE operations processed                  | N/A                 |
+| `go_mongo_cdc_process_latency_seconds`               | Gauge   | Current processing latency in seconds                         | N/A                 |
+| `go_mongo_cdc_cdc_latency_seconds`                   | Gauge   | Current CDC latency in seconds                                | N/A                 |
+| `go_mongo_cdc_checkpoint_save_total`                 | Counter | Total number of successful checkpoint saves                   | N/A                 |
+| `go_mongo_cdc_checkpoint_save_error_total`           | Counter | Total number of checkpoint save errors                        | N/A                 |
+| `go_mongo_cdc_checkpoint_save_latency_seconds`       | Gauge   | Current checkpoint save latency in seconds                    | N/A                 |
+| `go_mongo_cdc_bootstrap_document_total`              | Counter | Total number of documents processed during bootstrap          | N/A                 |
+| `go_mongo_cdc_bootstrap_active`                      | Gauge   | Bootstrap active status (1=active, 0=inactive)                | N/A                 |
+| `go_mongo_cdc_active_partition_count`                | Gauge   | Number of currently active partitions assigned to this worker | N/A                 |
+| `go_mongo_cdc_partition_acquire_total`               | Counter | Total number of partition acquisitions                        | N/A                 |
+| `go_mongo_cdc_partition_release_total`               | Counter | Total number of partition releases                            | N/A                 |
+| `go_mongo_cdc_resume_token_expired_total`            | Counter | Total number of expired resume tokens                         | N/A                 |
+| `go_mongo_cdc_change_stream_error_total`             | Counter | Total number of change stream errors                          | N/A                 |
+| `go_mongo_cdc_change_stream_restart_total`           | Counter | Total number of change stream restarts                        | N/A                 |
+| `go_mongo_cdc_last_event_time_seconds`               | Gauge   | Unix timestamp of the last processed event                    | N/A                 |
+| `go_mongo_cdc_event_lag_seconds`                     | Gauge   | Duration in seconds since the last event was processed        | N/A                 |
+| `go_mongo_cdc_listener_latency_seconds`              | Gauge   | Listener function execution latency in seconds                | N/A                 |
+| `go_mongo_cdc_time_since_last_checkpoint_seconds`    | Gauge   | Time since last checkpoint was saved in seconds               | N/A                 |
+| `go_mongo_cdc_listener_error_total`                  | Counter | Total number of listener function errors                      | N/A                 |
+| `go_mongo_cdc_partition_rebalance_total`             | Counter | Total number of partition rebalance operations                | N/A                 |
+| `go_mongo_cdc_mongodb_replication_lag_seconds`       | Gauge   | MongoDB replication lag in seconds                            | N/A                 |
+| `go_mongo_cdc_mongodb_connections_active`            | Gauge   | MongoDB active connections                                    | N/A                 |
+| `go_mongo_cdc_mongodb_connections_available`         | Gauge   | MongoDB available connections                                 | N/A                 |
+| `go_mongo_cdc_mongodb_shard_replication_lag_seconds` | Gauge   | MongoDB shard replication lag in seconds (sharded clusters)   | shard               |
+| `go_mongo_cdc_build_info`                            | Gauge   | Build information                                             | version, go_version |
 
 ## Examples
 

@@ -20,7 +20,6 @@ type Metric interface {
 	SetCheckpointSaveLatency(latencyMs int64)
 
 	IncBootstrapDocumentTotal()
-	SetBootstrapProgress(progress float64)
 	SetBootstrapStatus(isActive bool)
 
 	IncPartitionAcquireTotal()
@@ -31,7 +30,6 @@ type Metric interface {
 	IncChangeStreamErrorTotal()
 	IncChangeStreamRestartTotal()
 
-	SetWorkerHealthy(isHealthy bool)
 	SetLastEventTime(t time.Time)
 	SetListenerLatency(latencyNs int64)
 	SetLastCheckpointTime(t time.Time)
@@ -51,7 +49,6 @@ type Metric interface {
 	GetCheckpointSaveErrorTotal() int64
 	GetCheckpointSaveLatency() int64
 	GetBootstrapDocumentTotal() int64
-	GetBootstrapProgress() float64
 	GetBootstrapStatus() bool
 	GetActivePartitionCount() int
 	GetPartitionAcquireTotal() int64
@@ -59,7 +56,6 @@ type Metric interface {
 	GetResumeTokenExpiredTotal() int64
 	GetChangeStreamErrorTotal() int64
 	GetChangeStreamRestartTotal() int64
-	GetWorkerHealthy() bool
 	GetLastEventTime() int64
 	GetListenerLatency() int64
 	GetLastCheckpointTime() int64
@@ -86,7 +82,6 @@ type metric struct {
 	checkpointSaveLatency    int64
 
 	bootstrapDocumentTotal int64
-	bootstrapProgress      int64
 	bootstrapStatus        int64
 
 	activePartitionCount  int64
@@ -97,7 +92,6 @@ type metric struct {
 	changeStreamErrorTotal   int64
 	changeStreamRestartTotal int64
 
-	workerHealthy int64
 	lastEventTime int64
 
 	listenerLatency         int64
@@ -114,9 +108,8 @@ type metric struct {
 
 func NewMetric(database, collection string) Metric {
 	return &metric{
-		database:      database,
-		collection:    collection,
-		workerHealthy: 1,
+		database:   database,
+		collection: collection,
 	}
 }
 
@@ -161,10 +154,6 @@ func (m *metric) IncBootstrapDocumentTotal() {
 	atomic.AddInt64(&m.bootstrapDocumentTotal, 1)
 }
 
-func (m *metric) SetBootstrapProgress(progress float64) {
-	atomic.StoreInt64(&m.bootstrapProgress, int64(progress*100))
-}
-
 func (m *metric) SetBootstrapStatus(isActive bool) {
 	if isActive {
 		atomic.StoreInt64(&m.bootstrapStatus, 1)
@@ -195,14 +184,6 @@ func (m *metric) IncChangeStreamErrorTotal() {
 
 func (m *metric) IncChangeStreamRestartTotal() {
 	atomic.AddInt64(&m.changeStreamRestartTotal, 1)
-}
-
-func (m *metric) SetWorkerHealthy(isHealthy bool) {
-	if isHealthy {
-		atomic.StoreInt64(&m.workerHealthy, 1)
-	} else {
-		atomic.StoreInt64(&m.workerHealthy, 0)
-	}
 }
 
 func (m *metric) SetLastEventTime(t time.Time) {
@@ -249,10 +230,6 @@ func (m *metric) GetBootstrapDocumentTotal() int64 {
 	return atomic.LoadInt64(&m.bootstrapDocumentTotal)
 }
 
-func (m *metric) GetBootstrapProgress() float64 {
-	return float64(atomic.LoadInt64(&m.bootstrapProgress)) / 100.0
-}
-
 func (m *metric) GetBootstrapStatus() bool {
 	return atomic.LoadInt64(&m.bootstrapStatus) == 1
 }
@@ -279,10 +256,6 @@ func (m *metric) GetChangeStreamErrorTotal() int64 {
 
 func (m *metric) GetChangeStreamRestartTotal() int64 {
 	return atomic.LoadInt64(&m.changeStreamRestartTotal)
-}
-
-func (m *metric) GetWorkerHealthy() bool {
-	return atomic.LoadInt64(&m.workerHealthy) == 1
 }
 
 func (m *metric) GetLastEventTime() int64 {

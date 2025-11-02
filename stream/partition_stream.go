@@ -1210,7 +1210,7 @@ func (ps *partitionStream) updateMetrics(opType message.OperationType) {
 	case message.OperationDelete:
 		ps.metric.IncDeleteTotal()
 	case message.OperationReplace:
-		ps.metric.IncInsertTotal()
+		ps.metric.IncReplaceTotal()
 	}
 }
 

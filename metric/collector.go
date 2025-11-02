@@ -22,7 +22,6 @@ type Collector struct {
 	checkpointSaveLatency    *prometheus.Desc
 
 	bootstrapDocumentTotal *prometheus.Desc
-	bootstrapProgress      *prometheus.Desc
 	bootstrapActive        *prometheus.Desc
 
 	activePartitionCount  *prometheus.Desc
@@ -33,7 +32,6 @@ type Collector struct {
 	changeStreamErrorTotal   *prometheus.Desc
 	changeStreamRestartTotal *prometheus.Desc
 
-	workerHealthy           *prometheus.Desc
 	lastEventTime           *prometheus.Desc
 	eventLagDuration        *prometheus.Desc
 	listenerLatency         *prometheus.Desc
@@ -123,12 +121,6 @@ func NewCollector(m Metric) *Collector {
 			nil,
 			nil,
 		),
-		bootstrapProgress: prometheus.NewDesc(
-			prometheus.BuildFQName(namespace, "", "bootstrap_progress_percent"),
-			"Bootstrap progress percentage (0-100)",
-			nil,
-			nil,
-		),
 		bootstrapActive: prometheus.NewDesc(
 			prometheus.BuildFQName(namespace, "", "bootstrap_active"),
 			"Bootstrap active status (1=active, 0=inactive)",
@@ -174,12 +166,6 @@ func NewCollector(m Metric) *Collector {
 			nil,
 		),
 
-		workerHealthy: prometheus.NewDesc(
-			prometheus.BuildFQName(namespace, "", "worker_healthy"),
-			"Worker health status (1=healthy, 0=unhealthy)",
-			nil,
-			nil,
-		),
 		lastEventTime: prometheus.NewDesc(
 			prometheus.BuildFQName(namespace, "", "last_event_time_seconds"),
 			"Unix timestamp of the last processed event",
@@ -317,12 +303,6 @@ func (c *Collector) Collect(ch chan<- prometheus.Metric) {
 		float64(c.metric.GetBootstrapDocumentTotal()),
 	)
 
-	ch <- prometheus.MustNewConstMetric(
-		c.bootstrapProgress,
-		prometheus.GaugeValue,
-		c.metric.GetBootstrapProgress(),
-	)
-
 	bootstrapActive := 0.0
 	if c.metric.GetBootstrapStatus() {
 		bootstrapActive = 1.0
@@ -367,16 +347,6 @@ func (c *Collector) Collect(ch chan<- prometheus.Metric) {
 		c.changeStreamRestartTotal,
 		prometheus.CounterValue,
 		float64(c.metric.GetChangeStreamRestartTotal()),
-	)
-
-	workerHealthy := 0.0
-	if c.metric.GetWorkerHealthy() {
-		workerHealthy = 1.0
-	}
-	ch <- prometheus.MustNewConstMetric(
-		c.workerHealthy,
-		prometheus.GaugeValue,
-		workerHealthy,
 	)
 
 	lastEventTime := c.metric.GetLastEventTime()

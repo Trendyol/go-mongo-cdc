@@ -26,17 +26,17 @@ func main() {
 			ConnectionPool: config.ConnectionPool{
 				MaxPoolSize:   100,
 				MinPoolSize:   5,
-				MaxIdleTimeMS: 300000, // 5 minutes
+				MaxIdleTimeMS: 300000,
 			},
 			Timeouts: config.Timeouts{
-				ConnectTimeoutMS:         30000,  // 30 seconds
-				ServerSelectionTimeoutMS: 60000,  // 60 seconds
-				SocketTimeoutMS:          120000, // 120 seconds
+				ConnectTimeoutMS:         30000,
+				ServerSelectionTimeoutMS: 60000,
+				SocketTimeoutMS:          120000,
 			},
 		},
 		Metric: config.MetricConfig{
 			Port:                      8080,
-			EnableShardMetricsMapping: true, // Enable for local development with docker-compose
+			EnableShardMetricsMapping: true,
 		},
 		Checkpoint: config.CheckpointConfig{
 			TokenSaveInterval:     10 * time.Second,
