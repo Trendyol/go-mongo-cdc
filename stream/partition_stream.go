@@ -669,50 +669,25 @@ func (ps *partitionStream) saveFinalBootstrapProgressOnInterruption(worker *stre
 }
 
 func (ps *partitionStream) dispatchBootstrapDocumentToListener(worker *streamWorker, cursor connection.Cursor, state *bootstrapProcessState) error {
-	var rawDocument bson.Raw
-	if err := cursor.Decode(&rawDocument); err != nil {
-		logger.Log.Error("Error decoding raw document: %v", err)
+	var document bson.M
+	if err := cursor.Decode(&document); err != nil {
+		logger.Log.Error("Error decoding document: %v", err)
 		return nil
 	}
 
-	state.processedCount++
-	idValue, err := rawDocument.LookupErr("_id")
-	if err != nil {
-		logger.Log.Warn("Could not find '_id' in raw bootstrap document: %v", err)
-		return nil
-	}
-
-	var decodedID interface{}
-	switch idValue.Type {
-	case bson.TypeObjectID:
-		decodedID = idValue.ObjectID()
-	case bson.TypeString:
-		decodedID = idValue.StringValue()
-	case bson.TypeInt64:
-		decodedID = idValue.Int64()
-	case bson.TypeInt32:
-		decodedID = idValue.Int32()
-	case bson.TypeDouble:
-		decodedID = idValue.Double()
-	default:
-		logger.Log.Error("Unsupported _id type for checkpointing: %s", idValue.Type)
-		//hata donmeli
-		decodedID = idValue.Value
-	}
-
-	syntheticEvent := ps.createInsertEventFromDocument(rawDocument, decodedID)
+	syntheticEvent := ps.createInsertEventFromDocument(document)
 	if err := ps.processEvent(worker, syntheticEvent, nil); err != nil {
 		if errors.Is(err, context.Canceled) || strings.Contains(err.Error(), "worker is stopping") {
-			logger.Log.Debug("Bootstrap event skipped due to shutdown - documentId: %v", syntheticEvent.DocumentKey.ID)
+			logger.Log.Debug("Bootstrap event skipped due to shutdown - documentId: %v", document["_id"])
 			return err
 		} else {
-			logger.Log.Error("Error processing synthetic event - documentId: %v", syntheticEvent.DocumentKey.ID, err)
+			logger.Log.Error("Error processing synthetic event - documentId: %v, error: %v", document["_id"], err)
 		}
 		return nil
 	}
 
-	state.lastProcessedID = decodedID
-
+	state.processedCount++
+	state.lastProcessedID = document["_id"]
 	ps.metric.IncBootstrapDocumentTotal()
 
 	if ps.shouldSaveBootstrapProgress(worker, state) {
@@ -721,13 +696,13 @@ func (ps *partitionStream) dispatchBootstrapDocumentToListener(worker *streamWor
 			return fmt.Errorf("partition %d ownership lost before checkpoint", worker.partitionID)
 		}
 
-		return ps.saveBootstrapProgress(worker, state)
+		return ps.saveBootstrapProgress(worker, document, state)
 	}
 
 	return nil
 }
 
-func (ps *partitionStream) createInsertEventFromDocument(rawDocument bson.Raw, id interface{}) message.ChangeEvent {
+func (ps *partitionStream) createInsertEventFromDocument(document bson.M) message.ChangeEvent {
 	now := time.Now().Unix()
 	var t uint32
 	if now < 0 {
@@ -741,9 +716,9 @@ func (ps *partitionStream) createInsertEventFromDocument(rawDocument bson.Raw, i
 	return message.ChangeEvent{
 		OperationType: "insert",
 		DocumentKey: message.DocumentKey{
-			ID: id,
+			ID: document["_id"],
 		},
-		FullDocument: rawDocument,
+		FullDocument: document,
 		Namespace: message.Namespace{
 			Database:   ps.cfg.MongoDB.Connection.Database,
 			Collection: ps.cfg.MongoDB.Connection.Collection,
@@ -768,16 +743,15 @@ func (ps *partitionStream) shouldSaveBootstrapProgress(worker *streamWorker, sta
 	return false
 }
 
-func (ps *partitionStream) saveBootstrapProgress(worker *streamWorker, state *bootstrapProcessState) error {
+func (ps *partitionStream) saveBootstrapProgress(worker *streamWorker, document bson.M, state *bootstrapProcessState) error {
 	saveCtx, saveCancel := context.WithTimeout(context.Background(), ps.cfg.Checkpoint.TokenSaveTimeout)
 	defer saveCancel()
 
-	if err := ps.checkpointManager.SaveBootstrapProgress(saveCtx, worker.partitionID, state.lastProcessedID); err != nil {
-		logger.Log.Error("Failed to save bootstrap progress - partitionId: %d, documentId: %v, error: %v", worker.partitionID, state.lastProcessedID, err)
-		return fmt.Errorf("failed to save bootstrap progress: %w", err)
+	if err := ps.checkpointManager.SaveBootstrapProgress(saveCtx, worker.partitionID, document["_id"]); err != nil {
+		logger.Log.Error("Failed to save bootstrap progress - partitionId: %d, documentId: %v, error: %v", worker.partitionID, document["_id"], err)
+		return nil
 	}
 
-	logger.Log.Debug("Saved bootstrap progress - partitionId: %d, documentId: %v, processed: %d", worker.partitionID, state.lastProcessedID, state.processedCount)
 	state.lastCheckpointTime = time.Now()
 
 	return nil

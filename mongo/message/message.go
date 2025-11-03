@@ -23,7 +23,7 @@ type Message struct {
 	Database      string              `json:"database"`
 	Collection    string              `json:"collection"`
 	DocumentID    interface{}         `json:"documentId"`
-	FullDocument  bson.Raw            `json:"fullDocument,omitempty"`
+	FullDocument  bson.M              `json:"fullDocument,omitempty"`
 	OldDocument   bson.M              `json:"oldDocument,omitempty"`
 	EventTime     time.Time           `json:"eventTime"`
 }
@@ -31,7 +31,7 @@ type Message struct {
 type ChangeEvent struct {
 	OperationType     string              `bson:"operationType"`
 	DocumentKey       DocumentKey         `bson:"documentKey"`
-	FullDocument      bson.Raw            `bson:"fullDocument,omitempty"`
+	FullDocument      bson.M              `bson:"fullDocument,omitempty"`
 	Namespace         Namespace           `bson:"ns"`
 	ClusterTime       primitive.Timestamp `bson:"clusterTime"`
 	UpdateDescription *UpdateDescription  `bson:"updateDescription,omitempty"`
@@ -100,7 +100,7 @@ func (m Message) GetDocumentID() interface{} {
 	return m.DocumentID
 }
 
-func (m Message) GetFullDocument() bson.Raw {
+func (m Message) GetFullDocument() bson.M {
 	return m.FullDocument
 }
 
