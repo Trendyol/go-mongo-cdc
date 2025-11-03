@@ -55,7 +55,7 @@ func main() {
 
 	connector, err := cdc.NewConnector(cfg, ProcessChangeEvent)
 	if err != nil {
-		log.Fatal("failed to create connector:", err)
+		log.Fatal("Failed to create connector:", err)
 	}
 
 	defer connector.Close()
