@@ -26,6 +26,7 @@ type Message struct {
 	FullDocument  bson.M              `json:"fullDocument,omitempty"`
 	OldDocument   bson.M              `json:"oldDocument,omitempty"`
 	EventTime     time.Time           `json:"eventTime"`
+	IsBootstrap   bool                `json:"isBootstrap"`
 }
 
 type ChangeEvent struct {

@@ -23,6 +23,8 @@ import (
 type Connector interface {
 	Start(ctx context.Context)
 	Close()
+	Commit()
+	CommitBootstrap(partitionID int)
 }
 
 type connector struct {
@@ -187,6 +189,14 @@ func (c *connector) Close() {
 func generateWorkerID() string {
 	hostname, _ := os.Hostname()
 	return fmt.Sprintf("%s-%d-%d", hostname, os.Getpid(), time.Now().UnixNano())
+}
+
+func (c *connector) Commit() {
+	c.stream.Commit()
+}
+
+func (c *connector) CommitBootstrap(partitionID int) {
+	c.stream.CommitBootstrap(partitionID)
 }
 
 func (c *connector) collectMongoDBMetricsPeriodically(ctx context.Context) {

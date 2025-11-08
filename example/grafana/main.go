@@ -51,11 +51,11 @@ func main() {
 			CollectionInterval: 2 * time.Second,
 		},
 		Checkpoint: config.CheckpointConfig{
-			TokenSaveInterval:     5 * time.Second,
-			ChangeStreamBatchSize: 100,
-			BootstrapSaveCount:    1000,
-			BootstrapSaveInterval: 10 * time.Second,
-			BootstrapBatchSize:    1000,
+			TokenSaveInterval:       5 * time.Second,
+			ChangeStreamSaveCount:   100,
+			BootstrapSaveCount:      1000,
+			BootstrapSaveInterval:   10 * time.Second,
+			BootstrapQueryBatchSize: 1000,
 		},
 		Partition: config.PartitionConfig{
 			HeartbeatInterval:      10 * time.Second,

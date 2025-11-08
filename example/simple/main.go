@@ -38,24 +38,24 @@ func main() {
 			Port: 8080,
 		},
 		Checkpoint: config.CheckpointConfig{
-			TokenSaveInterval:     10 * time.Second,
-			ChangeStreamBatchSize: 500,
-			BootstrapSaveCount:    5000,
-			BootstrapSaveInterval: 10 * time.Second,
-			BootstrapBatchSize:    5000,
+			TokenSaveInterval:       10 * time.Second,
+			ChangeStreamSaveCount:   500,
+			BootstrapSaveCount:      5000,
+			BootstrapSaveInterval:   10 * time.Second,
+			BootstrapQueryBatchSize: 5000,
 		},
 		Partition: config.PartitionConfig{
 			HeartbeatInterval:      10 * time.Second,
 			WorkerTimeout:          90 * time.Second,
 			RebalanceCheckInterval: 10 * time.Second,
-			TotalPartition:         30,
+			TotalPartition:         5,
 		},
 		Logger: config.LoggerConfig{LogLevel: "debug"},
 	}
 
 	connector, err := cdc.NewConnector(cfg, ProcessChangeEvent)
 	if err != nil {
-		log.Fatal("Failed to create connector:", err)
+		log.Fatal("failed to create connector:", err)
 	}
 
 	defer connector.Close()

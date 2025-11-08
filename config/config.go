@@ -60,14 +60,15 @@ type LoggerConfig struct {
 }
 
 type CheckpointConfig struct {
-	TokenSaveTimeout      time.Duration `json:"saveTimeout" yaml:"saveTimeout"`
-	TokenSaveInterval     time.Duration `json:"tokenSaveInterval" yaml:"tokenSaveInterval"`
-	ChangeStreamBatchSize int           `json:"changeStreamBatchSize" yaml:"changeStreamBatchSize"`
-	BootstrapSaveCount    int           `json:"bootstrapSaveCount" yaml:"bootstrapSaveCount"`
-	BootstrapSaveInterval time.Duration `json:"bootstrapSaveInterval" yaml:"bootstrapSaveInterval"`
-	BootstrapBatchSize    int           `json:"bootstrapBatchSize" yaml:"bootstrapBatchSize"`
-	IdleHeartbeatInterval time.Duration `json:"idleHeartbeatInterval" yaml:"idleHeartbeatInterval"`
-	MaxIdleTime           time.Duration `json:"maxIdleTime" yaml:"maxIdleTime"`
+	Type                    string        `json:"type" yaml:"type"`
+	TokenSaveTimeout        time.Duration `json:"saveTimeout" yaml:"saveTimeout"`
+	TokenSaveInterval       time.Duration `json:"tokenSaveInterval" yaml:"tokenSaveInterval"`
+	ChangeStreamSaveCount   int           `json:"changeStreamSaveCount" yaml:"changeStreamSaveCount"`
+	BootstrapSaveCount      int           `json:"bootstrapSaveCount" yaml:"bootstrapSaveCount"`
+	BootstrapSaveInterval   time.Duration `json:"bootstrapSaveInterval" yaml:"bootstrapSaveInterval"`
+	BootstrapQueryBatchSize int           `json:"bootstrapQueryBatchSize" yaml:"bootstrapQueryBatchSize"`
+	IdleHeartbeatInterval   time.Duration `json:"idleHeartbeatInterval" yaml:"idleHeartbeatInterval"`
+	MaxIdleTime             time.Duration `json:"maxIdleTime" yaml:"maxIdleTime"`
 }
 
 type PartitionConfig struct {
@@ -113,6 +114,9 @@ func (c *Config) SetDefault() {
 	if c.Logger.LogLevel == "" {
 		c.Logger.LogLevel = logger.INFO
 	}
+	if c.Checkpoint.Type == "" {
+		c.Checkpoint.Type = "auto"
+	}
 	if c.Checkpoint.TokenSaveInterval == 0 {
 		c.Checkpoint.TokenSaveInterval = 10 * time.Second
 	}
@@ -125,8 +129,8 @@ func (c *Config) SetDefault() {
 	if c.Checkpoint.BootstrapSaveInterval == 0 {
 		c.Checkpoint.BootstrapSaveInterval = 10 * time.Second
 	}
-	if c.Checkpoint.BootstrapBatchSize == 0 {
-		c.Checkpoint.BootstrapBatchSize = 2500
+	if c.Checkpoint.BootstrapQueryBatchSize == 0 {
+		c.Checkpoint.BootstrapQueryBatchSize = 2500
 	}
 	if c.Checkpoint.IdleHeartbeatInterval == 0 {
 		c.Checkpoint.IdleHeartbeatInterval = 3 * time.Minute
@@ -135,8 +139,8 @@ func (c *Config) SetDefault() {
 		c.Checkpoint.MaxIdleTime = 15 * time.Minute
 	}
 
-	if c.Checkpoint.ChangeStreamBatchSize == 0 {
-		c.Checkpoint.ChangeStreamBatchSize = 500
+	if c.Checkpoint.ChangeStreamSaveCount == 0 {
+		c.Checkpoint.ChangeStreamSaveCount = 500
 	}
 
 	if c.Partition.HeartbeatInterval == 0 {

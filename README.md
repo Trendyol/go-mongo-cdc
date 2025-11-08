@@ -58,13 +58,13 @@ func main() {
 		Metric: config.MetricConfig{
 			Port: 8080,
 		},
-		Checkpoint: config.CheckpointConfig{
-			TokenSaveInterval:     10 * time.Second,
-			ChangeStreamBatchSize: 500,
-			BootstrapSaveCount:    5000,
-			BootstrapSaveInterval: 10 * time.Second,
-			BootstrapBatchSize:    5000,
-		},
+	Checkpoint: config.CheckpointConfig{
+		TokenSaveInterval:       10 * time.Second,
+		ChangeStreamSaveCount:   500,
+		BootstrapSaveCount:      5000,
+		BootstrapSaveInterval:   10 * time.Second,
+		BootstrapQueryBatchSize: 5000,
+	},
 		Partition: config.PartitionConfig{
 			HeartbeatInterval:      10 * time.Second,
 			WorkerTimeout:          90 * time.Second,
@@ -157,16 +157,17 @@ $ go get github.com/Trendyol/go-mongo-cdc
 
 ### Checkpoint Configuration
 
-| Variable                           | Type          | Required | Default | Description                                  |
-|------------------------------------|---------------|----------|---------|----------------------------------------------|
-| `checkpoint.tokenSaveInterval`     | time.Duration | no       | 10s     | Token save interval                          |
-| `checkpoint.tokenSaveTimeout`      | time.Duration | no       | 10s     | Token save timeout                           |
-| `checkpoint.changeStreamBatchSize` | int           | no       | 500     | Change stream batch size                     |
-| `checkpoint.bootstrapSaveCount`    | int           | no       | 2500    | Number of documents to process before saving |
-| `checkpoint.bootstrapSaveInterval` | time.Duration | no       | 10s     | Bootstrap checkpoint save interval           |
-| `checkpoint.bootstrapBatchSize`    | int           | no       | 2500    | Bootstrap batch size                         |
-| `checkpoint.idleHeartbeatInterval` | time.Duration | no       | 3m      | Idle heartbeat interval                      |
-| `checkpoint.maxIdleTime`           | time.Duration | no       | 15m     | Maximum idle time before partition release   |
+| Variable                             | Type          | Required | Default | Description                                                                              |
+|--------------------------------------|---------------|----------|---------|------------------------------------------------------------------------------------------|
+| `checkpoint.type`                    | string        | no       | auto    | Checkpoint mode: "auto" (periodic) or "manual" (explicit Commit() call required)         |
+| `checkpoint.tokenSaveInterval`       | time.Duration | no       | 10s     | Token save interval (only for auto mode)                                                 |
+| `checkpoint.tokenSaveTimeout`        | time.Duration | no       | 10s     | Token save timeout                                                                       |
+| `checkpoint.changeStreamSaveCount`   | int           | no       | 500     | Change stream batch size                                                                 |
+| `checkpoint.bootstrapSaveCount`      | int           | no       | 2500    | Number of documents to process before saving                                             |
+| `checkpoint.bootstrapSaveInterval`   | time.Duration | no       | 10s     | Bootstrap checkpoint save interval (only for auto mode)                                  |
+| `checkpoint.bootstrapQueryBatchSize` | int           | no       | 2500    | Bootstrap batch size                                                                     |
+| `checkpoint.idleHeartbeatInterval`   | time.Duration | no       | 3m      | Idle heartbeat interval                                                                  |
+| `checkpoint.maxIdleTime`             | time.Duration | no       | 15m     | Maximum idle time before partition release                                               |
 
 ### Partition Configuration
 
@@ -210,10 +211,10 @@ cdcconfig:
 
   checkpoint:
     bootstrapSaveCount: 5000
-    bootstrapBatchSize: 5000
+    bootstrapQueryBatchSize: 5000
     bootstrapSaveInterval: 10s
     tokenSaveInterval: 10s
-    changeStreamBatchSize: 500
+    changeStreamSaveCount: 500
 
   partition:
     heartbeatInterval: 10s
