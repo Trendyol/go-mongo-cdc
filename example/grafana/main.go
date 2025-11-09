@@ -234,9 +234,7 @@ func ProcessChangeEvent(lc *stream.ListenerContext) error {
 		logger.Log.Info("Document deleted - documentId: %v, partitionId: %d", lc.Message.DocumentID, lc.PartitionID)
 	}
 
-	if err := lc.Ack(); err != nil {
-		logger.Log.Error("Failed to acknowledge message: %v", err)
-		return err
-	}
+	lc.Ack()
+
 	return nil
 }

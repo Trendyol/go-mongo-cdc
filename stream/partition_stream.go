@@ -39,7 +39,7 @@ type ListenerContext struct {
 	Context     context.Context
 	Message     message.Message
 	PartitionID int
-	Ack         func() error
+	Ack         func()
 	IsBootstrap bool
 }
 
@@ -748,7 +748,7 @@ func (ps *partitionStream) processBootstrapEvent(worker *streamWorker, event mes
 		Message:     msg,
 		PartitionID: worker.partitionID,
 		IsBootstrap: true,
-		Ack: func() error {
+		Ack: func() {
 			ps.metric.IncBootstrapDocumentTotal()
 
 			state.pendingCheckpointMutex.Lock()
@@ -792,8 +792,6 @@ func (ps *partitionStream) processBootstrapEvent(worker *streamWorker, event mes
 					}
 				}
 			}
-
-			return nil
 		},
 	}
 
@@ -1201,7 +1199,7 @@ func (ps *partitionStream) processEvent(worker *streamWorker, event message.Chan
 		Message:     msg,
 		PartitionID: worker.partitionID,
 		IsBootstrap: false,
-		Ack: func() error {
+		Ack: func() {
 			if len(resumeToken) > 0 {
 				worker.tokenMutex.Lock()
 				worker.lastAckedToken = append([]byte(nil), resumeToken...)
@@ -1248,7 +1246,6 @@ func (ps *partitionStream) processEvent(worker *streamWorker, event message.Chan
 					}
 				}
 			}
-			return nil
 		},
 	}
 
