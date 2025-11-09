@@ -18,18 +18,17 @@ type Registry interface {
 
 type registry struct {
 	collector  *Collector
-	registerer *prometheus.Registry
+	registerer prometheus.Registerer
 	server     *http.Server
 }
 
 func NewRegistry(m Metric) Registry {
 	collector := NewCollector(m)
-	reg := prometheus.NewRegistry()
-	reg.MustRegister(collector)
+	prometheus.DefaultRegisterer.MustRegister(collector)
 
 	return &registry{
 		collector:  collector,
-		registerer: reg,
+		registerer: prometheus.DefaultRegisterer,
 	}
 }
 
@@ -44,9 +43,7 @@ func (r *registry) StartMetricsServer(ctx context.Context, port int) error {
 	}
 
 	mux := http.NewServeMux()
-	mux.Handle("/metrics", promhttp.HandlerFor(r.registerer, promhttp.HandlerOpts{
-		Registry: r.registerer,
-	}))
+	mux.Handle("/metrics", promhttp.Handler())
 
 	mux.HandleFunc("/health", func(w http.ResponseWriter, req *http.Request) {
 		w.WriteHeader(http.StatusOK)
