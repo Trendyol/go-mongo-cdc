@@ -24,18 +24,16 @@ type Message struct {
 	Collection    string              `json:"collection"`
 	DocumentID    interface{}         `json:"documentId"`
 	FullDocument  bson.M              `json:"fullDocument,omitempty"`
-	OldDocument   bson.M              `json:"oldDocument,omitempty"`
 	EventTime     time.Time           `json:"eventTime"`
 	IsBootstrap   bool                `json:"isBootstrap"`
 }
 
 type ChangeEvent struct {
-	OperationType     string              `bson:"operationType"`
-	DocumentKey       DocumentKey         `bson:"documentKey"`
-	FullDocument      bson.M              `bson:"fullDocument,omitempty"`
-	Namespace         Namespace           `bson:"ns"`
-	ClusterTime       primitive.Timestamp `bson:"clusterTime"`
-	UpdateDescription *UpdateDescription  `bson:"updateDescription,omitempty"`
+	OperationType string              `bson:"operationType"`
+	DocumentKey   DocumentKey         `bson:"documentKey"`
+	FullDocument  bson.M              `bson:"fullDocument,omitempty"`
+	Namespace     Namespace           `bson:"ns"`
+	ClusterTime   primitive.Timestamp `bson:"clusterTime"`
 }
 
 type DocumentKey struct {
@@ -45,11 +43,6 @@ type DocumentKey struct {
 type Namespace struct {
 	Database   string `bson:"db"`
 	Collection string `bson:"coll"`
-}
-
-type UpdateDescription struct {
-	UpdatedFields bson.M   `bson:"updatedFields"`
-	RemovedFields []string `bson:"removedFields"`
 }
 
 func NewMessage(event ChangeEvent) (Message, error) {
@@ -63,17 +56,9 @@ func NewMessage(event ChangeEvent) (Message, error) {
 	}
 
 	switch msg.OperationType {
-	case OperationInsert, OperationReplace:
+	case OperationInsert, OperationReplace, OperationUpdate:
 		msg.FullDocument = event.FullDocument
-	case OperationUpdate:
-		msg.FullDocument = event.FullDocument
-		if event.UpdateDescription != nil {
-			msg.OldDocument = make(bson.M)
-			msg.OldDocument["updatedFields"] = event.UpdateDescription.UpdatedFields
-			msg.OldDocument["removedFields"] = event.UpdateDescription.RemovedFields
-		}
 	case OperationDelete:
-		msg.OldDocument = bson.M{"_id": event.DocumentKey.ID}
 	default:
 		return msg, fmt.Errorf("unsupported operation type: %s", event.OperationType)
 	}
@@ -103,8 +88,4 @@ func (m Message) GetDocumentID() interface{} {
 
 func (m Message) GetFullDocument() bson.M {
 	return m.FullDocument
-}
-
-func (m Message) GetOldDocument() bson.M {
-	return m.OldDocument
 }
