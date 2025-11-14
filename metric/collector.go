@@ -38,9 +38,6 @@ type Collector struct {
 	listenerErrorTotal      *prometheus.Desc
 	partitionRebalanceTotal *prometheus.Desc
 
-	activeConnections    *prometheus.Desc
-	availableConnections *prometheus.Desc
-
 	buildInfo *prometheus.Desc
 }
 
@@ -185,19 +182,6 @@ func NewCollector(m Metric) *Collector {
 		partitionRebalanceTotal: prometheus.NewDesc(
 			prometheus.BuildFQName(namespace, "", "partition_rebalance_total"),
 			"Total number of partition rebalance operations",
-			nil,
-			nil,
-		),
-
-		activeConnections: prometheus.NewDesc(
-			prometheus.BuildFQName(namespace, "mongodb", "connections_active"),
-			"MongoDB active connections",
-			nil,
-			nil,
-		),
-		availableConnections: prometheus.NewDesc(
-			prometheus.BuildFQName(namespace, "mongodb", "connections_available"),
-			"MongoDB available connections",
 			nil,
 			nil,
 		),
@@ -368,21 +352,6 @@ func (c *Collector) Collect(ch chan<- prometheus.Metric) {
 		prometheus.CounterValue,
 		float64(c.metric.GetPartitionRebalanceTotal()),
 	)
-
-	mongoMetrics := c.metric.GetMongoDBMetrics()
-	if mongoMetrics != nil {
-		ch <- prometheus.MustNewConstMetric(
-			c.activeConnections,
-			prometheus.GaugeValue,
-			float64(mongoMetrics.ActiveConnections),
-		)
-
-		ch <- prometheus.MustNewConstMetric(
-			c.availableConnections,
-			prometheus.GaugeValue,
-			float64(mongoMetrics.AvailableConnections),
-		)
-	}
 
 	ch <- prometheus.MustNewConstMetric(
 		c.buildInfo,

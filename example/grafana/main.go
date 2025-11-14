@@ -47,8 +47,7 @@ func main() {
 			},
 		},
 		Metric: config.MetricConfig{
-			Port:               8080,
-			CollectionInterval: 2 * time.Second,
+			Port: 8080,
 		},
 		Checkpoint: config.CheckpointConfig{
 			TokenSaveInterval:       5 * time.Second,

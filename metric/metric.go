@@ -1,7 +1,6 @@
 package metric
 
 import (
-	"sync"
 	"sync/atomic"
 	"time"
 )
@@ -35,8 +34,6 @@ type Metric interface {
 	IncListenerErrorTotal()
 	IncPartitionRebalanceTotal()
 
-	SetMongoDBMetrics(metrics *MongoDBMetrics)
-
 	GetInsertTotal() int64
 	GetUpdateTotal() int64
 	GetDeleteTotal() int64
@@ -58,7 +55,6 @@ type Metric interface {
 	GetLastCheckpointTime() int64
 	GetListenerErrorTotal() int64
 	GetPartitionRebalanceTotal() int64
-	GetMongoDBMetrics() *MongoDBMetrics
 }
 
 type metric struct {
@@ -93,9 +89,6 @@ type metric struct {
 	lastCheckpointTime      int64
 	listenerErrorTotal      int64
 	partitionRebalanceTotal int64
-
-	mongoDBMetrics   *MongoDBMetrics
-	mongoDBMetricsMu sync.RWMutex
 }
 
 func NewMetric(database, collection string) Metric {
@@ -275,16 +268,4 @@ func (m *metric) IncPartitionRebalanceTotal() {
 
 func (m *metric) GetPartitionRebalanceTotal() int64 {
 	return atomic.LoadInt64(&m.partitionRebalanceTotal)
-}
-
-func (m *metric) SetMongoDBMetrics(metrics *MongoDBMetrics) {
-	m.mongoDBMetricsMu.Lock()
-	defer m.mongoDBMetricsMu.Unlock()
-	m.mongoDBMetrics = metrics
-}
-
-func (m *metric) GetMongoDBMetrics() *MongoDBMetrics {
-	m.mongoDBMetricsMu.RLock()
-	defer m.mongoDBMetricsMu.RUnlock()
-	return m.mongoDBMetrics
 }

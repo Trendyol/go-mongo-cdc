@@ -51,8 +51,7 @@ type Timeouts struct {
 }
 
 type MetricConfig struct {
-	Port               int           `json:"port" yaml:"port"`
-	CollectionInterval time.Duration `json:"collectionInterval" yaml:"collectionInterval"`
+	Port int `json:"port" yaml:"port"`
 }
 
 type LoggerConfig struct {
@@ -107,9 +106,6 @@ func (c *Config) SetDefault() {
 
 	if c.Metric.Port == 0 {
 		c.Metric.Port = 8080
-	}
-	if c.Metric.CollectionInterval == 0 {
-		c.Metric.CollectionInterval = 20 * time.Second
 	}
 	if c.Logger.LogLevel == "" {
 		c.Logger.LogLevel = logger.INFO

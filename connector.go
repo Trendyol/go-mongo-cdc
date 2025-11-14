@@ -28,14 +28,13 @@ type Connector interface {
 }
 
 type connector struct {
-	stream                stream.PartitionStream
-	prometheusRegistry    metric.Registry
-	mongoClient           connection.Client
-	mongoMetricsCollector metric.MongoDBMetricsCollector
-	metricInstance        metric.Metric
-	cancelCh              chan os.Signal
-	workerID              string
-	cfg                   config.Config
+	stream             stream.PartitionStream
+	prometheusRegistry metric.Registry
+	mongoClient        connection.Client
+	metricInstance     metric.Metric
+	cancelCh           chan os.Signal
+	workerID           string
+	cfg                config.Config
 
 	once   sync.Once
 	closed bool
@@ -87,17 +86,14 @@ func NewConnector(cfg config.Config, listenerFunc stream.ListenerFunc) (Connecto
 
 	prometheusRegistry := metric.NewRegistry(m)
 
-	mongoMetricsCollector := metric.NewMongoDBMetricsCollector()
-
 	return &connector{
-		mongoClient:           mongoClient,
-		stream:                partitionStream,
-		prometheusRegistry:    prometheusRegistry,
-		mongoMetricsCollector: mongoMetricsCollector,
-		metricInstance:        m,
-		workerID:              workerID,
-		cancelCh:              make(chan os.Signal, 1),
-		cfg:                   cfg,
+		mongoClient:        mongoClient,
+		stream:             partitionStream,
+		prometheusRegistry: prometheusRegistry,
+		metricInstance:     m,
+		workerID:           workerID,
+		cancelCh:           make(chan os.Signal, 1),
+		cfg:                cfg,
 	}, nil
 }
 
@@ -124,12 +120,6 @@ func (c *connector) Start(ctx context.Context) {
 			logger.Log.Warn("Metrics server could not start (port %d may be in use): %v - continuing without metrics", c.cfg.Metric.Port, err)
 			<-gCtx.Done()
 		}
-		return nil
-	})
-
-	g.Go(func() error {
-		c.collectMongoDBMetricsPeriodically(gCtx)
-		logger.Log.Debug("Metrics collection stopped")
 		return nil
 	})
 
@@ -197,47 +187,4 @@ func (c *connector) Commit() {
 
 func (c *connector) CommitBootstrap(partitionID int) {
 	c.stream.CommitBootstrap(partitionID)
-}
-
-func (c *connector) collectMongoDBMetricsPeriodically(ctx context.Context) {
-	ticker := time.NewTicker(c.cfg.Metric.CollectionInterval)
-	defer ticker.Stop()
-
-	collectMetrics := func() {
-		select {
-		case <-ctx.Done():
-			logger.Log.Debug("Metrics collection cancelled")
-			return
-		default:
-		}
-
-		metricsCtx, cancel := context.WithTimeout(ctx, 5*time.Second)
-		defer cancel()
-
-		client, ok := c.mongoClient.(*connection.MongoClient)
-		if !ok {
-			return
-		}
-
-		mongoMetrics, err := c.mongoMetricsCollector.CollectMongoDBMetrics(metricsCtx, client.GetClient())
-		if err != nil {
-			logger.Log.Debug("Failed to collect MongoDB metrics: %v", err)
-		} else {
-			c.metricInstance.SetMongoDBMetrics(mongoMetrics)
-			logger.Log.Debug("MongoDB metrics collected - ActiveConnections: %d, AvailableConnections: %d",
-				mongoMetrics.ActiveConnections, mongoMetrics.AvailableConnections)
-		}
-	}
-
-	collectMetrics()
-
-	for {
-		select {
-		case <-ctx.Done():
-			logger.Log.Debug("Metrics collection goroutine stopping...")
-			return
-		case <-ticker.C:
-			collectMetrics()
-		}
-	}
 }
