@@ -99,7 +99,12 @@ func (m *manager) Initialize(ctx context.Context) error {
 	m.wg.Add(1)
 	go m.runRebalanceMonitor()
 
-	logger.Log.Info("Partition manager initialized - workerId: %s, consumerGroup: %s, totalPartitions: %d", m.workerID, m.config.ConsumerGroup, m.config.TotalPartition)
+	logger.Log.Info(
+		"Partition manager initialized - workerId: %s, consumerGroup: %s, totalPartitions: %d",
+		m.workerID,
+		m.config.ConsumerGroup,
+		m.config.TotalPartition,
+	)
 
 	return nil
 }
@@ -138,7 +143,11 @@ func (m *manager) validateAndStoreTotalPartition(ctx context.Context) error {
 	}
 
 	if existing.TotalPartition != m.config.TotalPartition {
-		return fmt.Errorf("totalPartition cannot be changed after initial setup - stored: %d, config: %d", existing.TotalPartition, m.config.TotalPartition)
+		return fmt.Errorf(
+			"totalPartition cannot be changed after initial setup - stored: %d, config: %d",
+			existing.TotalPartition,
+			m.config.TotalPartition,
+		)
 	}
 
 	logger.Log.Debug("totalPartition validation passed: %d for consumerGroup: %s", m.config.TotalPartition, m.config.ConsumerGroup)
@@ -219,7 +228,13 @@ func (m *manager) registerWorker(ctx context.Context) error {
 		return err
 	}
 
-	logger.Log.Debug("Worker registered - workerId: %s, matched: %d, modified: %d, upserted: %v", m.workerID, result.MatchedCount(), result.ModifiedCount(), result.UpsertedID() != nil)
+	logger.Log.Debug(
+		"Worker registered - workerId: %s, matched: %d, modified: %d, upserted: %v",
+		m.workerID,
+		result.MatchedCount(),
+		result.ModifiedCount(),
+		result.UpsertedID() != nil,
+	)
 
 	return nil
 }
@@ -364,7 +379,16 @@ func (m *manager) needsRebalance(ctx context.Context) bool {
 	expectedPartitions := m.calculateExpectedPartitionsForWorker(workerIndex, activeWorkers)
 
 	if len(currentPartitions) != len(expectedPartitions) {
-		logger.Log.Debug("Partition assignment count mismatch - workerId: %s, current: %d %v, expected: %d %v, workerIndex: %d, activeWorkers: %d", m.workerID, len(currentPartitions), currentPartitions, len(expectedPartitions), expectedPartitions, workerIndex, activeWorkers)
+		logger.Log.Debug(
+			"Partition assignment count mismatch - workerId: %s, current: %d %v, expected: %d %v, workerIndex: %d, activeWorkers: %d",
+			m.workerID,
+			len(currentPartitions),
+			currentPartitions,
+			len(expectedPartitions),
+			expectedPartitions,
+			workerIndex,
+			activeWorkers,
+		)
 		return true
 	}
 
@@ -375,7 +399,18 @@ func (m *manager) needsRebalance(ctx context.Context) bool {
 
 	for _, p := range currentPartitions {
 		if _, ok := expectedPartitionsSet[p]; !ok {
-			logger.Log.Debug("Partition assignment content mismatch - workerId: %s, has unexpected partition %d. Current: %v, Expected: %v, workerIndex: %d, activeWorkers: %d", m.workerID, p, currentPartitions, expectedPartitions, workerIndex, activeWorkers)
+			logger.Log.Debug(
+				"Partition assignment content mismatch - workerId: %s, has unexpected partition %d.",
+				m.workerID,
+				p,
+			)
+			logger.Log.Debug(
+				"Partition assignment content details - current: %v, expected: %v, workerIndex: %d, activeWorkers: %d",
+				currentPartitions,
+				expectedPartitions,
+				workerIndex,
+				activeWorkers,
+			)
 			return true
 		}
 	}
@@ -400,14 +435,24 @@ func (m *manager) AcquirePartitions(ctx context.Context) ([]int, error) {
 		return nil, fmt.Errorf("failed to get worker index: %w", err)
 	}
 
-	logger.Log.Debug("Partition acquisition context - workerId: %s, activeWorkers: %d, workerIndex: %d", m.workerID, activeWorkers, workerIndex)
+	logger.Log.Debug(
+		"Partition acquisition context - workerId: %s, activeWorkers: %d, workerIndex: %d",
+		m.workerID,
+		activeWorkers,
+		workerIndex,
+	)
 
 	expectedPartitions := m.calculateExpectedPartitionsForWorker(workerIndex, activeWorkers)
 
 	acquiredPartitions := make([]int, 0, len(expectedPartitions))
 	failedPartitions := make([]int, 0, len(expectedPartitions))
 
-	logger.Log.Debug("Attempting to acquire partitions - expected: %v, activeWorkers: %d, workerIndex: %d", expectedPartitions, activeWorkers, workerIndex)
+	logger.Log.Debug(
+		"Attempting to acquire partitions - expected: %v, activeWorkers: %d, workerIndex: %d",
+		expectedPartitions,
+		activeWorkers,
+		workerIndex,
+	)
 
 	for _, partitionID := range expectedPartitions {
 		if err := m.tryAcquireOrTakeoverPartitionWithRetry(ctx, partitionID); err != nil {
@@ -431,7 +476,13 @@ func (m *manager) AcquirePartitions(ctx context.Context) ([]int, error) {
 		logger.Log.Error("Failed to update worker partitions: %v", err)
 	}
 
-	logger.Log.Debug("Acquired partitions - count: %d, partitions: %v, workerIndex: %d, activeWorkers: %d", len(acquiredPartitions), acquiredPartitions, workerIndex, activeWorkers)
+	logger.Log.Debug(
+		"Acquired partitions - count: %d, partitions: %v, workerIndex: %d, activeWorkers: %d",
+		len(acquiredPartitions),
+		acquiredPartitions,
+		workerIndex,
+		activeWorkers,
+	)
 
 	return acquiredPartitions, nil
 }
@@ -633,7 +684,13 @@ func (m *manager) determineWorkerIndex(ctx context.Context) (int, error) {
 		}
 
 		attempts := b.Attempts()
-		logger.Log.Warn("Worker not found in active workers list, retrying - myWorkerId: %s, allActiveWorkers: %v, attempt: %d/%d", m.workerID, allWorkers, attempts+1, b.Config.MaxRetries)
+		logger.Log.Warn(
+			"Worker not found in active workers list, retrying - myWorkerId: %s, allActiveWorkers: %v, attempt: %d/%d",
+			m.workerID,
+			allWorkers,
+			attempts+1,
+			b.Config.MaxRetries,
+		)
 
 		if heartbeatErr := m.sendHeartbeat(ctx); heartbeatErr != nil {
 			logger.Log.Error("Failed to send heartbeat during worker index retry: %v", heartbeatErr)
@@ -704,7 +761,6 @@ func (m *manager) tryAcquireOrTakeoverPartition(ctx context.Context, partitionID
 
 	var result PartitionAssignment
 	err = m.partitionsCol.FindOneAndUpdate(ctx, filter, update, opts).Decode(&result)
-
 	if err != nil {
 		if err == mongo.ErrNoDocuments {
 			logger.Log.Debug("Partition %d is owned by another active worker", partitionID)
@@ -758,7 +814,13 @@ func (m *manager) updateWorkerPartitions(ctx context.Context, partitions []int) 
 		return err
 	}
 
-	logger.Log.Debug("Updated worker partitions - workerId: %s, partitions: %v, matched: %d, modified: %d", m.workerID, partitions, result.MatchedCount(), result.ModifiedCount())
+	logger.Log.Debug(
+		"Updated worker partitions - workerId: %s, partitions: %v, matched: %d, modified: %d",
+		m.workerID,
+		partitions,
+		result.MatchedCount(),
+		result.ModifiedCount(),
+	)
 	return nil
 }
 
@@ -872,7 +934,6 @@ func (m *manager) getServerTimeWithCurrentDate(ctx context.Context) (time.Time, 
 		bson.M{"_id": "temp_time_check"},
 		update,
 		opts).Decode(&result)
-
 	if err != nil {
 		return time.Time{}, fmt.Errorf("failed to get server time with fallback method: %w", err)
 	}
@@ -880,7 +941,10 @@ func (m *manager) getServerTimeWithCurrentDate(ctx context.Context) (time.Time, 
 	go func() {
 		deleteCtx, cancel := context.WithTimeout(context.Background(), 5*time.Second)
 		defer cancel()
-		m.workersCol.DeleteOne(deleteCtx, bson.M{"_id": "temp_time_check"})
+		_, err := m.workersCol.DeleteOne(deleteCtx, bson.M{"_id": "temp_time_check"})
+		if err != nil {
+			logger.Log.Debug("Failed to delete temporary server time document: %v", err)
+		}
 	}()
 
 	return result.ServerTime, nil

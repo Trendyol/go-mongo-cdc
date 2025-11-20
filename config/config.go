@@ -15,6 +15,8 @@ import (
 	"gopkg.in/yaml.v2"
 )
 
+const CheckpointTypeAuto = "auto"
+
 type Config struct {
 	MongoDB                 MongoDB          `json:"mongodb" yaml:"mongodb"`
 	Metric                  MetricConfig     `json:"metric" yaml:"metric"`
@@ -65,7 +67,7 @@ type CheckpointConfig struct {
 	ChangeStreamSaveCount   int           `json:"changeStreamSaveCount" yaml:"changeStreamSaveCount"`
 	BootstrapSaveCount      int           `json:"bootstrapSaveCount" yaml:"bootstrapSaveCount"`
 	BootstrapSaveInterval   time.Duration `json:"bootstrapSaveInterval" yaml:"bootstrapSaveInterval"`
-	BootstrapQueryBatchSize int           `json:"bootstrapQueryBatchSize" yaml:"bootstrapQueryBatchSize"`
+	BootstrapQueryBatchSize int32         `json:"bootstrapQueryBatchSize" yaml:"bootstrapQueryBatchSize"`
 	IdleHeartbeatInterval   time.Duration `json:"idleHeartbeatInterval" yaml:"idleHeartbeatInterval"`
 	MaxIdleTime             time.Duration `json:"maxIdleTime" yaml:"maxIdleTime"`
 }
@@ -81,6 +83,14 @@ type PartitionConfig struct {
 }
 
 func (c *Config) SetDefault() {
+	c.setDefaultMongo()
+	c.setDefaultMetricAndLogger()
+	c.setDefaultCheckpoint()
+	c.setDefaultPartition()
+	c.setDefaultGracefulShutdown()
+}
+
+func (c *Config) setDefaultMongo() {
 	if c.MongoDB.ConnectionPool.MaxPoolSize == 0 {
 		c.MongoDB.ConnectionPool.MaxPoolSize = 100
 	}
@@ -90,29 +100,34 @@ func (c *Config) SetDefault() {
 	}
 
 	if c.MongoDB.ConnectionPool.MaxIdleTimeMS == 0 {
-		c.MongoDB.ConnectionPool.MaxIdleTimeMS = 300000 // 5 minutes
+		c.MongoDB.ConnectionPool.MaxIdleTimeMS = 300000
 	}
 
 	if c.MongoDB.Timeouts.ConnectTimeoutMS == 0 {
-		c.MongoDB.Timeouts.ConnectTimeoutMS = 30000 // 30 seconds
+		c.MongoDB.Timeouts.ConnectTimeoutMS = 30000
 	}
 
 	if c.MongoDB.Timeouts.ServerSelectionTimeoutMS == 0 {
-		c.MongoDB.Timeouts.ServerSelectionTimeoutMS = 60000 // 60 seconds
+		c.MongoDB.Timeouts.ServerSelectionTimeoutMS = 60000
 	}
 
 	if c.MongoDB.Timeouts.SocketTimeoutMS == 0 {
-		c.MongoDB.Timeouts.SocketTimeoutMS = 120000 // 120 seconds
+		c.MongoDB.Timeouts.SocketTimeoutMS = 120000
 	}
+}
 
+func (c *Config) setDefaultMetricAndLogger() {
 	if c.Metric.Port == 0 {
 		c.Metric.Port = 8080
 	}
 	if c.Logger.LogLevel == "" {
 		c.Logger.LogLevel = logger.INFO
 	}
+}
+
+func (c *Config) setDefaultCheckpoint() {
 	if c.Checkpoint.Type == "" {
-		c.Checkpoint.Type = "auto"
+		c.Checkpoint.Type = CheckpointTypeAuto
 	}
 	if c.Checkpoint.TokenSaveInterval == 0 {
 		c.Checkpoint.TokenSaveInterval = 10 * time.Second
@@ -135,11 +150,12 @@ func (c *Config) SetDefault() {
 	if c.Checkpoint.MaxIdleTime == 0 {
 		c.Checkpoint.MaxIdleTime = 15 * time.Minute
 	}
-
 	if c.Checkpoint.ChangeStreamSaveCount == 0 {
 		c.Checkpoint.ChangeStreamSaveCount = 500
 	}
+}
 
+func (c *Config) setDefaultPartition() {
 	if c.Partition.HeartbeatInterval == 0 {
 		c.Partition.HeartbeatInterval = 10 * time.Second
 	}
@@ -158,7 +174,9 @@ func (c *Config) SetDefault() {
 	if c.Partition.TotalPartition == 0 {
 		c.Partition.TotalPartition = 15
 	}
+}
 
+func (c *Config) setDefaultGracefulShutdown() {
 	if c.GracefulShutdownTimeout == 0 {
 		c.GracefulShutdownTimeout = 10 * time.Second
 	}
@@ -215,7 +233,10 @@ func (cp *ConnectionPool) Validate() error {
 
 func (p *PartitionConfig) Validate() error {
 	if isEmpty(p.ConsumerGroup) {
-		return fmt.Errorf("consumerGroup is required. Please specify a unique consumer group name for this CDC application (e.g., 'elasticsearch', 'kafka', 'myapp')")
+		return fmt.Errorf(
+			"consumerGroup is required. Please specify a unique consumer group name for this CDC application " +
+				"(e.g., 'elasticsearch', 'kafka', 'myapp')",
+		)
 	}
 
 	return nil

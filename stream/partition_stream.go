@@ -131,7 +131,7 @@ func (ps *partitionStream) Start(ctx context.Context) error {
 	case <-ps.ctx.Done():
 		logger.Log.Debug("Event processing cancelled during initial delay")
 		return ps.ctx.Err()
-	case <-time.After(30 * time.Second): //TODO: sistemin reliable olması icin 30 saniye bekleme suresi iyi daha az olmaması gerekir fakat bazı kullanıcılar 30 dan yuksek vermek isteyebilir bu sebeple configurable yapılabilir
+	case <-time.After(30 * time.Second):
 		logger.Log.Debug("Initial delay completed before acquiring partitions")
 	}
 
@@ -439,15 +439,20 @@ func (ps *partitionStream) fetchCurrentDbOperationTimeWithRetry(ctx context.Cont
 		}
 	}
 
-	logger.Log.Warn("Failed to get operation time from database after %d attempts, using current time as fallback. Last error: %v", b.Attempts(), lastErr)
+	logger.Log.Warn(
+		"Failed to get operation time from database after %d attempts, using current time as fallback. Last error: %v",
+		b.Attempts(),
+		lastErr,
+	)
 
 	now := time.Now().Unix()
 	var t uint32
-	if now < 0 {
+	switch {
+	case now < 0:
 		t = 0
-	} else if now > int64(math.MaxUint32) {
+	case now > int64(math.MaxUint32):
 		t = math.MaxUint32
-	} else {
+	default:
 		t = uint32(now)
 	}
 
@@ -480,7 +485,12 @@ func (ps *partitionStream) getBootstrapProgressWithRetry(partitionID int, maxRet
 
 		delay, ok := b.NextDelay()
 		if !ok {
-			return nil, fmt.Errorf("failed to get bootstrap progress after %d attempts for partition %d, last error: %v", attempts, partitionID, lastErr)
+			return nil, fmt.Errorf(
+				"failed to get bootstrap progress after %d attempts for partition %d, last error: %v",
+				attempts,
+				partitionID,
+				lastErr,
+			)
 		}
 
 		time.Sleep(delay)
@@ -550,7 +560,12 @@ func (ps *partitionStream) loadBootstrapStateAndCreateFilter(partitionID int) (i
 	if bootstrapLastID != nil {
 		comparisonFilter := ps.buildResumeAfterIdFilter("_id", bootstrapLastID)
 		filter = append(filter, comparisonFilter...)
-		logger.Log.Info("Resuming bootstrap from saved progress - partitionId: %d, lastId: %v (type: %T)", partitionID, bootstrapLastID, bootstrapLastID)
+		logger.Log.Info(
+			"Resuming bootstrap from saved progress - partitionId: %d, lastId: %v (type: %T)",
+			partitionID,
+			bootstrapLastID,
+			bootstrapLastID,
+		)
 	} else {
 		logger.Log.Info("Starting fresh bootstrap - partitionId: %d", partitionID)
 	}
@@ -558,10 +573,14 @@ func (ps *partitionStream) loadBootstrapStateAndCreateFilter(partitionID int) (i
 	return bootstrapLastID, filter, nil
 }
 
-func (ps *partitionStream) queryDocumentsForBootstrap(worker *streamWorker, filter bson.D, bootstrapLastID interface{}) (connection.Cursor, error) {
+func (ps *partitionStream) queryDocumentsForBootstrap(
+	worker *streamWorker,
+	filter bson.D,
+	bootstrapLastID interface{},
+) (connection.Cursor, error) {
 	useNumericStringSorting := ps.shouldUseNumericStringSorting(worker, bootstrapLastID)
 
-	batchSize := int32(ps.cfg.Checkpoint.BootstrapQueryBatchSize)
+	batchSize := ps.cfg.Checkpoint.BootstrapQueryBatchSize
 
 	opts := options.Find().
 		SetSort(bson.D{{Key: "_id", Value: 1}}).
@@ -651,7 +670,7 @@ func (ps *partitionStream) iterateAndProcessBootstrapCursor(worker *streamWorker
 		worker.bootstrapStateMutex.Unlock()
 	}()
 
-	if ps.cfg.Checkpoint.Type == "auto" {
+	if ps.cfg.Checkpoint.Type == config.CheckpointTypeAuto {
 		bootstrapCtx, bootstrapCancel := context.WithCancel(worker.ctx)
 		defer bootstrapCancel()
 		bootstrapTicker := time.NewTicker(ps.cfg.Checkpoint.BootstrapSaveInterval)
@@ -695,14 +714,28 @@ func (ps *partitionStream) saveFinalBootstrapProgressOnInterruption(worker *stre
 		ctx, cancel := context.WithTimeout(context.Background(), ps.cfg.Checkpoint.TokenSaveTimeout)
 		defer cancel()
 		if err := ps.checkpointManager.SaveBootstrapProgress(ctx, worker.partitionID, pendingID); err != nil {
-			logger.Log.Error("Failed to save final bootstrap progress on interruption - partitionId: %d, lastId: %v, error: %v", worker.partitionID, pendingID, err)
+			logger.Log.Error(
+				"Failed to save final bootstrap progress on interruption - partitionId: %d, lastId: %v, error: %v",
+				worker.partitionID,
+				pendingID,
+				err,
+			)
 		} else {
-			logger.Log.Debug("Saved bootstrap progress on interruption - partitionId: %d, lastId: %v, totalProcessed: %d", worker.partitionID, pendingID, totalProcessed)
+			logger.Log.Debug(
+				"Saved bootstrap progress on interruption - partitionId: %d, lastId: %v, totalProcessed: %d",
+				worker.partitionID,
+				pendingID,
+				totalProcessed,
+			)
 		}
 	}
 }
 
-func (ps *partitionStream) dispatchBootstrapDocumentToListener(worker *streamWorker, cursor connection.Cursor, state *bootstrapProcessState) error {
+func (ps *partitionStream) dispatchBootstrapDocumentToListener(
+	worker *streamWorker,
+	cursor connection.Cursor,
+	state *bootstrapProcessState,
+) error {
 	var document bson.M
 	if err := cursor.Decode(&document); err != nil {
 		logger.Log.Error("Error decoding document: %v", err)
@@ -724,13 +757,9 @@ func (ps *partitionStream) dispatchBootstrapDocumentToListener(worker *streamWor
 }
 
 func (ps *partitionStream) processBootstrapEvent(worker *streamWorker, event message.ChangeEvent, state *bootstrapProcessState) error {
-	worker.stoppingMutex.RLock()
-	if worker.stopping {
-		worker.stoppingMutex.RUnlock()
-		return fmt.Errorf("worker is stopping, skipping event")
+	if err := ps.ensureWorkerActive(worker); err != nil {
+		return err
 	}
-	worker.inFlightEvents.Add(1)
-	worker.stoppingMutex.RUnlock()
 	defer worker.inFlightEvents.Done()
 
 	msg, err := message.NewMessage(event)
@@ -748,74 +777,21 @@ func (ps *partitionStream) processBootstrapEvent(worker *streamWorker, event mes
 		Message:     msg,
 		PartitionID: worker.partitionID,
 		IsBootstrap: true,
-		Ack: func() {
-			ps.metric.IncBootstrapDocumentTotal()
-
-			state.pendingCheckpointMutex.Lock()
-			state.pendingCheckpointID = event.DocumentKey.ID
-			state.pendingCheckpointCount++
-			state.totalProcessedCount++
-			pendingCount := state.pendingCheckpointCount
-			state.pendingCheckpointMutex.Unlock()
-
-			if ps.cfg.Checkpoint.Type == "auto" && pendingCount >= ps.cfg.Checkpoint.BootstrapSaveCount {
-				state.pendingCheckpointMutex.Lock()
-				checkpointID := state.pendingCheckpointID
-				state.pendingCheckpointCount = 0
-				state.pendingCheckpointMutex.Unlock()
-
-				if checkpointID != nil {
-					saveCtx, cancel := context.WithTimeout(context.Background(), ps.cfg.Checkpoint.TokenSaveTimeout)
-					saveStart := time.Now()
-					err := ps.checkpointManager.SaveBootstrapProgress(
-						saveCtx,
-						worker.partitionID,
-						checkpointID,
-					)
-					cancel()
-
-					saveLatency := time.Since(saveStart).Milliseconds()
-					ps.metric.SetCheckpointSaveLatency(saveLatency)
-
-					if err != nil {
-						logger.Log.Error("Failed to save bootstrap checkpoint on batch size - partitionId: %d, error: %v", worker.partitionID, err)
-						ps.metric.IncCheckpointSaveErrorTotal()
-					} else {
-						logger.Log.Debug("Bootstrap checkpoint saved on batch size - partitionId: %d, lastID: %v, batchSize: %d",
-							worker.partitionID, checkpointID, ps.cfg.Checkpoint.BootstrapSaveCount)
-						ps.metric.IncCheckpointSaveTotal()
-						ps.metric.SetLastCheckpointTime(time.Now())
-
-						state.pendingCheckpointMutex.Lock()
-						state.pendingCheckpointID = nil
-						state.pendingCheckpointMutex.Unlock()
-					}
-				}
-			}
-		},
+		Ack:         ps.createBootstrapAck(worker, event, state),
 	}
 
-	listenerStart := time.Now()
-	listenerErr := ps.listener(listenerCtx)
-	listenerDuration := time.Since(listenerStart)
-
-	ps.metric.SetListenerLatency(listenerDuration.Nanoseconds())
-
-	if listenerErr != nil {
-		ps.metric.IncListenerErrorTotal()
-	}
-
-	return listenerErr
+	return ps.executeListener(listenerCtx)
 }
 
 func (ps *partitionStream) createInsertEventFromDocument(document bson.M) message.ChangeEvent {
 	now := time.Now().Unix()
 	var t uint32
-	if now < 0 {
+	switch {
+	case now < 0:
 		t = 0
-	} else if now > int64(math.MaxUint32) {
+	case now > int64(math.MaxUint32):
 		t = math.MaxUint32
-	} else {
+	default:
 		t = uint32(now)
 	}
 
@@ -852,7 +828,11 @@ func (ps *partitionStream) finalizeBootstrapAndClearCheckpoint(worker *streamWor
 	return nil
 }
 
-func (ps *partitionStream) startAndManageChangeStream(worker *streamWorker, resumeToken []byte, startAtOperationTime *primitive.Timestamp) error {
+func (ps *partitionStream) startAndManageChangeStream(
+	worker *streamWorker,
+	resumeToken []byte,
+	startAtOperationTime *primitive.Timestamp,
+) error {
 	if !ps.verifyPartitionOwnership(worker.ctx, worker.partitionID) {
 		logger.Log.Warn("Partition ownership verification failed before change stream - partitionId: %d", worker.partitionID)
 		return fmt.Errorf("partition %d not owned by this worker before change stream", worker.partitionID)
@@ -885,7 +865,7 @@ func (ps *partitionStream) startAndManageChangeStream(worker *streamWorker, resu
 	helpersCtx, helpersCancel := context.WithCancel(worker.ctx)
 	defer helpersCancel()
 
-	if ps.cfg.Checkpoint.Type == "auto" {
+	if ps.cfg.Checkpoint.Type == config.CheckpointTypeAuto {
 		commitTicker := time.NewTicker(ps.cfg.Checkpoint.TokenSaveInterval)
 		defer commitTicker.Stop()
 		go ps.startPeriodicCommit(helpersCtx, worker, commitTicker)
@@ -945,7 +925,6 @@ func (ps *partitionStream) verifyPartitionOwnership(ctx context.Context, partiti
 	filter := bson.M{"_id": partitionID}
 	var assignment bson.M
 	err := partitionsCol.FindOne(ctx, filter).Decode(&assignment)
-
 	if err != nil {
 		logger.Log.Debug("Partition assignment not found - partitionId: %d, error: %v", partitionID, err)
 		return false
@@ -1177,13 +1156,9 @@ func (ps *partitionStream) isUnrecoverableResumeError(err error) bool {
 }
 
 func (ps *partitionStream) processEvent(worker *streamWorker, event message.ChangeEvent, resumeToken []byte) error {
-	worker.stoppingMutex.RLock()
-	if worker.stopping {
-		worker.stoppingMutex.RUnlock()
-		return fmt.Errorf("worker is stopping, skipping event")
+	if err := ps.ensureWorkerActive(worker); err != nil {
+		return err
 	}
-	worker.inFlightEvents.Add(1)
-	worker.stoppingMutex.RUnlock()
 	defer worker.inFlightEvents.Done()
 
 	msg, err := message.NewMessage(event)
@@ -1203,70 +1178,160 @@ func (ps *partitionStream) processEvent(worker *streamWorker, event message.Chan
 		Message:     msg,
 		PartitionID: worker.partitionID,
 		IsBootstrap: false,
-		Ack: func() {
-			if len(resumeToken) > 0 {
-				worker.tokenMutex.Lock()
-				worker.lastAckedToken = append([]byte(nil), resumeToken...)
-				worker.lastClusterTime = &event.ClusterTime
-				worker.ackedEventCount++
-				ackedCount := worker.ackedEventCount
-				worker.tokenMutex.Unlock()
-
-				worker.commitMutex.Lock()
-				worker.pendingCommitToken = append([]byte(nil), resumeToken...)
-				worker.pendingCommitClusterTime = &event.ClusterTime
-				worker.commitMutex.Unlock()
-
-				if ps.cfg.Checkpoint.Type == "auto" && ackedCount >= ps.cfg.Checkpoint.ChangeStreamSaveCount {
-					worker.tokenMutex.Lock()
-					worker.ackedEventCount = 0
-					worker.tokenMutex.Unlock()
-
-					saveCtx, cancel := context.WithTimeout(context.Background(), ps.cfg.Checkpoint.TokenSaveTimeout)
-					saveStart := time.Now()
-					err := ps.checkpointManager.SaveResumeToken(
-						saveCtx,
-						worker.partitionID,
-						worker.pendingCommitToken,
-						worker.pendingCommitClusterTime,
-					)
-					cancel()
-
-					saveLatency := time.Since(saveStart).Milliseconds()
-					ps.metric.SetCheckpointSaveLatency(saveLatency)
-
-					if err != nil {
-						logger.Log.Error("Failed to save checkpoint on batch size - partitionId: %d, error: %v", worker.partitionID, err)
-						ps.metric.IncCheckpointSaveErrorTotal()
-					} else {
-						logger.Log.Debug("Checkpoint saved on batch size - partitionId: %d, batchSize: %d", worker.partitionID, ps.cfg.Checkpoint.ChangeStreamSaveCount)
-						ps.metric.IncCheckpointSaveTotal()
-						ps.metric.SetLastCheckpointTime(time.Now())
-
-						worker.commitMutex.Lock()
-						worker.pendingCommitToken = nil
-						worker.pendingCommitClusterTime = nil
-						worker.commitMutex.Unlock()
-					}
-				}
-			}
-		},
+		Ack:         ps.createChangeStreamAck(worker, event, resumeToken),
 	}
 
-	// Measure listener execution time
+	return ps.executeListener(listenerCtx)
+}
+
+func (ps *partitionStream) ensureWorkerActive(worker *streamWorker) error {
+	worker.stoppingMutex.RLock()
+	if worker.stopping {
+		worker.stoppingMutex.RUnlock()
+		return fmt.Errorf("worker is stopping, skipping event")
+	}
+	worker.inFlightEvents.Add(1)
+	worker.stoppingMutex.RUnlock()
+	return nil
+}
+
+func (ps *partitionStream) executeListener(listenerCtx *ListenerContext) error {
 	listenerStart := time.Now()
 	listenerErr := ps.listener(listenerCtx)
 	listenerDuration := time.Since(listenerStart)
 
-	// Update listener latency metric
 	ps.metric.SetListenerLatency(listenerDuration.Nanoseconds())
 
-	// Track listener errors
 	if listenerErr != nil {
 		ps.metric.IncListenerErrorTotal()
 	}
 
 	return listenerErr
+}
+
+func (ps *partitionStream) createChangeStreamAck(worker *streamWorker, event message.ChangeEvent, resumeToken []byte) func() {
+	return func() {
+		if len(resumeToken) == 0 {
+			return
+		}
+
+		worker.tokenMutex.Lock()
+		worker.lastAckedToken = append([]byte(nil), resumeToken...)
+		worker.lastClusterTime = &event.ClusterTime
+		worker.ackedEventCount++
+		ackedCount := worker.ackedEventCount
+		worker.tokenMutex.Unlock()
+
+		worker.commitMutex.Lock()
+		worker.pendingCommitToken = append([]byte(nil), resumeToken...)
+		worker.pendingCommitClusterTime = &event.ClusterTime
+		worker.commitMutex.Unlock()
+
+		if ps.cfg.Checkpoint.Type != config.CheckpointTypeAuto || ackedCount < ps.cfg.Checkpoint.ChangeStreamSaveCount {
+			return
+		}
+
+		worker.tokenMutex.Lock()
+		worker.ackedEventCount = 0
+		worker.tokenMutex.Unlock()
+
+		saveCtx, cancel := context.WithTimeout(context.Background(), ps.cfg.Checkpoint.TokenSaveTimeout)
+		saveStart := time.Now()
+		err := ps.checkpointManager.SaveResumeToken(
+			saveCtx,
+			worker.partitionID,
+			worker.pendingCommitToken,
+			worker.pendingCommitClusterTime,
+		)
+		cancel()
+
+		saveLatency := time.Since(saveStart).Milliseconds()
+		ps.metric.SetCheckpointSaveLatency(saveLatency)
+
+		if err != nil {
+			logger.Log.Error(
+				"Failed to save checkpoint on batch size - partitionId: %d, error: %v",
+				worker.partitionID,
+				err,
+			)
+			ps.metric.IncCheckpointSaveErrorTotal()
+			return
+		}
+
+		logger.Log.Debug(
+			"Checkpoint saved on batch size - partitionId: %d, batchSize: %d",
+			worker.partitionID,
+			ps.cfg.Checkpoint.ChangeStreamSaveCount,
+		)
+		ps.metric.IncCheckpointSaveTotal()
+		ps.metric.SetLastCheckpointTime(time.Now())
+
+		worker.commitMutex.Lock()
+		worker.pendingCommitToken = nil
+		worker.pendingCommitClusterTime = nil
+		worker.commitMutex.Unlock()
+	}
+}
+
+func (ps *partitionStream) createBootstrapAck(worker *streamWorker, event message.ChangeEvent, state *bootstrapProcessState) func() {
+	return func() {
+		ps.metric.IncBootstrapDocumentTotal()
+
+		state.pendingCheckpointMutex.Lock()
+		state.pendingCheckpointID = event.DocumentKey.ID
+		state.pendingCheckpointCount++
+		state.totalProcessedCount++
+		pendingCount := state.pendingCheckpointCount
+		state.pendingCheckpointMutex.Unlock()
+
+		if ps.cfg.Checkpoint.Type != config.CheckpointTypeAuto || pendingCount < ps.cfg.Checkpoint.BootstrapSaveCount {
+			return
+		}
+
+		state.pendingCheckpointMutex.Lock()
+		checkpointID := state.pendingCheckpointID
+		state.pendingCheckpointCount = 0
+		state.pendingCheckpointMutex.Unlock()
+
+		if checkpointID == nil {
+			return
+		}
+
+		saveCtx, cancel := context.WithTimeout(context.Background(), ps.cfg.Checkpoint.TokenSaveTimeout)
+		saveStart := time.Now()
+		err := ps.checkpointManager.SaveBootstrapProgress(
+			saveCtx,
+			worker.partitionID,
+			checkpointID,
+		)
+		cancel()
+
+		saveLatency := time.Since(saveStart).Milliseconds()
+		ps.metric.SetCheckpointSaveLatency(saveLatency)
+
+		if err != nil {
+			logger.Log.Error(
+				"Failed to save bootstrap checkpoint on batch size - partitionId: %d, error: %v",
+				worker.partitionID,
+				err,
+			)
+			ps.metric.IncCheckpointSaveErrorTotal()
+			return
+		}
+
+		logger.Log.Debug(
+			"Bootstrap checkpoint saved on batch size - partitionId: %d, lastID: %v, batchSize: %d",
+			worker.partitionID,
+			checkpointID,
+			ps.cfg.Checkpoint.BootstrapSaveCount,
+		)
+		ps.metric.IncCheckpointSaveTotal()
+		ps.metric.SetLastCheckpointTime(time.Now())
+
+		state.pendingCheckpointMutex.Lock()
+		state.pendingCheckpointID = nil
+		state.pendingCheckpointMutex.Unlock()
+	}
 }
 
 func (ps *partitionStream) updateMetrics(opType message.OperationType) {
@@ -1282,7 +1347,12 @@ func (ps *partitionStream) updateMetrics(opType message.OperationType) {
 	}
 }
 
-func (ps *partitionStream) startPeriodicBootstrapCommit(ctx context.Context, worker *streamWorker, state *bootstrapProcessState, ticker *time.Ticker) {
+func (ps *partitionStream) startPeriodicBootstrapCommit(
+	ctx context.Context,
+	worker *streamWorker,
+	state *bootstrapProcessState,
+	ticker *time.Ticker,
+) {
 	for {
 		select {
 		case <-ctx.Done():
@@ -1308,11 +1378,20 @@ func (ps *partitionStream) startPeriodicBootstrapCommit(ctx context.Context, wor
 				ps.metric.SetCheckpointSaveLatency(saveLatency)
 
 				if err != nil {
-					logger.Log.Error("Failed to save bootstrap checkpoint periodically - partitionId: %d, error: %v", worker.partitionID, err)
+					logger.Log.Error(
+						"Failed to save bootstrap checkpoint periodically - partitionId: %d, error: %v",
+						worker.partitionID,
+						err,
+					)
 					ps.metric.IncCheckpointSaveErrorTotal()
 				} else {
-					logger.Log.Debug("Bootstrap checkpoint saved periodically - partitionId: %d, lastID: %v, pendingCount: %d, totalProcessed: %d",
-						worker.partitionID, checkpointID, pendingCount, totalProcessed)
+					logger.Log.Debug(
+						"Bootstrap checkpoint saved periodically - partitionId: %d, lastID: %v, pendingCount: %d, totalProcessed: %d",
+						worker.partitionID,
+						checkpointID,
+						pendingCount,
+						totalProcessed,
+					)
 					ps.metric.IncCheckpointSaveTotal()
 					ps.metric.SetLastCheckpointTime(time.Now())
 

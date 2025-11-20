@@ -2,6 +2,8 @@ package main
 
 import (
 	"context"
+	"log"
+	"time"
 
 	"github.com/Trendyol/go-mongo-cdc/logger"
 
@@ -9,8 +11,6 @@ import (
 	"github.com/Trendyol/go-mongo-cdc/config"
 	"github.com/Trendyol/go-mongo-cdc/mongo/message"
 	"github.com/Trendyol/go-mongo-cdc/stream"
-	"log"
-	"time"
 )
 
 func main() {
@@ -73,7 +73,12 @@ func ProcessChangeEvent(lc *stream.ListenerContext) error {
 	switch lc.Message.OperationType {
 	case message.OperationInsert, message.OperationUpdate, message.OperationReplace:
 		if lc.Message.FullDocument != nil {
-			logger.Log.Info("Document changed - operation: %s, document: %v, partitionId: %d", string(lc.Message.OperationType), lc.Message.DocumentID, lc.PartitionID)
+			logger.Log.Info(
+				"Document changed - operation: %s, document: %v, partitionId: %d",
+				string(lc.Message.OperationType),
+				lc.Message.DocumentID,
+				lc.PartitionID,
+			)
 		}
 	case message.OperationDelete:
 		logger.Log.Info("Document deleted - documentId: %v, partitionId: %d", lc.Message.DocumentID, lc.PartitionID)

@@ -45,147 +45,33 @@ func NewCollector(m Metric) *Collector {
 	namespace := "go_mongo_cdc"
 
 	return &Collector{
-		metric: m,
-
-		insertTotal: prometheus.NewDesc(
-			prometheus.BuildFQName(namespace, "", "insert_total"),
-			"Total number of insert operations processed",
-			nil,
-			nil,
-		),
-		updateTotal: prometheus.NewDesc(
-			prometheus.BuildFQName(namespace, "", "update_total"),
-			"Total number of update operations processed",
-			nil,
-			nil,
-		),
-		deleteTotal: prometheus.NewDesc(
-			prometheus.BuildFQName(namespace, "", "delete_total"),
-			"Total number of delete operations processed",
-			nil,
-			nil,
-		),
-		replaceTotal: prometheus.NewDesc(
-			prometheus.BuildFQName(namespace, "", "replace_total"),
-			"Total number of replace operations processed",
-			nil,
-			nil,
-		),
-
-		cdcLatency: prometheus.NewDesc(
-			prometheus.BuildFQName(namespace, "", "cdc_latency_seconds"),
-			"CDC latency in seconds",
-			nil,
-			nil,
-		),
-
-		checkpointSaveTotal: prometheus.NewDesc(
-			prometheus.BuildFQName(namespace, "", "checkpoint_save_total"),
-			"Total number of checkpoint save operations",
-			nil,
-			nil,
-		),
-		checkpointSaveErrorTotal: prometheus.NewDesc(
-			prometheus.BuildFQName(namespace, "", "checkpoint_save_error_total"),
-			"Total number of checkpoint save errors",
-			nil,
-			nil,
-		),
-		checkpointSaveLatency: prometheus.NewDesc(
-			prometheus.BuildFQName(namespace, "", "checkpoint_save_latency_seconds"),
-			"Checkpoint save latency in seconds",
-			nil,
-			nil,
-		),
-
-		bootstrapDocumentTotal: prometheus.NewDesc(
-			prometheus.BuildFQName(namespace, "", "bootstrap_document_total"),
-			"Total number of documents processed during bootstrap",
-			nil,
-			nil,
-		),
-		bootstrapActive: prometheus.NewDesc(
-			prometheus.BuildFQName(namespace, "", "bootstrap_active"),
-			"Bootstrap active status (1=active, 0=inactive)",
-			nil,
-			nil,
-		),
-
-		activePartitionCount: prometheus.NewDesc(
-			prometheus.BuildFQName(namespace, "", "active_partition_count"),
-			"Number of currently active partitions",
-			nil,
-			nil,
-		),
-		partitionAcquireTotal: prometheus.NewDesc(
-			prometheus.BuildFQName(namespace, "", "partition_acquire_total"),
-			"Total number of partition acquisitions",
-			nil,
-			nil,
-		),
-		partitionReleaseTotal: prometheus.NewDesc(
-			prometheus.BuildFQName(namespace, "", "partition_release_total"),
-			"Total number of partition releases",
-			nil,
-			nil,
-		),
-
-		resumeTokenExpiredTotal: prometheus.NewDesc(
-			prometheus.BuildFQName(namespace, "", "resume_token_expired_total"),
-			"Total number of expired resume tokens",
-			nil,
-			nil,
-		),
-		changeStreamErrorTotal: prometheus.NewDesc(
-			prometheus.BuildFQName(namespace, "", "change_stream_error_total"),
-			"Total number of change stream errors",
-			nil,
-			nil,
-		),
-		changeStreamRestartTotal: prometheus.NewDesc(
-			prometheus.BuildFQName(namespace, "", "change_stream_restart_total"),
-			"Total number of change stream restarts",
-			nil,
-			nil,
-		),
-
-		lastEventTime: prometheus.NewDesc(
-			prometheus.BuildFQName(namespace, "", "last_event_time_seconds"),
-			"Unix timestamp of the last processed event",
-			nil,
-			nil,
-		),
-		eventLagDuration: prometheus.NewDesc(
-			prometheus.BuildFQName(namespace, "", "event_lag_seconds"),
-			"Time since the last event was processed in seconds",
-			nil,
-			nil,
-		),
-		listenerLatency: prometheus.NewDesc(
-			prometheus.BuildFQName(namespace, "", "listener_latency_seconds"),
-			"Listener function execution latency in seconds",
-			nil,
-			nil,
-		),
-		timeSinceLastCheckpoint: prometheus.NewDesc(
-			prometheus.BuildFQName(namespace, "", "time_since_last_checkpoint_seconds"),
+		metric:                   m,
+		insertTotal:              newCounterDesc(namespace, "insert_total", "Total number of insert operations processed"),
+		updateTotal:              newCounterDesc(namespace, "update_total", "Total number of update operations processed"),
+		deleteTotal:              newCounterDesc(namespace, "delete_total", "Total number of delete operations processed"),
+		replaceTotal:             newCounterDesc(namespace, "replace_total", "Total number of replace operations processed"),
+		cdcLatency:               newGaugeDesc(namespace, "cdc_latency_seconds", "CDC latency in seconds"),
+		checkpointSaveTotal:      newCounterDesc(namespace, "checkpoint_save_total", "Total number of checkpoint save operations"),
+		checkpointSaveErrorTotal: newCounterDesc(namespace, "checkpoint_save_error_total", "Total number of checkpoint save errors"),
+		checkpointSaveLatency:    newGaugeDesc(namespace, "checkpoint_save_latency_seconds", "Checkpoint save latency in seconds"),
+		bootstrapDocumentTotal:   newCounterDesc(namespace, "bootstrap_document_total", "Total number of documents processed during bootstrap"),
+		bootstrapActive:          newGaugeDesc(namespace, "bootstrap_active", "Bootstrap active status (1=active, 0=inactive)"),
+		activePartitionCount:     newGaugeDesc(namespace, "active_partition_count", "Number of currently active partitions"),
+		partitionAcquireTotal:    newCounterDesc(namespace, "partition_acquire_total", "Total number of partition acquisitions"),
+		partitionReleaseTotal:    newCounterDesc(namespace, "partition_release_total", "Total number of partition releases"),
+		resumeTokenExpiredTotal:  newCounterDesc(namespace, "resume_token_expired_total", "Total number of expired resume tokens"),
+		changeStreamErrorTotal:   newCounterDesc(namespace, "change_stream_error_total", "Total number of change stream errors"),
+		changeStreamRestartTotal: newCounterDesc(namespace, "change_stream_restart_total", "Total number of change stream restarts"),
+		lastEventTime:            newGaugeDesc(namespace, "last_event_time_seconds", "Unix timestamp of the last processed event"),
+		eventLagDuration:         newGaugeDesc(namespace, "event_lag_seconds", "Time since the last event was processed in seconds"),
+		listenerLatency:          newGaugeDesc(namespace, "listener_latency_seconds", "Listener function execution latency in seconds"),
+		timeSinceLastCheckpoint: newGaugeDesc(
+			namespace,
+			"time_since_last_checkpoint_seconds",
 			"Time since last checkpoint was saved in seconds",
-			nil,
-			nil,
 		),
-		listenerErrorTotal: prometheus.NewDesc(
-			prometheus.BuildFQName(namespace, "", "listener_error_total"),
-			"Total number of listener function errors",
-			nil,
-			nil,
-		),
-		partitionRebalanceTotal: prometheus.NewDesc(
-			prometheus.BuildFQName(namespace, "", "partition_rebalance_total"),
-			"Total number of partition rebalance operations",
-			nil,
-			nil,
-		),
-
+		listenerErrorTotal:      newCounterDesc(namespace, "listener_error_total", "Total number of listener function errors"),
+		partitionRebalanceTotal: newCounterDesc(namespace, "partition_rebalance_total", "Total number of partition rebalance operations"),
 		buildInfo: prometheus.NewDesc(
 			prometheus.BuildFQName(namespace, "", "build_info"),
 			"Build information",
@@ -195,11 +81,37 @@ func NewCollector(m Metric) *Collector {
 	}
 }
 
+func newCounterDesc(namespace, name, help string) *prometheus.Desc { //nolint:unparam
+	return prometheus.NewDesc(
+		prometheus.BuildFQName(namespace, "", name),
+		help,
+		nil,
+		nil,
+	)
+}
+
+func newGaugeDesc(namespace, name, help string) *prometheus.Desc { //nolint:unparam
+	return prometheus.NewDesc(
+		prometheus.BuildFQName(namespace, "", name),
+		help,
+		nil,
+		nil,
+	)
+}
+
 func (c *Collector) Describe(ch chan<- *prometheus.Desc) {
 	prometheus.DescribeByCollect(c, ch)
 }
 
 func (c *Collector) Collect(ch chan<- prometheus.Metric) {
+	c.collectOperationMetrics(ch)
+	c.collectCheckpointMetrics(ch)
+	c.collectBootstrapAndPartitionMetrics(ch)
+	c.collectLagAndListenerMetrics(ch)
+	c.collectBuildInfoMetrics(ch)
+}
+
+func (c *Collector) collectOperationMetrics(ch chan<- prometheus.Metric) {
 	ch <- prometheus.MustNewConstMetric(
 		c.insertTotal,
 		prometheus.CounterValue,
@@ -223,7 +135,9 @@ func (c *Collector) Collect(ch chan<- prometheus.Metric) {
 		prometheus.CounterValue,
 		float64(c.metric.GetReplaceTotal()),
 	)
+}
 
+func (c *Collector) collectCheckpointMetrics(ch chan<- prometheus.Metric) {
 	ch <- prometheus.MustNewConstMetric(
 		c.cdcLatency,
 		prometheus.GaugeValue,
@@ -247,7 +161,9 @@ func (c *Collector) Collect(ch chan<- prometheus.Metric) {
 		prometheus.GaugeValue,
 		float64(c.metric.GetCheckpointSaveLatency())/1000.0,
 	)
+}
 
+func (c *Collector) collectBootstrapAndPartitionMetrics(ch chan<- prometheus.Metric) {
 	ch <- prometheus.MustNewConstMetric(
 		c.bootstrapDocumentTotal,
 		prometheus.CounterValue,
@@ -299,7 +215,9 @@ func (c *Collector) Collect(ch chan<- prometheus.Metric) {
 		prometheus.CounterValue,
 		float64(c.metric.GetChangeStreamRestartTotal()),
 	)
+}
 
+func (c *Collector) collectLagAndListenerMetrics(ch chan<- prometheus.Metric) {
 	lastEventTime := c.metric.GetLastEventTime()
 	ch <- prometheus.MustNewConstMetric(
 		c.lastEventTime,
@@ -316,7 +234,6 @@ func (c *Collector) Collect(ch chan<- prometheus.Metric) {
 		)
 	}
 
-	// Listener latency (convert nanoseconds to seconds)
 	listenerLatencyNs := c.metric.GetListenerLatency()
 	ch <- prometheus.MustNewConstMetric(
 		c.listenerLatency,
@@ -324,13 +241,11 @@ func (c *Collector) Collect(ch chan<- prometheus.Metric) {
 		float64(listenerLatencyNs)/1e9,
 	)
 
-	// Time since last checkpoint
 	lastCheckpointTime := c.metric.GetLastCheckpointTime()
 	var timeSinceCheckpoint float64
 	if lastCheckpointTime > 0 {
 		timeSinceCheckpoint = time.Since(time.Unix(lastCheckpointTime, 0)).Seconds()
 	} else {
-		// If no checkpoint has been saved yet, report -1 to indicate "never"
 		timeSinceCheckpoint = -1
 	}
 	ch <- prometheus.MustNewConstMetric(
@@ -339,14 +254,14 @@ func (c *Collector) Collect(ch chan<- prometheus.Metric) {
 		timeSinceCheckpoint,
 	)
 
-	// Listener errors
 	ch <- prometheus.MustNewConstMetric(
 		c.listenerErrorTotal,
 		prometheus.CounterValue,
 		float64(c.metric.GetListenerErrorTotal()),
 	)
+}
 
-	// Partition rebalance
+func (c *Collector) collectBuildInfoMetrics(ch chan<- prometheus.Metric) {
 	ch <- prometheus.MustNewConstMetric(
 		c.partitionRebalanceTotal,
 		prometheus.CounterValue,

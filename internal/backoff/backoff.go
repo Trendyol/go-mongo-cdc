@@ -2,7 +2,8 @@ package backoff
 
 import (
 	"context"
-	"math/rand"
+	"crypto/rand"
+	"math/big"
 	"time"
 )
 
@@ -17,14 +18,12 @@ type Backoff struct {
 	Config       Config
 	currentDelay time.Duration
 	attempts     int
-	rng          *rand.Rand
 }
 
 func New(config Config) *Backoff {
 	return &Backoff{
 		Config:       config,
 		currentDelay: config.BaseDelay,
-		rng:          rand.New(rand.NewSource(time.Now().UnixNano())),
 	}
 }
 
@@ -37,8 +36,10 @@ func (b *Backoff) NextDelay() (time.Duration, bool) {
 
 	maxJitter := int64(delay / 5)
 	if maxJitter > 0 {
-		jitter := b.rng.Int63n(maxJitter)
-		delay += time.Duration(jitter)
+		n, err := rand.Int(rand.Reader, big.NewInt(maxJitter))
+		if err == nil {
+			delay += time.Duration(n.Int64())
+		}
 	}
 
 	b.currentDelay = time.Duration(float64(b.currentDelay) * b.Config.Factor)

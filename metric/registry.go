@@ -95,19 +95,19 @@ func (r *registry) StartMetricsServer(ctx context.Context, port int) error {
 }
 
 func (r *registry) createListener(preferredPort int) (net.Listener, int, error) {
-	listener, err := net.Listen("tcp", fmt.Sprintf(":%d", preferredPort))
+	listener, err := net.Listen("tcp", fmt.Sprintf("127.0.0.1:%d", preferredPort))
 	if err == nil {
 		return listener, preferredPort, nil
 	}
 
 	for port := preferredPort + 1; port <= preferredPort+100; port++ {
-		listener, err = net.Listen("tcp", fmt.Sprintf(":%d", port))
+		listener, err = net.Listen("tcp", fmt.Sprintf("127.0.0.1:%d", port))
 		if err == nil {
 			return listener, port, nil
 		}
 	}
 
-	listener, err = net.Listen("tcp", ":0")
+	listener, err = net.Listen("tcp", "127.0.0.1:0")
 	if err != nil {
 		return nil, 0, err
 	}

@@ -383,6 +383,10 @@ func (dr *mongoDeleteResultImpl) DeletedCount() int64 {
 	return dr.dr.DeletedCount
 }
 
-func (iv *mongoIndexViewImpl) CreateMany(ctx context.Context, models []mongo.IndexModel, opts ...*options.CreateIndexesOptions) ([]string, error) {
+func (iv *mongoIndexViewImpl) CreateMany(
+	ctx context.Context,
+	models []mongo.IndexModel,
+	opts ...*options.CreateIndexesOptions,
+) ([]string, error) {
 	return iv.iv.CreateMany(ctx, models, opts...)
 }
