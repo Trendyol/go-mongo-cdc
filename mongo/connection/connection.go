@@ -110,10 +110,6 @@ type IndexView interface {
 	CreateMany(ctx context.Context, models []mongo.IndexModel, opts ...*options.CreateIndexesOptions) ([]string, error)
 }
 
-type mongoClientImpl struct {
-	client *mongo.Client
-}
-
 type mongoDatabaseImpl struct {
 	db *mongo.Database
 }
@@ -191,18 +187,6 @@ func NewMongoClient(cfg config.MongoDB) (Client, error) {
 	}
 
 	return &MongoClient{client: client}, nil
-}
-
-func (c *mongoClientImpl) Database(name string) Database {
-	return &mongoDatabaseImpl{db: c.client.Database(name)}
-}
-
-func (c *mongoClientImpl) Close(ctx context.Context) error {
-	return c.client.Disconnect(ctx)
-}
-
-func (c *mongoClientImpl) Ping(ctx context.Context) error {
-	return c.client.Ping(ctx, readpref.Primary())
 }
 
 func (d *mongoDatabaseImpl) Collection(name string) Collection {

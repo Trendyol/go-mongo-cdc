@@ -940,7 +940,7 @@ func (ps *partitionStream) saveLatestResumeTokenOnInterruption(worker *streamWor
 }
 
 func (ps *partitionStream) verifyPartitionOwnership(ctx context.Context, partitionID int) bool {
-	partitionsCol := ps.client.Database(ps.cfg.MongoDB.Connection.Database).Collection(ps.cfg.Partition.PartitionsCollection)
+	partitionsCol := ps.client.Database(ps.cfg.MongoDB.Connection.Database).Collection(ps.getPartitionsCollectionName())
 
 	filter := bson.M{"_id": partitionID}
 	var assignment bson.M
@@ -961,6 +961,10 @@ func (ps *partitionStream) verifyPartitionOwnership(ctx context.Context, partiti
 
 	logger.Log.Debug("Partition assignment invalid format - partitionId: %d", partitionID)
 	return false
+}
+
+func (ps *partitionStream) getPartitionsCollectionName() string {
+	return fmt.Sprintf("%s_%s", ps.cfg.Partition.PartitionsCollection, ps.cfg.Partition.ConsumerGroup)
 }
 
 func (ps *partitionStream) buildPartitionedChangeStreamPipeline(partitionID int) []bson.D {

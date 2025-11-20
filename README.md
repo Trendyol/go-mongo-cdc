@@ -66,6 +66,7 @@ func main() {
 		BootstrapQueryBatchSize: 5000,
 	},
 		Partition: config.PartitionConfig{
+			ConsumerGroup:          "myapp",
 			HeartbeatInterval:      10 * time.Second,
 			WorkerTimeout:          90 * time.Second,
 			RebalanceCheckInterval: 10 * time.Second,
@@ -170,14 +171,15 @@ $ go get github.com/Trendyol/go-mongo-cdc
 
 ### Partition Configuration
 
-| Variable                           | Type          | Required | Default               | Description                                                                                                                                                                                                                                                         |
-|------------------------------------|---------------|----------|-----------------------|---------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------|
-| `partition.heartbeatInterval`      | time.Duration | no       | 10s                   | Worker heartbeat interval                                                                                                                                                                                                                                           |
-| `partition.workerTimeout`          | time.Duration | no       | 90s                   | Worker timeout duration                                                                                                                                                                                                                                             |
-| `partition.workersCollection`      | string        | no       | workers               | Workers collection name                                                                                                                                                                                                                                             |
-| `partition.partitionsCollection`   | string        | no       | partition_assignments | Partition assignments collection                                                                                                                                                                                                                                    |
-| `partition.rebalanceCheckInterval` | time.Duration | no       | 10s                   | Partition rebalance check interval                                                                                                                                                                                                                                  |
-| `partition.totalPartition`         | int           | no       | 15                    | Total number of partitions. **Important:** This value is stored on first initialization and cannot be changed afterwards. Changing this value after initialization will cause system startup failures as it disrupts partition distribution balance across workers. |
+| Variable                           | Type          | Required | Default               | Description                                                                                                                                                                                                                                                                                                                    |
+|------------------------------------|---------------|----------|-----------------------|--------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------|
+| `partition.heartbeatInterval`      | time.Duration | no       | 10s                   | Worker heartbeat interval                                                                                                                                                                                                                                                                                                      |
+| `partition.workerTimeout`          | time.Duration | no       | 90s                   | Worker timeout duration                                                                                                                                                                                                                                                                                                        |
+| `partition.workersCollection`      | string        | no       | workers               | Workers collection name                                                                                                                                                                                                                                                                                                        |
+| `partition.partitionsCollection`   | string        | no       | partition_assignments | Partition assignments collection                                                                                                                                                                                                                                                                                               |
+| `partition.rebalanceCheckInterval` | time.Duration | no       | 10s                   | Partition rebalance check interval                                                                                                                                                                                                                                                                                             |
+| `partition.totalPartition`         | int           | no       | 15                    | Total number of partitions. **Important:** This value is stored on first initialization and cannot be changed afterwards. Changing this value after initialization will cause system startup failures as it disrupts partition distribution balance across workers.                                                            |
+| `partition.consumerGroup`          | string        | **yes**  | -                     | Unique consumer group name for this CDC application. Each CDC application monitoring the same MongoDB collection must use a different consumer group name (e.g., `elasticsearch`, `kafka`, `myapp`). Collection names will be suffixed with the consumer group (e.g., `workers_elasticsearch`, `partition_assignments_kafka`). |
 
 ### Logger Configuration
 
@@ -222,6 +224,7 @@ cdcconfig:
     totalPartition: 15
     workersCollection: "workers"
     partitionsCollection: "partition_assignments"
+    consumerGroup: "myapp"
 
   logger:
     logLevel: "debug"

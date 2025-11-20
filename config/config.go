@@ -77,6 +77,7 @@ type PartitionConfig struct {
 	PartitionsCollection   string        `json:"partitionsCollection" yaml:"partitionsCollection"`
 	RebalanceCheckInterval time.Duration `json:"rebalanceCheckInterval" yaml:"rebalanceCheckInterval"`
 	TotalPartition         int           `json:"totalPartition" yaml:"totalPartition"`
+	ConsumerGroup          string        `json:"consumerGroup" yaml:"consumerGroup"`
 }
 
 func (c *Config) SetDefault() {
@@ -167,6 +168,11 @@ func (c *Config) Validate() error {
 	if err := c.MongoDB.Validate(); err != nil {
 		return fmt.Errorf("mongodb config validation failed: %w", err)
 	}
+
+	if err := c.Partition.Validate(); err != nil {
+		return fmt.Errorf("partition config validation failed: %w", err)
+	}
+
 	return nil
 }
 
@@ -202,6 +208,14 @@ func (cp *ConnectionPool) Validate() error {
 	if cp.MinPoolSize > cp.MaxPoolSize {
 		return fmt.Errorf("minPoolSize (%d) cannot be greater than maxPoolSize (%d)",
 			cp.MinPoolSize, cp.MaxPoolSize)
+	}
+
+	return nil
+}
+
+func (p *PartitionConfig) Validate() error {
+	if isEmpty(p.ConsumerGroup) {
+		return fmt.Errorf("consumerGroup is required. Please specify a unique consumer group name for this CDC application (e.g., 'elasticsearch', 'kafka', 'myapp')")
 	}
 
 	return nil

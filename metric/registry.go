@@ -47,12 +47,18 @@ func (r *registry) StartMetricsServer(ctx context.Context, port int) error {
 
 	mux.HandleFunc("/health", func(w http.ResponseWriter, req *http.Request) {
 		w.WriteHeader(http.StatusOK)
-		w.Write([]byte("OK"))
+		_, err := w.Write([]byte("OK"))
+		if err != nil {
+			return
+		}
 	})
 
 	mux.HandleFunc("/ready", func(w http.ResponseWriter, req *http.Request) {
 		w.WriteHeader(http.StatusOK)
-		w.Write([]byte("Ready"))
+		_, err := w.Write([]byte("Ready"))
+		if err != nil {
+			return
+		}
 	})
 
 	r.server = &http.Server{

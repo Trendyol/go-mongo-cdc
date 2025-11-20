@@ -6,13 +6,11 @@ import (
 	"github.com/Trendyol/go-mongo-cdc/logger"
 
 	cdc "github.com/Trendyol/go-mongo-cdc"
-
-	"log"
-	"time"
-
 	"github.com/Trendyol/go-mongo-cdc/config"
 	"github.com/Trendyol/go-mongo-cdc/mongo/message"
 	"github.com/Trendyol/go-mongo-cdc/stream"
+	"log"
+	"time"
 )
 
 func main() {

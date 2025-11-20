@@ -71,9 +71,9 @@ func NewManager(workerID string, client connection.Client, database string, cfg 
 
 func (m *manager) Initialize(ctx context.Context) error {
 	db := m.client.Database(m.database)
-	m.workersCol = db.Collection(m.config.WorkersCollection)
-	m.partitionsCol = db.Collection(m.config.PartitionsCollection)
-	m.metadataCol = db.Collection("partition_metadata")
+	m.workersCol = db.Collection(m.getCollectionName(m.config.WorkersCollection))
+	m.partitionsCol = db.Collection(m.getCollectionName(m.config.PartitionsCollection))
+	m.metadataCol = db.Collection(m.getCollectionName("partition_metadata"))
 
 	if err := m.validateAndStoreTotalPartition(ctx); err != nil {
 		return fmt.Errorf("failed to validate totalPartition: %w", err)
@@ -99,15 +99,20 @@ func (m *manager) Initialize(ctx context.Context) error {
 	m.wg.Add(1)
 	go m.runRebalanceMonitor()
 
-	logger.Log.Info("Partition manager initialized - workerId: %s, totalPartitions: %d", m.workerID, m.config.TotalPartition)
+	logger.Log.Info("Partition manager initialized - workerId: %s, consumerGroup: %s, totalPartitions: %d", m.workerID, m.config.ConsumerGroup, m.config.TotalPartition)
 
 	return nil
+}
+
+func (m *manager) getCollectionName(baseName string) string {
+	return fmt.Sprintf("%s_%s", baseName, m.config.ConsumerGroup)
 }
 
 func (m *manager) validateAndStoreTotalPartition(ctx context.Context) error {
 	type Metadata struct {
 		ID             string `bson:"_id"`
 		TotalPartition int    `bson:"totalPartition"`
+		ConsumerGroup  string `bson:"consumerGroup"`
 	}
 
 	filter := bson.M{"_id": "totalPartition"}
@@ -118,12 +123,13 @@ func (m *manager) validateAndStoreTotalPartition(ctx context.Context) error {
 		metadata := Metadata{
 			ID:             "totalPartition",
 			TotalPartition: m.config.TotalPartition,
+			ConsumerGroup:  m.config.ConsumerGroup,
 		}
 		_, insertErr := m.metadataCol.InsertOne(ctx, metadata)
 		if insertErr != nil {
 			return fmt.Errorf("failed to store initial totalPartition: %w", insertErr)
 		}
-		logger.Log.Debug("Stored initial totalPartition: %d", m.config.TotalPartition)
+		logger.Log.Debug("Stored initial totalPartition: %d for consumerGroup: %s", m.config.TotalPartition, m.config.ConsumerGroup)
 		return nil
 	}
 
@@ -135,7 +141,7 @@ func (m *manager) validateAndStoreTotalPartition(ctx context.Context) error {
 		return fmt.Errorf("totalPartition cannot be changed after initial setup - stored: %d, config: %d", existing.TotalPartition, m.config.TotalPartition)
 	}
 
-	logger.Log.Debug("totalPartition validation passed: %d", m.config.TotalPartition)
+	logger.Log.Debug("totalPartition validation passed: %d for consumerGroup: %s", m.config.TotalPartition, m.config.ConsumerGroup)
 	return nil
 }
 
