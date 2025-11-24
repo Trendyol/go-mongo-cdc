@@ -68,6 +68,8 @@ type CheckpointConfig struct {
 	BootstrapSaveCount      int           `json:"bootstrapSaveCount" yaml:"bootstrapSaveCount"`
 	BootstrapSaveInterval   time.Duration `json:"bootstrapSaveInterval" yaml:"bootstrapSaveInterval"`
 	BootstrapQueryBatchSize int32         `json:"bootstrapQueryBatchSize" yaml:"bootstrapQueryBatchSize"`
+	BootstrapIDFetchSize    int           `json:"bootstrapIDFetchSize" yaml:"bootstrapIDFetchSize"`
+	BootstrapPrefetchBatch  int           `json:"bootstrapPrefetchBatch" yaml:"bootstrapPrefetchBatch"`
 	IdleHeartbeatInterval   time.Duration `json:"idleHeartbeatInterval" yaml:"idleHeartbeatInterval"`
 	MaxIdleTime             time.Duration `json:"maxIdleTime" yaml:"maxIdleTime"`
 }
@@ -143,6 +145,12 @@ func (c *Config) setDefaultCheckpoint() {
 	}
 	if c.Checkpoint.BootstrapQueryBatchSize == 0 {
 		c.Checkpoint.BootstrapQueryBatchSize = 2500
+	}
+	if c.Checkpoint.BootstrapIDFetchSize == 0 {
+		c.Checkpoint.BootstrapIDFetchSize = 10000
+	}
+	if c.Checkpoint.BootstrapPrefetchBatch == 0 {
+		c.Checkpoint.BootstrapPrefetchBatch = 3
 	}
 	if c.Checkpoint.IdleHeartbeatInterval == 0 {
 		c.Checkpoint.IdleHeartbeatInterval = 3 * time.Minute

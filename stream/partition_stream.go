@@ -535,18 +535,12 @@ func (ps *partitionStream) runBootstrapWithRetries(worker *streamWorker) error {
 func (ps *partitionStream) bootstrapPartition(worker *streamWorker) error {
 	logger.Log.Debug("Starting bootstrap for partition %d", worker.partitionID)
 
-	bootstrapLastID, filter, err := ps.loadBootstrapStateAndCreateFilter(worker.partitionID)
+	bootstrapLastID, _, err := ps.loadBootstrapStateAndCreateFilter(worker.partitionID)
 	if err != nil {
 		return fmt.Errorf("failed to load bootstrap state for partition %d: %w", worker.partitionID, err)
 	}
 
-	cursor, err := ps.queryDocumentsForBootstrap(worker, filter, bootstrapLastID)
-	if err != nil {
-		return err
-	}
-	defer cursor.Close(worker.ctx)
-
-	return ps.iterateAndProcessBootstrapCursor(worker, cursor)
+	return ps.bootstrapPartitionOptimized(worker, bootstrapLastID)
 }
 
 func (ps *partitionStream) loadBootstrapStateAndCreateFilter(partitionID int) (interface{}, bson.D, error) {
@@ -571,6 +565,299 @@ func (ps *partitionStream) loadBootstrapStateAndCreateFilter(partitionID int) (i
 	}
 
 	return bootstrapLastID, filter, nil
+}
+
+func (ps *partitionStream) bootstrapPartitionOptimized(worker *streamWorker, bootstrapLastID interface{}) error {
+	logger.Log.Debug("Starting optimized bootstrap for partition %d", worker.partitionID)
+
+	processState := &bootstrapProcessState{
+		bootstrapCompleted: false,
+	}
+
+	worker.bootstrapStateMutex.Lock()
+	worker.bootstrapState = processState
+	worker.bootstrapStateMutex.Unlock()
+
+	defer func() {
+		worker.bootstrapStateMutex.Lock()
+		worker.bootstrapState = nil
+		worker.bootstrapStateMutex.Unlock()
+	}()
+
+	if ps.cfg.Checkpoint.Type == config.CheckpointTypeAuto {
+		bootstrapCtx, bootstrapCancel := context.WithCancel(worker.ctx)
+		defer bootstrapCancel()
+		bootstrapTicker := time.NewTicker(ps.cfg.Checkpoint.BootstrapSaveInterval)
+		defer bootstrapTicker.Stop()
+		go ps.startPeriodicBootstrapCommit(bootstrapCtx, worker, processState, bootstrapTicker)
+		defer ps.saveFinalBootstrapProgressOnInterruption(worker, processState)
+	}
+
+	idBatchSize := ps.cfg.Checkpoint.BootstrapIDFetchSize
+	if idBatchSize == 0 {
+		idBatchSize = 10000
+	}
+	prefetchBatches := ps.cfg.Checkpoint.BootstrapPrefetchBatch
+	if prefetchBatches == 0 {
+		prefetchBatches = 3
+	}
+	lastProcessedID := bootstrapLastID
+
+	idBatchChan := make(chan []interface{}, prefetchBatches)
+	errChan := make(chan error, 1)
+
+	go func() {
+		defer close(idBatchChan)
+		currentLastID := lastProcessedID
+		for {
+			select {
+			case <-worker.ctx.Done():
+				errChan <- worker.ctx.Err()
+				return
+			default:
+			}
+
+			matchingIDs, hasMore, err := ps.fetchMatchingIDsBatch(worker.ctx, worker.partitionID, currentLastID, idBatchSize)
+			if err != nil {
+				errChan <- fmt.Errorf("failed to fetch matching IDs: %w", err)
+				return
+			}
+
+			if len(matchingIDs) == 0 {
+				return
+			}
+
+			select {
+			case idBatchChan <- matchingIDs:
+				currentLastID = matchingIDs[len(matchingIDs)-1]
+				if !hasMore {
+					return
+				}
+			case <-worker.ctx.Done():
+				errChan <- worker.ctx.Err()
+				return
+			}
+		}
+	}()
+
+	for idBatch := range idBatchChan {
+		select {
+		case err := <-errChan:
+			return err
+		default:
+		}
+
+		if err := ps.processIDsBatch(worker, idBatch, processState); err != nil {
+			return err
+		}
+
+		lastProcessedID = idBatch[len(idBatch)-1]
+	}
+
+	select {
+	case err := <-errChan:
+		if err != nil {
+			return err
+		}
+	default:
+	}
+
+	return ps.finalizeBootstrapAndClearCheckpoint(worker, processState)
+}
+
+func (ps *partitionStream) fetchMatchingIDsBatch(
+	ctx context.Context,
+	partitionID int,
+	lastProcessedID interface{},
+	batchSize int,
+) ([]interface{}, bool, error) {
+	pipeline := ps.buildOptimizedBootstrapPipeline(partitionID, lastProcessedID, batchSize)
+
+	opts := options.Aggregate().
+		SetAllowDiskUse(true).
+		SetBatchSize(int32(batchSize))
+
+	cursor, err := ps.collection.GetCollection().Aggregate(ctx, pipeline, opts)
+	if err != nil {
+		return nil, false, err
+	}
+	defer cursor.Close(ctx)
+
+	matchingIDs := make([]interface{}, 0, batchSize)
+
+	for cursor.Next(ctx) {
+		var doc struct {
+			ID interface{} `bson:"_id"`
+		}
+		if err := cursor.Decode(&doc); err != nil {
+			return nil, false, err
+		}
+
+		matchingIDs = append(matchingIDs, doc.ID)
+	}
+
+	if err := cursor.Err(); err != nil {
+		return nil, false, err
+	}
+
+	hasMore := len(matchingIDs) == batchSize
+
+	logger.Log.Debug(
+		"Fetched ID batch (aggregation) - partitionId: %d, matched: %d, hasMore: %v",
+		partitionID,
+		len(matchingIDs),
+		hasMore,
+	)
+
+	return matchingIDs, hasMore, nil
+}
+
+func (ps *partitionStream) buildOptimizedBootstrapPipeline(
+	partitionID int,
+	lastProcessedID interface{},
+	limit int,
+) []bson.D {
+	pipeline := []bson.D{}
+
+	matchStage := bson.D{}
+	if lastProcessedID != nil {
+		matchStage = bson.D{
+			{Key: "$match", Value: bson.D{
+				{Key: "_id", Value: bson.D{{Key: "$gt", Value: lastProcessedID}}},
+			}},
+		}
+		pipeline = append(pipeline, matchStage)
+	}
+
+	pipeline = append(pipeline, bson.D{
+		{Key: "$sort", Value: bson.D{{Key: "_id", Value: 1}}},
+	})
+
+	pipeline = append(pipeline, bson.D{
+		{Key: "$project", Value: bson.D{
+			{Key: "_id", Value: 1},
+			{Key: "partitionHash", Value: bson.D{
+				{Key: "$mod", Value: bson.A{
+					ps.buildPartitioningHashExpression("$_id"),
+					ps.cfg.Partition.TotalPartition,
+				}},
+			}},
+		}},
+	})
+
+	pipeline = append(pipeline, bson.D{
+		{Key: "$match", Value: bson.D{
+			{Key: "partitionHash", Value: partitionID},
+		}},
+	})
+
+	pipeline = append(pipeline, bson.D{
+		{Key: "$project", Value: bson.D{
+			{Key: "_id", Value: 1},
+		}},
+	})
+
+	pipeline = append(pipeline, bson.D{
+		{Key: "$limit", Value: limit},
+	})
+
+	return pipeline
+}
+
+func (ps *partitionStream) doesIDMatchPartition(id interface{}, partitionID int) bool {
+	hashValue := ps.calculateHashForID(id)
+	return int(hashValue%int64(ps.cfg.Partition.TotalPartition)) == partitionID
+}
+
+func (ps *partitionStream) calculateHashForID(id interface{}) int64 {
+	switch v := id.(type) {
+	case int:
+		return int64(v)
+	case int32:
+		return int64(v)
+	case int64:
+		return v
+	case string:
+		if ps.isNumericString(v) {
+			var num int64
+			fmt.Sscanf(v, "%d", &num)
+			return num
+		}
+		return ps.calculateStringHash(v)
+	case primitive.ObjectID:
+		return ps.calculateStringHash(v.Hex())
+	default:
+		return ps.calculateStringHash(fmt.Sprintf("%v", v))
+	}
+}
+
+func (ps *partitionStream) calculateStringHash(s string) int64 {
+	var hash1 int64 = 5381
+	var hash2 int64 = 0
+	var hash3 int64 = 0
+
+	length := len(s)
+
+	for i := 0; i < length; i++ {
+		char := int64(s[i])
+		hash1 = ((hash1 << 5) + hash1) + char
+		hash2 = (hash2*31 + char) % 2147483647
+		hash3 += char * (int64(i)*37 + 1)
+	}
+
+	finalHash := (hash1 * 7) + (hash2 * 3) + (hash3 * 11)
+	finalHash += int64(length) * 17
+
+	if length > 0 {
+		finalHash += int64(s[0]) * 101
+	}
+	if length > 1 {
+		finalHash += int64(s[length-1]) * 103
+	}
+
+	if finalHash < 0 {
+		finalHash = -finalHash
+	}
+	if finalHash == 0 {
+		finalHash = 1
+	}
+
+	return finalHash
+}
+
+func (ps *partitionStream) processIDsBatch(
+	worker *streamWorker,
+	ids []interface{},
+	state *bootstrapProcessState,
+) error {
+	filter := bson.M{"_id": bson.M{"$in": ids}}
+
+	cursor, err := ps.collection.Find(worker.ctx, filter)
+	if err != nil {
+		return err
+	}
+	defer cursor.Close(worker.ctx)
+
+	for cursor.Next(worker.ctx) {
+		var document bson.M
+		if err := cursor.Decode(&document); err != nil {
+			logger.Log.Error("Error decoding document: %v", err)
+			continue
+		}
+
+		syntheticEvent := ps.createInsertEventFromDocument(document)
+
+		if err := ps.processBootstrapEvent(worker, syntheticEvent, state); err != nil {
+			if errors.Is(err, context.Canceled) || strings.Contains(err.Error(), "worker is stopping") {
+				logger.Log.Debug("Bootstrap event skipped due to shutdown - documentId: %v", syntheticEvent.DocumentKey.ID)
+			} else {
+				logger.Log.Error("Error processing synthetic event - documentId: %v, error: %v", syntheticEvent.DocumentKey.ID, err)
+			}
+			return err
+		}
+	}
+
+	return cursor.Err()
 }
 
 func (ps *partitionStream) queryDocumentsForBootstrap(

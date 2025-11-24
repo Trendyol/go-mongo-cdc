@@ -69,6 +69,7 @@ type Collection interface {
 	DeleteMany(ctx context.Context, filter interface{}, opts ...*options.DeleteOptions) (DeleteResult, error)
 	CountDocuments(ctx context.Context, filter interface{}, opts ...*options.CountOptions) (int64, error)
 	Indexes() IndexView
+	GetCollection() *mongo.Collection
 }
 
 type ChangeStream interface {
@@ -152,6 +153,7 @@ func NewMongoClient(cfg config.MongoDB) (Client, error) {
 	clientOpts := options.Client().ApplyURI("mongodb://" + cfg.Connection.URI)
 	clientOpts.SetRetryWrites(true)
 	clientOpts.SetRetryReads(true)
+	clientOpts.SetReadPreference(readpref.SecondaryPreferred())
 
 	if cfg.Connection.Username != "" && cfg.Connection.Password != "" {
 		clientOpts.SetAuth(options.Credential{
@@ -310,6 +312,10 @@ func (c *mongoCollectionImpl) CountDocuments(
 
 func (c *mongoCollectionImpl) Indexes() IndexView {
 	return &mongoIndexViewImpl{iv: c.coll.Indexes()}
+}
+
+func (c *mongoCollectionImpl) GetCollection() *mongo.Collection {
+	return c.coll
 }
 
 func (cs *mongoChangeStreamImpl) Next(ctx context.Context) bool {
