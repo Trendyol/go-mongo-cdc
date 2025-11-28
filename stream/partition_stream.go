@@ -20,7 +20,6 @@ import (
 	"github.com/Trendyol/go-mongo-cdc/partition"
 	"go.mongodb.org/mongo-driver/bson"
 	"go.mongodb.org/mongo-driver/bson/primitive"
-	"go.mongodb.org/mongo-driver/mongo"
 	"go.mongodb.org/mongo-driver/mongo/options"
 )
 
@@ -535,36 +534,24 @@ func (ps *partitionStream) runBootstrapWithRetries(worker *streamWorker) error {
 func (ps *partitionStream) bootstrapPartition(worker *streamWorker) error {
 	logger.Log.Debug("Starting bootstrap for partition %d", worker.partitionID)
 
-	bootstrapLastID, _, err := ps.loadBootstrapStateAndCreateFilter(worker.partitionID)
+	bootstrapLastID, err := ps.getBootstrapProgressWithRetry(worker.partitionID, 3)
 	if err != nil {
+		logger.Log.Error("Failed to get bootstrap progress after retries - partitionId: %d, error: %v", worker.partitionID, err)
 		return fmt.Errorf("failed to load bootstrap state for partition %d: %w", worker.partitionID, err)
 	}
 
-	return ps.bootstrapPartitionOptimized(worker, bootstrapLastID)
-}
-
-func (ps *partitionStream) loadBootstrapStateAndCreateFilter(partitionID int) (interface{}, bson.D, error) {
-	bootstrapLastID, err := ps.getBootstrapProgressWithRetry(partitionID, 3)
-	if err != nil {
-		logger.Log.Error("Failed to get bootstrap progress after retries - partitionId: %d, error: %v", partitionID, err)
-		return nil, nil, err
-	}
-
-	filter := ps.buildBootstrapPartitionFilter(partitionID)
 	if bootstrapLastID != nil {
-		comparisonFilter := ps.buildResumeAfterIdFilter("_id", bootstrapLastID)
-		filter = append(filter, comparisonFilter...)
 		logger.Log.Info(
 			"Resuming bootstrap from saved progress - partitionId: %d, lastId: %v (type: %T)",
-			partitionID,
+			worker.partitionID,
 			bootstrapLastID,
 			bootstrapLastID,
 		)
 	} else {
-		logger.Log.Info("Starting fresh bootstrap - partitionId: %d", partitionID)
+		logger.Log.Info("Starting fresh bootstrap - partitionId: %d", worker.partitionID)
 	}
 
-	return bootstrapLastID, filter, nil
+	return ps.bootstrapPartitionOptimized(worker, bootstrapLastID)
 }
 
 func (ps *partitionStream) bootstrapPartitionOptimized(worker *streamWorker, bootstrapLastID interface{}) error {
@@ -671,11 +658,24 @@ func (ps *partitionStream) fetchMatchingIDsBatch(
 	lastProcessedID interface{},
 	batchSize int,
 ) ([]interface{}, bool, error) {
+	if ps.cfg.Checkpoint.BootstrapMode == config.BootstrapModeClientSide {
+		return ps.fetchMatchingIDsBatchClientSide(ctx, partitionID, lastProcessedID, batchSize)
+	}
+	return ps.fetchMatchingIDsBatchAggregation(ctx, partitionID, lastProcessedID, batchSize)
+}
+
+func (ps *partitionStream) fetchMatchingIDsBatchAggregation(
+	ctx context.Context,
+	partitionID int,
+	lastProcessedID interface{},
+	batchSize int,
+) ([]interface{}, bool, error) {
 	pipeline := ps.buildOptimizedBootstrapPipeline(partitionID, lastProcessedID, batchSize)
 
 	opts := options.Aggregate().
 		SetAllowDiskUse(true).
-		SetBatchSize(int32(batchSize))
+		SetBatchSize(int32(batchSize)).
+		SetHint(bson.D{{Key: "_id", Value: 1}}) // Force _id index usage
 
 	cursor, err := ps.collection.GetCollection().Aggregate(ctx, pipeline, opts)
 	if err != nil {
@@ -705,6 +705,70 @@ func (ps *partitionStream) fetchMatchingIDsBatch(
 	logger.Log.Debug(
 		"Fetched ID batch (aggregation) - partitionId: %d, matched: %d, hasMore: %v",
 		partitionID,
+		len(matchingIDs),
+		hasMore,
+	)
+
+	return matchingIDs, hasMore, nil
+}
+
+func (ps *partitionStream) fetchMatchingIDsBatchClientSide(
+	ctx context.Context,
+	partitionID int,
+	lastProcessedID interface{},
+	batchSize int,
+) ([]interface{}, bool, error) {
+	filter := bson.D{}
+	if lastProcessedID != nil {
+		filter = ps.buildResumeAfterIdFilter("_id", lastProcessedID)
+	}
+
+	// Scan up to batchSize * totalPartition documents to find batchSize matching IDs
+	scanLimit := int64(batchSize * ps.cfg.Partition.TotalPartition)
+	opts := options.Find().
+		SetSort(bson.D{{Key: "_id", Value: 1}}).
+		SetProjection(bson.D{{Key: "_id", Value: 1}}).
+		SetLimit(scanLimit).
+		SetBatchSize(int32(batchSize * 10))
+
+	cursor, err := ps.collection.Find(ctx, filter, opts)
+	if err != nil {
+		return nil, false, err
+	}
+	defer cursor.Close(ctx)
+
+	matchingIDs := make([]interface{}, 0, batchSize)
+	totalScanned := 0
+
+	for cursor.Next(ctx) {
+		totalScanned++
+
+		var doc struct {
+			ID interface{} `bson:"_id"`
+		}
+		if err := cursor.Decode(&doc); err != nil {
+			return nil, false, err
+		}
+
+		if ps.doesIDMatchPartition(doc.ID, partitionID) {
+			matchingIDs = append(matchingIDs, doc.ID)
+			if len(matchingIDs) >= batchSize {
+				break // Early exit when we have enough
+			}
+		}
+	}
+
+	if err := cursor.Err(); err != nil {
+		return nil, false, err
+	}
+
+	// hasMore if we hit scan limit or found exactly batchSize matches
+	hasMore := int64(totalScanned) >= scanLimit || len(matchingIDs) == batchSize
+
+	logger.Log.Debug(
+		"Fetched ID batch (client-side) - partitionId: %d, scanned: %d, matched: %d, hasMore: %v",
+		partitionID,
+		totalScanned,
 		len(matchingIDs),
 		hasMore,
 	)
@@ -791,6 +855,18 @@ func (ps *partitionStream) calculateHashForID(id interface{}) int64 {
 	}
 }
 
+func (ps *partitionStream) isNumericString(s string) bool {
+	if len(s) == 0 {
+		return false
+	}
+	for _, char := range s {
+		if char < '0' || char > '9' {
+			return false
+		}
+	}
+	return true
+}
+
 func (ps *partitionStream) calculateStringHash(s string) int64 {
 	var hash1 int64 = 5381
 	var hash2 int64 = 0
@@ -832,7 +908,8 @@ func (ps *partitionStream) processIDsBatch(
 ) error {
 	filter := bson.M{"_id": bson.M{"$in": ids}}
 
-	cursor, err := ps.collection.Find(worker.ctx, filter)
+	opts := options.Find().SetSort(bson.D{{Key: "_id", Value: 1}})
+	cursor, err := ps.collection.Find(worker.ctx, filter, opts)
 	if err != nil {
 		return err
 	}
@@ -858,125 +935,6 @@ func (ps *partitionStream) processIDsBatch(
 	}
 
 	return cursor.Err()
-}
-
-func (ps *partitionStream) queryDocumentsForBootstrap(
-	worker *streamWorker,
-	filter bson.D,
-	bootstrapLastID interface{},
-) (connection.Cursor, error) {
-	useNumericStringSorting := ps.shouldUseNumericStringSorting(worker, bootstrapLastID)
-
-	batchSize := ps.cfg.Checkpoint.BootstrapQueryBatchSize
-
-	opts := options.Find().
-		SetSort(bson.D{{Key: "_id", Value: 1}}).
-		SetBatchSize(batchSize).
-		SetNoCursorTimeout(false).
-		SetMaxTime(5 * time.Minute)
-
-	if useNumericStringSorting {
-		opts.SetCollation(&options.Collation{
-			Locale:          "en",
-			NumericOrdering: true,
-		})
-		logger.Log.Debug("Using collation-based numeric string sorting - partitionId: %d", worker.partitionID)
-	}
-
-	return ps.collection.Find(worker.ctx, filter, opts)
-}
-
-func (ps *partitionStream) shouldUseNumericStringSorting(worker *streamWorker, bootstrapLastID interface{}) bool {
-	if bootstrapLastID != nil {
-		if lastIDStr, ok := bootstrapLastID.(string); ok && ps.isNumericString(lastIDStr) {
-			logger.Log.Debug("Resuming with numeric string ID '%s' - using mathematical sorting", lastIDStr)
-			return true
-		}
-		return false
-	}
-
-	isNumericStringCollection, err := ps.detectNumericStringCollection(worker.ctx)
-	if err != nil {
-		logger.Log.Warn("Failed to detect ID type, using default sorting - partitionId: %d, error: %v", worker.partitionID, err)
-		return false
-	}
-
-	if isNumericStringCollection {
-		logger.Log.Debug("Detected numeric string IDs in collection - using mathematical sorting for fresh bootstrap")
-		return true
-	}
-
-	return false
-}
-
-func (ps *partitionStream) detectNumericStringCollection(ctx context.Context) (bool, error) {
-	var doc struct {
-		ID interface{} `bson:"_id"`
-	}
-
-	err := ps.collection.FindOne(ctx, bson.D{}).Decode(&doc)
-	if err != nil {
-		if err == mongo.ErrNoDocuments {
-			return false, nil
-		}
-		return false, fmt.Errorf("failed to sample document: %w", err)
-	}
-
-	idStr, ok := doc.ID.(string)
-	if !ok {
-		return false, nil
-	}
-
-	return ps.isNumericString(idStr), nil
-}
-
-func (ps *partitionStream) isNumericString(s string) bool {
-	if len(s) == 0 {
-		return false
-	}
-	for _, char := range s {
-		if char < '0' || char > '9' {
-			return false
-		}
-	}
-	return true
-}
-
-func (ps *partitionStream) iterateAndProcessBootstrapCursor(worker *streamWorker, cursor connection.Cursor) error {
-	processState := &bootstrapProcessState{
-		bootstrapCompleted: false,
-	}
-
-	worker.bootstrapStateMutex.Lock()
-	worker.bootstrapState = processState
-	worker.bootstrapStateMutex.Unlock()
-
-	defer func() {
-		worker.bootstrapStateMutex.Lock()
-		worker.bootstrapState = nil
-		worker.bootstrapStateMutex.Unlock()
-	}()
-
-	if ps.cfg.Checkpoint.Type == config.CheckpointTypeAuto {
-		bootstrapCtx, bootstrapCancel := context.WithCancel(worker.ctx)
-		defer bootstrapCancel()
-		bootstrapTicker := time.NewTicker(ps.cfg.Checkpoint.BootstrapSaveInterval)
-		defer bootstrapTicker.Stop()
-		go ps.startPeriodicBootstrapCommit(bootstrapCtx, worker, processState, bootstrapTicker)
-		defer ps.saveFinalBootstrapProgressOnInterruption(worker, processState)
-	}
-
-	for cursor.Next(worker.ctx) {
-		if err := ps.dispatchBootstrapDocumentToListener(worker, cursor, processState); err != nil {
-			return err
-		}
-	}
-
-	if err := cursor.Err(); err != nil {
-		return err
-	}
-
-	return ps.finalizeBootstrapAndClearCheckpoint(worker, processState)
 }
 
 type bootstrapProcessState struct {
@@ -1016,31 +974,6 @@ func (ps *partitionStream) saveFinalBootstrapProgressOnInterruption(worker *stre
 			)
 		}
 	}
-}
-
-func (ps *partitionStream) dispatchBootstrapDocumentToListener(
-	worker *streamWorker,
-	cursor connection.Cursor,
-	state *bootstrapProcessState,
-) error {
-	var document bson.M
-	if err := cursor.Decode(&document); err != nil {
-		logger.Log.Error("Error decoding document: %v", err)
-		return nil
-	}
-
-	syntheticEvent := ps.createInsertEventFromDocument(document)
-
-	if err := ps.processBootstrapEvent(worker, syntheticEvent, state); err != nil {
-		if errors.Is(err, context.Canceled) || strings.Contains(err.Error(), "worker is stopping") {
-			logger.Log.Debug("Bootstrap event skipped due to shutdown - documentId: %v", syntheticEvent.DocumentKey.ID)
-		} else {
-			logger.Log.Error("Error processing synthetic event - documentId: %v, error: %v", syntheticEvent.DocumentKey.ID, err)
-		}
-		return err
-	}
-
-	return nil
 }
 
 func (ps *partitionStream) processBootstrapEvent(worker *streamWorker, event message.ChangeEvent, state *bootstrapProcessState) error {
@@ -1255,20 +1188,6 @@ func (ps *partitionStream) buildPartitionedChangeStreamPipeline(partitionID int)
 				}},
 			}},
 		},
-	}
-}
-
-func (ps *partitionStream) buildBootstrapPartitionFilter(partitionID int) bson.D {
-	return bson.D{
-		{Key: "$expr", Value: bson.D{
-			{Key: "$eq", Value: bson.A{
-				bson.D{{Key: "$mod", Value: bson.A{
-					ps.buildPartitioningHashExpression("$_id"),
-					ps.cfg.Partition.TotalPartition,
-				}}},
-				partitionID,
-			}},
-		}},
 	}
 }
 

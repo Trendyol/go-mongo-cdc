@@ -17,6 +17,11 @@ import (
 
 const CheckpointTypeAuto = "auto"
 
+const (
+	BootstrapModeAggregation = "aggregation"
+	BootstrapModeClientSide  = "client-side"
+)
+
 type Config struct {
 	MongoDB                 MongoDB          `json:"mongodb" yaml:"mongodb"`
 	Metric                  MetricConfig     `json:"metric" yaml:"metric"`
@@ -70,6 +75,7 @@ type CheckpointConfig struct {
 	BootstrapQueryBatchSize int32         `json:"bootstrapQueryBatchSize" yaml:"bootstrapQueryBatchSize"`
 	BootstrapIDFetchSize    int           `json:"bootstrapIDFetchSize" yaml:"bootstrapIDFetchSize"`
 	BootstrapPrefetchBatch  int           `json:"bootstrapPrefetchBatch" yaml:"bootstrapPrefetchBatch"`
+	BootstrapMode           string        `json:"bootstrapMode" yaml:"bootstrapMode"`
 	IdleHeartbeatInterval   time.Duration `json:"idleHeartbeatInterval" yaml:"idleHeartbeatInterval"`
 	MaxIdleTime             time.Duration `json:"maxIdleTime" yaml:"maxIdleTime"`
 }
@@ -151,6 +157,9 @@ func (c *Config) setDefaultCheckpoint() {
 	}
 	if c.Checkpoint.BootstrapPrefetchBatch == 0 {
 		c.Checkpoint.BootstrapPrefetchBatch = 3
+	}
+	if c.Checkpoint.BootstrapMode == "" {
+		c.Checkpoint.BootstrapMode = BootstrapModeAggregation
 	}
 	if c.Checkpoint.IdleHeartbeatInterval == 0 {
 		c.Checkpoint.IdleHeartbeatInterval = 3 * time.Minute
