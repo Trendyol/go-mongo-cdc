@@ -25,37 +25,33 @@ type Manager interface {
 }
 
 type WorkerInfo struct {
+	LastHeartbeat      time.Time `bson:"lastHeartbeat"`
 	ID                 string    `bson:"_id"`
 	AssignedPartitions []int     `bson:"assignedPartitions"`
-	LastHeartbeat      time.Time `bson:"lastHeartbeat"`
 }
 
 type PartitionAssignment struct {
-	PartitionID   int       `bson:"_id"`
-	WorkerID      string    `bson:"workerId"`
 	AssignedAt    time.Time `bson:"assignedAt"`
 	LastHeartbeat time.Time `bson:"lastHeartbeat"`
+	WorkerID      string    `bson:"workerId"`
+	PartitionID   int       `bson:"_id"`
 }
 
 type manager struct {
-	workerID      string
-	client        connection.Client
-	workersCol    connection.Collection
-	partitionsCol connection.Collection
-	metadataCol   connection.Collection
-	config        config.PartitionConfig
-	database      string
-
-	mu                 sync.RWMutex
-	assignedPartitions []int
-	isRunning          bool
-
-	stopCh chan struct{}
-	wg     sync.WaitGroup
-
+	workersCol           connection.Collection
+	partitionsCol        connection.Collection
+	metadataCol          connection.Collection
+	client               connection.Client
+	stopCh               chan struct{}
+	onPartitionsChanged  func(newPartitions []int)
+	workerID             string
+	database             string
+	assignedPartitions   []int
+	config               config.PartitionConfig
+	wg                   sync.WaitGroup
 	lastKnownWorkerCount int
-
-	onPartitionsChanged func(newPartitions []int)
+	mu                   sync.RWMutex
+	isRunning            bool
 }
 
 func NewManager(workerID string, client connection.Client, database string, cfg config.PartitionConfig) Manager {
@@ -116,8 +112,8 @@ func (m *manager) getCollectionName(baseName string) string {
 func (m *manager) validateAndStoreTotalPartition(ctx context.Context) error {
 	type Metadata struct {
 		ID             string `bson:"_id"`
-		TotalPartition int    `bson:"totalPartition"`
 		ConsumerGroup  string `bson:"consumerGroup"`
+		TotalPartition int    `bson:"totalPartition"`
 	}
 
 	filter := bson.M{"_id": "totalPartition"}

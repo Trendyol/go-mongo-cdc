@@ -25,12 +25,12 @@ type Manager interface {
 }
 
 type CheckpointInfo struct {
-	ID              string              `bson:"_id"`
-	PartitionID     int                 `bson:"partitionId"`
-	ResumeToken     []byte              `bson:"resumeToken,omitempty"`
-	LastClusterTime primitive.Timestamp `bson:"lastClusterTime,omitempty"`
 	UpdatedAt       time.Time           `bson:"updatedAt"`
 	BootstrapLastID interface{}         `bson:"bootstrapLastId,omitempty"`
+	ID              string              `bson:"_id"`
+	ResumeToken     []byte              `bson:"resumeToken,omitempty"`
+	PartitionID     int                 `bson:"partitionId"`
+	LastClusterTime primitive.Timestamp `bson:"lastClusterTime,omitempty"`
 	IsBootstrapping bool                `bson:"isBootstrapping"`
 }
 

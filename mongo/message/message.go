@@ -18,13 +18,13 @@ const (
 )
 
 type Message struct {
-	OperationType OperationType       `json:"operationType"`
-	ClusterTime   primitive.Timestamp `json:"clusterTime"`
-	Database      string              `json:"database"`
-	Collection    string              `json:"collection"`
+	EventTime     time.Time           `json:"eventTime"`
 	DocumentID    interface{}         `json:"documentId"`
 	FullDocument  bson.M              `json:"fullDocument,omitempty"`
-	EventTime     time.Time           `json:"eventTime"`
+	OperationType OperationType       `json:"operationType"`
+	Database      string              `json:"database"`
+	Collection    string              `json:"collection"`
+	ClusterTime   primitive.Timestamp `json:"clusterTime"`
 	IsBootstrap   bool                `json:"isBootstrap"`
 }
 

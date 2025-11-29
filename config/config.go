@@ -18,11 +18,11 @@ import (
 const CheckpointTypeAuto = "auto"
 
 type Config struct {
-	MongoDB                 MongoDB          `json:"mongodb" yaml:"mongodb"`
-	Metric                  MetricConfig     `json:"metric" yaml:"metric"`
-	Logger                  LoggerConfig     `json:"logger" yaml:"logger"`
-	Checkpoint              CheckpointConfig `json:"checkpoint" yaml:"checkpoint"`
 	Partition               PartitionConfig  `json:"partition" yaml:"partition"`
+	Logger                  LoggerConfig     `json:"logger" yaml:"logger"`
+	MongoDB                 MongoDB          `json:"mongodb" yaml:"mongodb"`
+	Checkpoint              CheckpointConfig `json:"checkpoint" yaml:"checkpoint"`
+	Metric                  MetricConfig     `json:"metric" yaml:"metric"`
 	GracefulShutdownTimeout time.Duration    `json:"gracefulShutdownTimeout" yaml:"gracefulShutdownTimeout"`
 }
 
@@ -73,13 +73,13 @@ type CheckpointConfig struct {
 }
 
 type PartitionConfig struct {
-	HeartbeatInterval      time.Duration `json:"heartbeatInterval" yaml:"heartbeatInterval"`
-	WorkerTimeout          time.Duration `json:"workerTimeout" yaml:"workerTimeout"`
 	WorkersCollection      string        `json:"workersCollection" yaml:"workersCollection"`
 	PartitionsCollection   string        `json:"partitionsCollection" yaml:"partitionsCollection"`
+	ConsumerGroup          string        `json:"consumerGroup" yaml:"consumerGroup"`
+	HeartbeatInterval      time.Duration `json:"heartbeatInterval" yaml:"heartbeatInterval"`
+	WorkerTimeout          time.Duration `json:"workerTimeout" yaml:"workerTimeout"`
 	RebalanceCheckInterval time.Duration `json:"rebalanceCheckInterval" yaml:"rebalanceCheckInterval"`
 	TotalPartition         int           `json:"totalPartition" yaml:"totalPartition"`
-	ConsumerGroup          string        `json:"consumerGroup" yaml:"consumerGroup"`
 }
 
 func (c *Config) SetDefault() {

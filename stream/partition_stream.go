@@ -37,56 +37,53 @@ type ListenerFunc func(ctx *ListenerContext) error
 
 type ListenerContext struct {
 	Context     context.Context
+	Ack         func()
 	Message     message.Message
 	PartitionID int
-	Ack         func()
 	IsBootstrap bool
 }
 
 type partitionStream struct {
-	client                 connection.Client
-	cfg                    config.Config
+	checkpointManager      checkpoint.Manager
+	database               connection.Database
 	metric                 metric.Metric
-	listener               ListenerFunc
+	ctx                    context.Context
 	collection             connection.Collection
 	changeStreamCollection connection.Collection
-	database               connection.Database
+	client                 connection.Client
+	partitionManager       partition.Manager
+	activeStreams          map[int]*streamWorker
+	listener               ListenerFunc
+	cancel                 context.CancelFunc
 	workerID               string
-
-	partitionManager  partition.Manager
-	checkpointManager checkpoint.Manager
-
-	activeStreams map[int]*streamWorker
-	streamsMutex  sync.RWMutex
-
-	ctx    context.Context
-	cancel context.CancelFunc
-	wg     sync.WaitGroup
+	cfg                    config.Config
+	wg                     sync.WaitGroup
+	streamsMutex           sync.RWMutex
 }
 
 type streamWorker struct {
-	partitionID              int
+	lastEventTime            time.Time
 	stream                   connection.ChangeStream
 	ctx                      context.Context
 	cancel                   context.CancelFunc
-	lastAckedToken           []byte
-	lastClusterTime          *primitive.Timestamp
-	tokenMutex               sync.RWMutex
-	lastEventTime            time.Time
-	ackedEventCount          int
-	inFlightEvents           sync.WaitGroup
-	stopping                 bool
-	stoppingMutex            sync.RWMutex
-	pendingCommitToken       []byte
-	pendingCommitClusterTime *primitive.Timestamp
-	commitMutex              sync.Mutex
 	bootstrapState           *bootstrapProcessState
+	lastClusterTime          *primitive.Timestamp
+	pendingCommitClusterTime *primitive.Timestamp
+	pendingCommitToken       []byte
+	lastAckedToken           []byte
+	inFlightEvents           sync.WaitGroup
+	ackedEventCount          int
+	partitionID              int
+	stoppingMutex            sync.RWMutex
+	tokenMutex               sync.RWMutex
 	bootstrapStateMutex      sync.RWMutex
+	commitMutex              sync.Mutex
+	stopping                 bool
 }
 
 type streamStartInfo struct {
-	resumeToken          []byte
 	startAtOperationTime *primitive.Timestamp
+	resumeToken          []byte
 	shouldBootstrap      bool
 }
 
@@ -102,7 +99,11 @@ func NewPartitionStream(
 	changeStreamCollection := database.CollectionWithReadPref(cfg.MongoDB.Connection.Collection, readpref.Primary())
 
 	partitionManager := partition.NewManager(workerID, client, cfg.MongoDB.Connection.Database, cfg.Partition)
-	checkpointManager := checkpoint.NewManager(client, cfg.MongoDB.Connection.Database, cfg.MongoDB.Connection.Collection, cfg.Partition.ConsumerGroup)
+	checkpointManager := checkpoint.NewManager(
+		client,
+		cfg.MongoDB.Connection.Database,
+		cfg.MongoDB.Connection.Collection,
+		cfg.Partition.ConsumerGroup)
 
 	return &partitionStream{
 		client:                 client,
@@ -580,7 +581,6 @@ func (ps *partitionStream) queryDocumentsForBootstrap(
 	worker *streamWorker,
 	filter bson.D,
 ) (connection.Cursor, error) {
-
 	batchSize := ps.cfg.Checkpoint.BootstrapQueryBatchSize
 
 	opts := options.Find().
@@ -630,11 +630,11 @@ func (ps *partitionStream) iterateAndProcessBootstrapCursor(worker *streamWorker
 }
 
 type bootstrapProcessState struct {
-	bootstrapCompleted     bool
 	pendingCheckpointID    interface{}
 	pendingCheckpointCount int
 	totalProcessedCount    int
 	pendingCheckpointMutex sync.Mutex
+	bootstrapCompleted     bool
 }
 
 func (ps *partitionStream) saveFinalBootstrapProgressOnInterruption(worker *streamWorker, state *bootstrapProcessState) {
