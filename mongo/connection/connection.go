@@ -152,6 +152,7 @@ func NewMongoClient(cfg config.MongoDB) (Client, error) {
 	clientOpts := options.Client().ApplyURI("mongodb://" + cfg.Connection.URI)
 	clientOpts.SetRetryWrites(true)
 	clientOpts.SetRetryReads(true)
+	clientOpts.SetReadPreference(readpref.SecondaryPreferred())
 
 	if cfg.Connection.Username != "" && cfg.Connection.Password != "" {
 		clientOpts.SetAuth(options.Credential{

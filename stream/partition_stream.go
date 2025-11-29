@@ -20,7 +20,6 @@ import (
 	"github.com/Trendyol/go-mongo-cdc/partition"
 	"go.mongodb.org/mongo-driver/bson"
 	"go.mongodb.org/mongo-driver/bson/primitive"
-	"go.mongodb.org/mongo-driver/mongo"
 	"go.mongodb.org/mongo-driver/mongo/options"
 )
 
@@ -535,12 +534,12 @@ func (ps *partitionStream) runBootstrapWithRetries(worker *streamWorker) error {
 func (ps *partitionStream) bootstrapPartition(worker *streamWorker) error {
 	logger.Log.Debug("Starting bootstrap for partition %d", worker.partitionID)
 
-	bootstrapLastID, filter, err := ps.loadBootstrapStateAndCreateFilter(worker.partitionID)
+	filter, err := ps.loadBootstrapStateAndCreateFilter(worker.partitionID)
 	if err != nil {
 		return fmt.Errorf("failed to load bootstrap state for partition %d: %w", worker.partitionID, err)
 	}
 
-	cursor, err := ps.queryDocumentsForBootstrap(worker, filter, bootstrapLastID)
+	cursor, err := ps.queryDocumentsForBootstrap(worker, filter)
 	if err != nil {
 		return err
 	}
@@ -549,11 +548,11 @@ func (ps *partitionStream) bootstrapPartition(worker *streamWorker) error {
 	return ps.iterateAndProcessBootstrapCursor(worker, cursor)
 }
 
-func (ps *partitionStream) loadBootstrapStateAndCreateFilter(partitionID int) (interface{}, bson.D, error) {
+func (ps *partitionStream) loadBootstrapStateAndCreateFilter(partitionID int) (bson.D, error) {
 	bootstrapLastID, err := ps.getBootstrapProgressWithRetry(partitionID, 3)
 	if err != nil {
 		logger.Log.Error("Failed to get bootstrap progress after retries - partitionId: %d, error: %v", partitionID, err)
-		return nil, nil, err
+		return nil, err
 	}
 
 	filter := ps.buildBootstrapPartitionFilter(partitionID)
@@ -570,15 +569,13 @@ func (ps *partitionStream) loadBootstrapStateAndCreateFilter(partitionID int) (i
 		logger.Log.Info("Starting fresh bootstrap - partitionId: %d", partitionID)
 	}
 
-	return bootstrapLastID, filter, nil
+	return filter, nil
 }
 
 func (ps *partitionStream) queryDocumentsForBootstrap(
 	worker *streamWorker,
 	filter bson.D,
-	bootstrapLastID interface{},
 ) (connection.Cursor, error) {
-	useNumericStringSorting := ps.shouldUseNumericStringSorting(worker, bootstrapLastID)
 
 	batchSize := ps.cfg.Checkpoint.BootstrapQueryBatchSize
 
@@ -588,71 +585,7 @@ func (ps *partitionStream) queryDocumentsForBootstrap(
 		SetNoCursorTimeout(false).
 		SetMaxTime(5 * time.Minute)
 
-	if useNumericStringSorting {
-		opts.SetCollation(&options.Collation{
-			Locale:          "en",
-			NumericOrdering: true,
-		})
-		logger.Log.Debug("Using collation-based numeric string sorting - partitionId: %d", worker.partitionID)
-	}
-
 	return ps.collection.Find(worker.ctx, filter, opts)
-}
-
-func (ps *partitionStream) shouldUseNumericStringSorting(worker *streamWorker, bootstrapLastID interface{}) bool {
-	if bootstrapLastID != nil {
-		if lastIDStr, ok := bootstrapLastID.(string); ok && ps.isNumericString(lastIDStr) {
-			logger.Log.Debug("Resuming with numeric string ID '%s' - using mathematical sorting", lastIDStr)
-			return true
-		}
-		return false
-	}
-
-	isNumericStringCollection, err := ps.detectNumericStringCollection(worker.ctx)
-	if err != nil {
-		logger.Log.Warn("Failed to detect ID type, using default sorting - partitionId: %d, error: %v", worker.partitionID, err)
-		return false
-	}
-
-	if isNumericStringCollection {
-		logger.Log.Debug("Detected numeric string IDs in collection - using mathematical sorting for fresh bootstrap")
-		return true
-	}
-
-	return false
-}
-
-func (ps *partitionStream) detectNumericStringCollection(ctx context.Context) (bool, error) {
-	var doc struct {
-		ID interface{} `bson:"_id"`
-	}
-
-	err := ps.collection.FindOne(ctx, bson.D{}).Decode(&doc)
-	if err != nil {
-		if err == mongo.ErrNoDocuments {
-			return false, nil
-		}
-		return false, fmt.Errorf("failed to sample document: %w", err)
-	}
-
-	idStr, ok := doc.ID.(string)
-	if !ok {
-		return false, nil
-	}
-
-	return ps.isNumericString(idStr), nil
-}
-
-func (ps *partitionStream) isNumericString(s string) bool {
-	if len(s) == 0 {
-		return false
-	}
-	for _, char := range s {
-		if char < '0' || char > '9' {
-			return false
-		}
-	}
-	return true
 }
 
 func (ps *partitionStream) iterateAndProcessBootstrapCursor(worker *streamWorker, cursor connection.Cursor) error {
