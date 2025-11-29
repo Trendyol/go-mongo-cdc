@@ -21,6 +21,7 @@ import (
 	"go.mongodb.org/mongo-driver/bson"
 	"go.mongodb.org/mongo-driver/bson/primitive"
 	"go.mongodb.org/mongo-driver/mongo/options"
+	"go.mongodb.org/mongo-driver/mongo/readpref"
 )
 
 var ErrOplogHistoryLost = errors.New("oplog history lost, re-snapshot required")
@@ -43,13 +44,14 @@ type ListenerContext struct {
 }
 
 type partitionStream struct {
-	client     connection.Client
-	cfg        config.Config
-	metric     metric.Metric
-	listener   ListenerFunc
-	collection connection.Collection
-	database   connection.Database
-	workerID   string
+	client                 connection.Client
+	cfg                    config.Config
+	metric                 metric.Metric
+	listener               ListenerFunc
+	collection             connection.Collection
+	changeStreamCollection connection.Collection
+	database               connection.Database
+	workerID               string
 
 	partitionManager  partition.Manager
 	checkpointManager checkpoint.Manager
@@ -97,21 +99,23 @@ func NewPartitionStream(
 ) PartitionStream {
 	database := client.Database(cfg.MongoDB.Connection.Database)
 	collection := database.Collection(cfg.MongoDB.Connection.Collection)
+	changeStreamCollection := database.CollectionWithReadPref(cfg.MongoDB.Connection.Collection, readpref.Primary())
 
 	partitionManager := partition.NewManager(workerID, client, cfg.MongoDB.Connection.Database, cfg.Partition)
 	checkpointManager := checkpoint.NewManager(client, cfg.MongoDB.Connection.Database, cfg.MongoDB.Connection.Collection)
 
 	return &partitionStream{
-		client:            client,
-		cfg:               cfg,
-		metric:            metric,
-		listener:          listener,
-		collection:        collection,
-		database:          database,
-		workerID:          workerID,
-		partitionManager:  partitionManager,
-		checkpointManager: checkpointManager,
-		activeStreams:     make(map[int]*streamWorker),
+		client:                 client,
+		cfg:                    cfg,
+		metric:                 metric,
+		listener:               listener,
+		collection:             collection,
+		changeStreamCollection: changeStreamCollection,
+		database:               database,
+		workerID:               workerID,
+		partitionManager:       partitionManager,
+		checkpointManager:      checkpointManager,
+		activeStreams:          make(map[int]*streamWorker),
 	}
 }
 
@@ -782,7 +786,7 @@ func (ps *partitionStream) startAndManageChangeStream(
 		logger.Log.Debug("Starting from operation time - partitionId: %d, operationTime: %v", worker.partitionID, startAtOperationTime)
 	}
 
-	changeStream, err := ps.collection.Watch(worker.ctx, pipeline, opts)
+	changeStream, err := ps.changeStreamCollection.Watch(worker.ctx, pipeline, opts)
 	if err != nil {
 		if ps.isUnrecoverableResumeError(err) && resumeToken != nil {
 			logger.Log.Warn("Oplog history lost - resume token no longer valid - partitionId: %d, error: %v", worker.partitionID, err)

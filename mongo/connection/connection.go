@@ -39,6 +39,7 @@ func (m *MongoClient) Ping(ctx context.Context) error {
 
 type Database interface {
 	Collection(name string) Collection
+	CollectionWithReadPref(name string, rp *readpref.ReadPref) Collection
 	RunCommand(ctx context.Context, runCommand interface{}) SingleResult
 }
 
@@ -192,6 +193,11 @@ func NewMongoClient(cfg config.MongoDB) (Client, error) {
 
 func (d *mongoDatabaseImpl) Collection(name string) Collection {
 	return &mongoCollectionImpl{coll: d.db.Collection(name)}
+}
+
+func (d *mongoDatabaseImpl) CollectionWithReadPref(name string, rp *readpref.ReadPref) Collection {
+	opts := options.Collection().SetReadPreference(rp)
+	return &mongoCollectionImpl{coll: d.db.Collection(name, opts)}
 }
 
 func (d *mongoDatabaseImpl) RunCommand(ctx context.Context, runCommand interface{}) SingleResult {
