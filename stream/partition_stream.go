@@ -102,7 +102,7 @@ func NewPartitionStream(
 	changeStreamCollection := database.CollectionWithReadPref(cfg.MongoDB.Connection.Collection, readpref.Primary())
 
 	partitionManager := partition.NewManager(workerID, client, cfg.MongoDB.Connection.Database, cfg.Partition)
-	checkpointManager := checkpoint.NewManager(client, cfg.MongoDB.Connection.Database, cfg.MongoDB.Connection.Collection)
+	checkpointManager := checkpoint.NewManager(client, cfg.MongoDB.Connection.Database, cfg.MongoDB.Connection.Collection, cfg.Partition.ConsumerGroup)
 
 	return &partitionStream{
 		client:                 client,

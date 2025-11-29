@@ -35,19 +35,21 @@ type CheckpointInfo struct {
 }
 
 type manager struct {
-	collection connection.Collection
-	database   string
-	collName   string
+	collection    connection.Collection
+	database      string
+	collName      string
+	consumerGroup string
 }
 
-func NewManager(client connection.Client, database, collection string) Manager {
+func NewManager(client connection.Client, database, collection, consumerGroup string) Manager {
 	db := client.Database(database)
-	checkpointCol := db.Collection(collection + "_checkpoints")
+	checkpointCol := db.Collection(fmt.Sprintf("%s_checkpoints_%s", collection, consumerGroup))
 
 	return &manager{
-		collection: checkpointCol,
-		database:   database,
-		collName:   collection,
+		collection:    checkpointCol,
+		database:      database,
+		collName:      collection,
+		consumerGroup: consumerGroup,
 	}
 }
 
