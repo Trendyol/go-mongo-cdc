@@ -580,22 +580,12 @@ func (ps *partitionStream) bootstrapPartitionOptimized(worker *streamWorker, boo
 		defer ps.saveFinalBootstrapProgressOnInterruption(worker, processState)
 	}
 
-	idBatchSize := ps.cfg.Checkpoint.BootstrapIDFetchSize
-	if idBatchSize == 0 {
-		idBatchSize = 10000
-	}
-	prefetchBatches := ps.cfg.Checkpoint.BootstrapPrefetchBatch
-	if prefetchBatches == 0 {
-		prefetchBatches = 3
-	}
-	lastProcessedID := bootstrapLastID
-
-	idBatchChan := make(chan []interface{}, prefetchBatches)
+	idBatchChan := make(chan []interface{}, ps.cfg.Checkpoint.BootstrapPrefetchBatch)
 	errChan := make(chan error, 1)
 
 	go func() {
 		defer close(idBatchChan)
-		currentLastID := lastProcessedID
+		currentLastID := bootstrapLastID
 		for {
 			select {
 			case <-worker.ctx.Done():
@@ -604,7 +594,7 @@ func (ps *partitionStream) bootstrapPartitionOptimized(worker *streamWorker, boo
 			default:
 			}
 
-			matchingIDs, hasMore, err := ps.fetchMatchingIDsBatch(worker.ctx, worker.partitionID, currentLastID, idBatchSize)
+			matchingIDs, hasMore, err := ps.fetchMatchingIDsBatch(worker.ctx, worker.partitionID, currentLastID, ps.cfg.Checkpoint.BootstrapIDFetchSize)
 			if err != nil {
 				errChan <- fmt.Errorf("failed to fetch matching IDs: %w", err)
 				return
@@ -638,7 +628,7 @@ func (ps *partitionStream) bootstrapPartitionOptimized(worker *streamWorker, boo
 			return err
 		}
 
-		lastProcessedID = idBatch[len(idBatch)-1]
+		bootstrapLastID = idBatch[len(idBatch)-1]
 	}
 
 	select {
@@ -712,6 +702,37 @@ func (ps *partitionStream) fetchMatchingIDsBatchAggregation(
 	return matchingIDs, hasMore, nil
 }
 
+func (ps *partitionStream) buildOptimizedBootstrapPipeline(
+	partitionID int,
+	lastProcessedID interface{},
+	limit int,
+) []bson.D {
+	pipeline := []bson.D{
+		{{Key: "$sort", Value: bson.D{{Key: "_id", Value: 1}}}},
+		{{Key: "$project", Value: bson.D{
+			{Key: "_id", Value: 1},
+			{Key: "partitionHash", Value: bson.D{
+				{Key: "$mod", Value: bson.A{
+					ps.buildPartitioningHashExpression("$_id"),
+					ps.cfg.Partition.TotalPartition,
+				}},
+			}},
+		}}},
+		{{Key: "$match", Value: bson.D{{Key: "partitionHash", Value: partitionID}}}},
+		{{Key: "$project", Value: bson.D{{Key: "_id", Value: 1}}}},
+		{{Key: "$limit", Value: limit}},
+	}
+
+	if lastProcessedID != nil {
+		matchStage := bson.D{{Key: "$match", Value: bson.D{
+			{Key: "_id", Value: bson.D{{Key: "$gt", Value: lastProcessedID}}},
+		}}}
+		pipeline = append([]bson.D{matchStage}, pipeline...)
+	}
+
+	return pipeline
+}
+
 func (ps *partitionStream) fetchMatchingIDsBatchClientSide(
 	ctx context.Context,
 	partitionID int,
@@ -774,58 +795,6 @@ func (ps *partitionStream) fetchMatchingIDsBatchClientSide(
 	)
 
 	return matchingIDs, hasMore, nil
-}
-
-func (ps *partitionStream) buildOptimizedBootstrapPipeline(
-	partitionID int,
-	lastProcessedID interface{},
-	limit int,
-) []bson.D {
-	pipeline := []bson.D{}
-
-	matchStage := bson.D{}
-	if lastProcessedID != nil {
-		matchStage = bson.D{
-			{Key: "$match", Value: bson.D{
-				{Key: "_id", Value: bson.D{{Key: "$gt", Value: lastProcessedID}}},
-			}},
-		}
-		pipeline = append(pipeline, matchStage)
-	}
-
-	pipeline = append(pipeline, bson.D{
-		{Key: "$sort", Value: bson.D{{Key: "_id", Value: 1}}},
-	})
-
-	pipeline = append(pipeline, bson.D{
-		{Key: "$project", Value: bson.D{
-			{Key: "_id", Value: 1},
-			{Key: "partitionHash", Value: bson.D{
-				{Key: "$mod", Value: bson.A{
-					ps.buildPartitioningHashExpression("$_id"),
-					ps.cfg.Partition.TotalPartition,
-				}},
-			}},
-		}},
-	})
-
-	pipeline = append(pipeline, bson.D{
-		{Key: "$match", Value: bson.D{
-			{Key: "partitionHash", Value: partitionID},
-		}},
-	})
-
-	pipeline = append(pipeline, bson.D{
-		{Key: "$project", Value: bson.D{
-			{Key: "_id", Value: 1},
-		}},
-	})
-
-	pipeline = append(pipeline, bson.D{
-		{Key: "$limit", Value: limit},
-	})
-
-	return pipeline
 }
 
 func (ps *partitionStream) doesIDMatchPartition(id interface{}, partitionID int) bool {

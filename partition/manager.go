@@ -132,6 +132,22 @@ func (m *manager) validateAndStoreTotalPartition(ctx context.Context) error {
 		}
 		_, insertErr := m.metadataCol.InsertOne(ctx, metadata)
 		if insertErr != nil {
+			if mongo.IsDuplicateKeyError(insertErr) {
+				var recheck Metadata
+				recheckErr := m.metadataCol.FindOne(ctx, filter).Decode(&recheck)
+				if recheckErr != nil {
+					return fmt.Errorf("failed to recheck totalPartition after duplicate key: %w", recheckErr)
+				}
+				if recheck.TotalPartition != m.config.TotalPartition {
+					return fmt.Errorf(
+						"totalPartition cannot be changed after initial setup - stored: %d, config: %d",
+						recheck.TotalPartition,
+						m.config.TotalPartition,
+					)
+				}
+				logger.Log.Debug("totalPartition validation passed (concurrent insert) - totalPartition: %d, consumerGroup: %s", m.config.TotalPartition, m.config.ConsumerGroup)
+				return nil
+			}
 			return fmt.Errorf("failed to store initial totalPartition: %w", insertErr)
 		}
 		logger.Log.Debug("Stored initial totalPartition: %d for consumerGroup: %s", m.config.TotalPartition, m.config.ConsumerGroup)
