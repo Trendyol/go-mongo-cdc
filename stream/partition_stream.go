@@ -6,6 +6,7 @@ import (
 	"errors"
 	"fmt"
 	"math"
+	"math/rand"
 	"strings"
 	"sync"
 	"time"
@@ -131,11 +132,17 @@ func (ps *partitionStream) Start(ctx context.Context) error {
 		return fmt.Errorf("failed to initialize partition manager: %w", err)
 	}
 
+	randomSeconds := rand.Intn(60)
+	jitter := time.Duration(randomSeconds) * time.Second
+	totalDelay := 30*time.Second + jitter
+
+	logger.Log.Info("Starting with jitter delay - Base: 30s, Jitter: %v, Total Wait: %v", jitter, totalDelay)
+
 	select {
 	case <-ps.ctx.Done():
 		logger.Log.Debug("Event processing cancelled during initial delay")
 		return ps.ctx.Err()
-	case <-time.After(30 * time.Second):
+	case <-time.After(totalDelay):
 		logger.Log.Debug("Initial delay completed before acquiring partitions")
 	}
 
@@ -585,9 +592,10 @@ func (ps *partitionStream) queryDocumentsForBootstrap(
 
 	opts := options.Find().
 		SetSort(bson.D{{Key: "_id", Value: 1}}).
+		SetHint(bson.D{{Key: "_id", Value: 1}}).
 		SetBatchSize(batchSize).
-		SetNoCursorTimeout(false).
-		SetMaxTime(5 * time.Minute)
+		SetNoCursorTimeout(true).
+		SetMaxTime(12 * time.Hour)
 
 	return ps.collection.Find(worker.ctx, filter, opts)
 }
@@ -924,33 +932,24 @@ func (ps *partitionStream) buildBootstrapPartitionFilter(partitionID int) bson.D
 
 func (ps *partitionStream) buildPartitioningHashExpression(idField string) bson.D {
 	return bson.D{
-		{Key: "$cond", Value: bson.D{
-			{Key: "if", Value: bson.D{
-				{Key: "$or", Value: bson.A{
-					bson.D{{Key: "$eq", Value: bson.A{bson.D{{Key: "$type", Value: idField}}, "int"}}},
-					bson.D{{Key: "$eq", Value: bson.A{bson.D{{Key: "$type", Value: idField}}, "long"}}},
+		{Key: "$let", Value: bson.D{
+			{Key: "vars", Value: bson.D{
+				{Key: "converted", Value: bson.D{
+					{Key: "$convert", Value: bson.D{
+						{Key: "input", Value: idField},
+						{Key: "to", Value: "long"},
+						{Key: "onError", Value: nil},
+						{Key: "onNull", Value: nil},
+					}},
 				}},
 			}},
-			{Key: "then", Value: idField},
-			{Key: "else", Value: bson.D{
+			{Key: "in", Value: bson.D{
 				{Key: "$cond", Value: bson.D{
-					{Key: "if", Value: ps.createIsNumericStringCheck(idField)},
-					{Key: "then", Value: bson.D{{Key: "$toLong", Value: idField}}},
+					{Key: "if", Value: bson.D{{Key: "$ne", Value: bson.A{"$$converted", nil}}}},
+					{Key: "then", Value: "$$converted"},
 					{Key: "else", Value: ps.buildStringDistributionHash(idField)},
 				}},
 			}},
-		}},
-	}
-}
-
-func (ps *partitionStream) createIsNumericStringCheck(idField string) bson.D {
-	return bson.D{
-		{Key: "$and", Value: bson.A{
-			bson.D{{Key: "$eq", Value: bson.A{bson.D{{Key: "$type", Value: idField}}, "string"}}},
-			bson.D{{Key: "$regexMatch", Value: bson.D{
-				{Key: "input", Value: idField},
-				{Key: "regex", Value: "^[0-9]+$"},
-			}}},
 		}},
 	}
 }
