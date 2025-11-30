@@ -103,7 +103,9 @@ func (c *connector) Start(ctx context.Context) {
 	ctx, cancel := context.WithCancel(ctx)
 	defer cancel()
 
-	signal.Notify(c.cancelCh, syscall.SIGTERM, syscall.SIGINT, syscall.SIGABRT, syscall.SIGQUIT)
+	if c.cfg.Checkpoint.Type == config.CheckpointTypeAuto {
+		signal.Notify(c.cancelCh, syscall.SIGTERM, syscall.SIGINT, syscall.SIGABRT, syscall.SIGQUIT)
+	}
 
 	g, gCtx := errgroup.WithContext(ctx)
 
@@ -123,17 +125,19 @@ func (c *connector) Start(ctx context.Context) {
 		return nil
 	})
 
-	g.Go(func() error {
-		select {
-		case sig := <-c.cancelCh:
-			logger.Log.Debug("Shutdown signal received: %v, cancelling context...", sig)
-			cancel()
-			return context.Canceled
-		case <-gCtx.Done():
-			logger.Log.Debug("Context cancelled: %v", gCtx.Err())
-			return gCtx.Err()
-		}
-	})
+	if c.cfg.Checkpoint.Type == config.CheckpointTypeAuto {
+		g.Go(func() error {
+			select {
+			case sig := <-c.cancelCh:
+				logger.Log.Debug("Shutdown signal received: %v, cancelling context...", sig)
+				cancel()
+				return context.Canceled
+			case <-gCtx.Done():
+				logger.Log.Debug("Context cancelled: %v", gCtx.Err())
+				return gCtx.Err()
+			}
+		})
+	}
 
 	if err := g.Wait(); err != nil && err != context.Canceled {
 		logger.Log.Error("Connector shutting down due to an error: %v", err)
@@ -141,7 +145,9 @@ func (c *connector) Start(ctx context.Context) {
 		logger.Log.Info("Connector shutting down gracefully")
 	}
 
-	c.Close()
+	if c.cfg.Checkpoint.Type == config.CheckpointTypeAuto {
+		c.Close()
+	}
 }
 
 func (c *connector) Close() {
@@ -158,7 +164,9 @@ func (c *connector) Close() {
 
 		c.closed = true
 
-		signal.Stop(c.cancelCh)
+		if c.cfg.Checkpoint.Type == config.CheckpointTypeAuto {
+			signal.Stop(c.cancelCh)
+		}
 
 		closeCtx, cancel := context.WithTimeout(context.Background(), 30*time.Second)
 		defer cancel()

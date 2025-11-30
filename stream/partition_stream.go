@@ -1513,7 +1513,7 @@ func (ps *partitionStream) CommitBootstrap(partitionID int) {
 	}
 
 	bootstrapState := ps.getBootstrapState(worker)
-	if bootstrapState == nil {
+	if bootstrapState == nil || bootstrapState.bootstrapCompleted {
 		return
 	}
 
