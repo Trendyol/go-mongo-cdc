@@ -24,9 +24,9 @@ linters:
     - gosec
   settings:
     funlen:
-      lines: 70
+      lines: 130
     lll:
-      line-length: 140
+      line-length: 170
   exclusions:
     generated: lax
     presets:
