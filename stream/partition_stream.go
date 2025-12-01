@@ -932,75 +932,8 @@ func (ps *partitionStream) buildBootstrapPartitionFilter(partitionID int) bson.D
 
 func (ps *partitionStream) buildPartitioningHashExpression(idField string) bson.D {
 	return bson.D{
-		{Key: "$let", Value: bson.D{
-			{Key: "vars", Value: bson.D{
-				{Key: "converted", Value: bson.D{
-					{Key: "$convert", Value: bson.D{
-						{Key: "input", Value: idField},
-						{Key: "to", Value: "long"},
-						{Key: "onError", Value: nil},
-						{Key: "onNull", Value: nil},
-					}},
-				}},
-			}},
-			{Key: "in", Value: bson.D{
-				{Key: "$cond", Value: bson.D{
-					{Key: "if", Value: bson.D{{Key: "$ne", Value: bson.A{"$$converted", nil}}}},
-					{Key: "then", Value: "$$converted"},
-					{Key: "else", Value: ps.buildStringDistributionHash(idField)},
-				}},
-			}},
-		}},
-	}
-}
-
-/*
- * This function calculates a compound hash for a given _id.
- * Standard hashing methods in MongoDB can lead to poor distribution for certain
- * string patterns (e.g., sequential or timestamp-based strings).
- * This implementation combines three different hashing algorithms (DJB2, polynomial, position-weighted)
- * to ensure a more uniform distribution of documents across partitions,
- * minimizing hotspots. It's designed to be fast and produce a wide range of hash values.
- */
-func (ps *partitionStream) buildStringDistributionHash(idField string) bson.D {
-	return bson.D{
-		{Key: "$function", Value: bson.D{
-			{Key: "body", Value: `
-				function(docId) {
-					if (docId === null || docId === undefined) return 0;
-					
-					const str = docId.toString();
-					let hash1 = 5381;  // DJB2 hash
-					let hash2 = 0;     // Polynomial rolling hash
-					let hash3 = 0;     // Position-weighted hash
-					
-					const len = str.length;
-					
-					for (let i = 0; i < len; i++) {
-						const char = str.charCodeAt(i);
-						
-						hash1 = ((hash1 << 5) + hash1) + char;
-						
-						hash2 = (hash2 * 31 + char) % 2147483647;
-						
-						hash3 += char * (i * 37 + 1);
-					}
-					
-					let finalHash = (hash1 * 7) + (hash2 * 3) + (hash3 * 11);
-					
-					finalHash += len * 17;
-					
-					if (len > 0) {
-						finalHash += str.charCodeAt(0) * 101;
-					}
-					if (len > 1) {
-						finalHash += str.charCodeAt(len - 1) * 103;
-					}
-					return Math.abs(finalHash) || 1;
-				}
-			`},
-			{Key: "args", Value: bson.A{idField}},
-			{Key: "lang", Value: "js"},
+		{Key: "$abs", Value: bson.D{
+			{Key: "$toHashedIndexKey", Value: idField},
 		}},
 	}
 }
