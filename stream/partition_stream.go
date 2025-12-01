@@ -132,7 +132,7 @@ func (ps *partitionStream) Start(ctx context.Context) error {
 		return fmt.Errorf("failed to initialize partition manager: %w", err)
 	}
 
-	randomSeconds := rand.Intn(60)
+	randomSeconds := rand.Intn(60) //nosec G404
 	jitter := time.Duration(randomSeconds) * time.Second
 	totalDelay := 30*time.Second + jitter
 
