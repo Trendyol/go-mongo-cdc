@@ -563,23 +563,20 @@ func (ps *partitionStream) bootstrapPartition(worker *streamWorker) error {
 func (ps *partitionStream) loadBootstrapStateAndCreateFilter(partitionID int) (bson.D, error) {
 	bootstrapLastID, err := ps.getBootstrapProgressWithRetry(partitionID, 3)
 	if err != nil {
-		logger.Log.Error("Failed to get bootstrap progress after retries - partitionId: %d, error: %v", partitionID, err)
+		logger.Log.Error("Bootstrap progress error - partitionId: %d, err: %v", partitionID, err)
 		return nil, err
 	}
 
 	filter := ps.buildBootstrapPartitionFilter(partitionID)
-	if bootstrapLastID != nil {
-		comparisonFilter := ps.buildResumeAfterIdFilter("_id", bootstrapLastID)
-		filter = append(filter, comparisonFilter...)
-		logger.Log.Info(
-			"Resuming bootstrap from saved progress - partitionId: %d, lastId: %v (type: %T)",
-			partitionID,
-			bootstrapLastID,
-			bootstrapLastID,
-		)
-	} else {
+
+	if bootstrapLastID == nil {
 		logger.Log.Info("Starting fresh bootstrap - partitionId: %d", partitionID)
+		return filter, nil
 	}
+
+	filter = append(filter, bson.E{Key: "_id", Value: bson.M{"$gt": bootstrapLastID}})
+
+	logger.Log.Info("Resuming bootstrap - partitionId: %d, lastId: %v", partitionID, bootstrapLastID)
 
 	return filter, nil
 }
@@ -935,80 +932,6 @@ func (ps *partitionStream) buildPartitioningHashExpression(idField string) bson.
 		{Key: "$abs", Value: bson.D{
 			{Key: "$toHashedIndexKey", Value: idField},
 		}},
-	}
-}
-
-func (ps *partitionStream) buildResumeAfterIdFilter(fieldName string, lastValue interface{}) bson.D {
-	switch v := lastValue.(type) {
-	case primitive.ObjectID:
-		// ObjectIds have natural ordering and work well with $gt
-		return bson.D{
-			{Key: "$and", Value: bson.A{
-				bson.M{fieldName: bson.M{"$type": "objectId"}},
-				bson.M{fieldName: bson.M{"$gt": v}},
-			}},
-		}
-
-	case int, int32, int64, float32, float64:
-		// Numeric types work well with $gt, but ensure type consistency
-		return bson.D{
-			{Key: "$and", Value: bson.A{
-				bson.M{fieldName: bson.M{"$type": bson.A{"int", "long", "double", "decimal"}}},
-				bson.M{fieldName: bson.M{"$gt": v}},
-			}},
-		}
-
-	case string:
-		// For strings, use simple comparison
-		// The Find() operation will apply collation if needed for numeric strings
-		return bson.D{
-			{Key: "$and", Value: bson.A{
-				bson.M{fieldName: bson.M{"$type": "string"}},
-				bson.M{fieldName: bson.M{"$gt": v}},
-			}},
-		}
-
-	case primitive.Binary:
-		// UUID/Binary data - use $gt with same type and subtype
-		return bson.D{
-			{Key: "$and", Value: bson.A{
-				bson.M{fieldName: bson.M{"$type": "binData"}},
-				bson.M{fieldName: bson.M{"$gt": v}},
-			}},
-		}
-
-	case primitive.DateTime:
-		// DateTime types should be compared as dates
-		return bson.D{
-			{Key: "$and", Value: bson.A{
-				bson.M{fieldName: bson.M{"$type": "date"}},
-				bson.M{fieldName: bson.M{"$gt": v}},
-			}},
-		}
-
-	default:
-		// return nil, fmt.Errorf("unsupported _id type for comparison: %T", v)
-
-		// For any other complex type, convert to string representation for comparison
-		// This handles UUID strings, complex objects, etc.
-		valueStr := fmt.Sprintf("%v", v)
-		logger.Log.Debug("Using string-based comparison for complex type %T (value: %s)", v, valueStr)
-
-		return bson.D{
-			{Key: "$or", Value: bson.A{
-				// Either the field is not a string and we can't compare it safely (skip it)
-				bson.M{fieldName: bson.M{"$not": bson.M{"$type": "string"}}},
-				// Or it's a string and greater than our string representation
-				bson.M{
-					"$and": bson.A{
-						bson.M{fieldName: bson.M{"$type": "string"}},
-						bson.M{fieldName: bson.M{"$gt": valueStr}},
-					},
-				},
-				// Or it's the same complex type but not the exact same value
-				bson.M{fieldName: bson.M{"$ne": v}},
-			}},
-		}
 	}
 }
 
