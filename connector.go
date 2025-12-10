@@ -25,6 +25,7 @@ type Connector interface {
 	Close()
 	Commit()
 	CommitBootstrap(partitionID int)
+	SetEventHandler(handler stream.EventHandler)
 }
 
 type connector struct {
@@ -82,7 +83,7 @@ func NewConnector(cfg config.Config, listenerFunc stream.ListenerFunc) (Connecto
 
 	workerID := generateWorkerID()
 
-	partitionStream := stream.NewPartitionStream(mongoClient, cfg, m, listenerFunc, workerID)
+	partitionStream := stream.NewPartitionStream(mongoClient, cfg, m, listenerFunc, workerID, nil)
 
 	prometheusRegistry := metric.NewRegistry(m)
 
@@ -195,4 +196,8 @@ func (c *connector) Commit() {
 
 func (c *connector) CommitBootstrap(partitionID int) {
 	c.stream.CommitBootstrap(partitionID)
+}
+
+func (c *connector) SetEventHandler(handler stream.EventHandler) {
+	c.stream.SetEventHandler(handler)
 }

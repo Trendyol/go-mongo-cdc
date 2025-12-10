@@ -6,7 +6,6 @@ import (
 	"errors"
 	"fmt"
 	"math"
-	"math/rand"
 	"strings"
 	"sync"
 	"time"
@@ -32,6 +31,7 @@ type PartitionStream interface {
 	Stop(ctx context.Context) error
 	Commit()
 	CommitBootstrap(partitionID int)
+	SetEventHandler(handler EventHandler)
 }
 
 type ListenerFunc func(ctx *ListenerContext) error
@@ -55,6 +55,7 @@ type partitionStream struct {
 	partitionManager       partition.Manager
 	activeStreams          map[int]*streamWorker
 	listener               ListenerFunc
+	eventHandler           EventHandler
 	cancel                 context.CancelFunc
 	workerID               string
 	cfg                    config.Config
@@ -94,6 +95,7 @@ func NewPartitionStream(
 	metric metric.Metric,
 	listener ListenerFunc,
 	workerID string,
+	eventHandler EventHandler,
 ) PartitionStream {
 	database := client.Database(cfg.MongoDB.Connection.Database)
 	collection := database.Collection(cfg.MongoDB.Connection.Collection)
@@ -105,6 +107,10 @@ func NewPartitionStream(
 		cfg.MongoDB.Connection.Database,
 		cfg.MongoDB.Connection.Collection,
 		cfg.Partition.ConsumerGroup)
+
+	if eventHandler == nil {
+		eventHandler = &DefaultEventHandler{}
+	}
 
 	return &partitionStream{
 		client:                 client,
@@ -118,6 +124,7 @@ func NewPartitionStream(
 		partitionManager:       partitionManager,
 		checkpointManager:      checkpointManager,
 		activeStreams:          make(map[int]*streamWorker),
+		eventHandler:           eventHandler,
 	}
 }
 
@@ -132,17 +139,17 @@ func (ps *partitionStream) Start(ctx context.Context) error {
 		return fmt.Errorf("failed to initialize partition manager: %w", err)
 	}
 
-	randomSeconds := rand.Intn(60) //nolint:gosec
-	jitter := time.Duration(randomSeconds) * time.Second
-	totalDelay := 30*time.Second + jitter
+	/*	randomSeconds := rand.Intn(60) //nolint:gosec
+		jitter := time.Duration(randomSeconds) * time.Second
+		totalDelay := 30*time.Second + jitter
 
-	logger.Log.Info("Starting with jitter delay - Base: 30s, Jitter: %v, Total Wait: %v", jitter, totalDelay)
+	logger.Log.Info("Starting with jitter delay - Base: 30s, Jitter: %v, Total Wait: %v", jitter, totalDelay)*/
 
 	select {
 	case <-ps.ctx.Done():
 		logger.Log.Debug("Event processing cancelled during initial delay")
 		return ps.ctx.Err()
-	case <-time.After(totalDelay):
+	case <-time.After(15 * time.Second):
 		logger.Log.Debug("Initial delay completed before acquiring partitions")
 	}
 
@@ -193,6 +200,11 @@ func (ps *partitionStream) acquireAndStartInitialPartitions() error {
 }
 
 func (ps *partitionStream) reconcilePartitionAssignments(newPartitions []int) {
+	ps.eventHandler.BeforeRebalanceStart()
+	defer ps.notifyRebalanceComplete()
+	defer ps.eventHandler.AfterRebalanceEnd()
+	ps.waitForRebalanceReady()
+
 	ps.streamsMutex.Lock()
 
 	rebalanceHappened := false
@@ -214,7 +226,6 @@ func (ps *partitionStream) reconcilePartitionAssignments(newPartitions []int) {
 			worker.stoppingMutex.Unlock()
 			worker.cancel()
 			workersToStop = append(workersToStop, worker)
-			delete(ps.activeStreams, partitionID)
 			ps.metric.IncPartitionReleaseTotal()
 			rebalanceHappened = true
 		}
@@ -227,6 +238,13 @@ func (ps *partitionStream) reconcilePartitionAssignments(newPartitions []int) {
 		worker.inFlightEvents.Wait()
 		logger.Log.Debug("All in-flight events completed for partition %d", worker.partitionID)
 	}
+
+
+	ps.streamsMutex.Lock()
+	for _, worker := range workersToStop {
+		delete(ps.activeStreams, worker.partitionID)
+	}
+	ps.streamsMutex.Unlock()
 
 	ps.streamsMutex.Lock()
 	defer ps.streamsMutex.Unlock()
@@ -1469,4 +1487,28 @@ func (ps *partitionStream) Stop(ctx context.Context) error {
 
 	logger.Log.Info("Partition stream stopped successfully")
 	return nil
+}
+
+func (ps *partitionStream) SetEventHandler(handler EventHandler) {
+	ps.eventHandler = handler
+}
+
+func (ps *partitionStream) waitForRebalanceReady() {
+	coordinator, ok := ps.eventHandler.(RebalanceCoordinator)
+	if !ok {
+		return
+	}
+
+	ctx, cancel := context.WithTimeout(ps.ctx, ps.cfg.GracefulShutdownTimeout)
+	defer cancel()
+
+	if err := coordinator.WaitForRebalanceReady(ctx); err != nil {
+		logger.Log.Warn("Rebalance preparation failed: %v", err)
+	}
+}
+
+func (ps *partitionStream) notifyRebalanceComplete() {
+	if coordinator, ok := ps.eventHandler.(RebalanceCoordinator); ok {
+		coordinator.NotifyRebalanceComplete()
+	}
 }
