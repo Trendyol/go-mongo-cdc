@@ -15,6 +15,7 @@ import (
 	"github.com/Trendyol/go-mongo-cdc/config"
 	"github.com/Trendyol/go-mongo-cdc/logger"
 	"github.com/Trendyol/go-mongo-cdc/metric"
+	"github.com/Trendyol/go-mongo-cdc/models"
 	"github.com/Trendyol/go-mongo-cdc/mongo/connection"
 	"github.com/Trendyol/go-mongo-cdc/stream"
 	"github.com/go-playground/errors"
@@ -25,6 +26,7 @@ type Connector interface {
 	Close()
 	Commit()
 	CommitBootstrap(partitionID int)
+	SetEventHandler(handler models.EventHandler)
 }
 
 type connector struct {
@@ -195,4 +197,8 @@ func (c *connector) Commit() {
 
 func (c *connector) CommitBootstrap(partitionID int) {
 	c.stream.CommitBootstrap(partitionID)
+}
+
+func (c *connector) SetEventHandler(handler models.EventHandler) {
+	c.stream.SetEventHandler(handler)
 }

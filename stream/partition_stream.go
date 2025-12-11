@@ -6,7 +6,6 @@ import (
 	"errors"
 	"fmt"
 	"math"
-	"math/rand"
 	"strings"
 	"sync"
 	"time"
@@ -16,6 +15,7 @@ import (
 	"github.com/Trendyol/go-mongo-cdc/internal/backoff"
 	"github.com/Trendyol/go-mongo-cdc/logger"
 	"github.com/Trendyol/go-mongo-cdc/metric"
+	"github.com/Trendyol/go-mongo-cdc/models"
 	"github.com/Trendyol/go-mongo-cdc/mongo/connection"
 	"github.com/Trendyol/go-mongo-cdc/mongo/message"
 	"github.com/Trendyol/go-mongo-cdc/partition"
@@ -32,6 +32,7 @@ type PartitionStream interface {
 	Stop(ctx context.Context) error
 	Commit()
 	CommitBootstrap(partitionID int)
+	SetEventHandler(handler models.EventHandler)
 }
 
 type ListenerFunc func(ctx *ListenerContext) error
@@ -55,6 +56,7 @@ type partitionStream struct {
 	partitionManager       partition.Manager
 	activeStreams          map[int]*streamWorker
 	listener               ListenerFunc
+	eventHandler           models.EventHandler
 	cancel                 context.CancelFunc
 	workerID               string
 	cfg                    config.Config
@@ -63,23 +65,26 @@ type partitionStream struct {
 }
 
 type streamWorker struct {
-	lastEventTime            time.Time
-	stream                   connection.ChangeStream
-	ctx                      context.Context
-	cancel                   context.CancelFunc
-	bootstrapState           *bootstrapProcessState
-	lastClusterTime          *primitive.Timestamp
-	pendingCommitClusterTime *primitive.Timestamp
-	pendingCommitToken       []byte
-	lastAckedToken           []byte
-	inFlightEvents           sync.WaitGroup
-	ackedEventCount          int
-	partitionID              int
-	stoppingMutex            sync.RWMutex
-	tokenMutex               sync.RWMutex
-	bootstrapStateMutex      sync.RWMutex
-	commitMutex              sync.Mutex
-	stopping                 bool
+	lastEventTime                   time.Time
+	stream                          connection.ChangeStream
+	ctx                             context.Context
+	cancel                          context.CancelFunc
+	bootstrapState                  *bootstrapProcessState
+	lastClusterTime                 *primitive.Timestamp
+	pendingCommitClusterTime        *primitive.Timestamp
+	pendingCommitToken              []byte
+	lastAckedToken                  []byte
+	inFlightEvents                  sync.WaitGroup
+	ackedEventCount                 int
+	partitionID                     int
+	stoppingMutex                   sync.RWMutex
+	tokenMutex                      sync.RWMutex
+	bootstrapStateMutex             sync.RWMutex
+	commitMutex                     sync.Mutex
+	stopping                        bool
+	pendingBootstrapCheckpointID    interface{}
+	pendingBootstrapCheckpointCount int
+	pendingBootstrapMutex           sync.Mutex
 }
 
 type streamStartInfo struct {
@@ -111,6 +116,7 @@ func NewPartitionStream(
 		cfg:                    cfg,
 		metric:                 metric,
 		listener:               listener,
+		eventHandler:           models.DefaultEventHandler,
 		collection:             collection,
 		changeStreamCollection: changeStreamCollection,
 		database:               database,
@@ -132,17 +138,17 @@ func (ps *partitionStream) Start(ctx context.Context) error {
 		return fmt.Errorf("failed to initialize partition manager: %w", err)
 	}
 
-	randomSeconds := rand.Intn(60) //nolint:gosec
-	jitter := time.Duration(randomSeconds) * time.Second
-	totalDelay := 30*time.Second + jitter
+	/*	randomSeconds := rand.Intn(60) //nolint:gosec
+		jitter := time.Duration(randomSeconds) * time.Second
+		totalDelay := 30*time.Second + jitter
 
-	logger.Log.Info("Starting with jitter delay - Base: 30s, Jitter: %v, Total Wait: %v", jitter, totalDelay)
+	logger.Log.Info("Starting with jitter delay - Base: 30s, Jitter: %v, Total Wait: %v", jitter, totalDelay)*/
 
 	select {
 	case <-ps.ctx.Done():
 		logger.Log.Debug("Event processing cancelled during initial delay")
 		return ps.ctx.Err()
-	case <-time.After(totalDelay):
+	case <-time.After(15 * time.Second):
 		logger.Log.Debug("Initial delay completed before acquiring partitions")
 	}
 
@@ -193,12 +199,11 @@ func (ps *partitionStream) acquireAndStartInitialPartitions() error {
 }
 
 func (ps *partitionStream) reconcilePartitionAssignments(newPartitions []int) {
+	var partitionsToStop []int
+	var partitionsToStart []int
+
 	ps.streamsMutex.Lock()
-
-	rebalanceHappened := false
-	workersToStop := make([]*streamWorker, 0)
-
-	for partitionID, worker := range ps.activeStreams {
+	for partitionID := range ps.activeStreams {
 		found := false
 		for _, p := range newPartitions {
 			if p == partitionID {
@@ -206,56 +211,97 @@ func (ps *partitionStream) reconcilePartitionAssignments(newPartitions []int) {
 				break
 			}
 		}
-
 		if !found {
-			logger.Log.Debug("Stopping stream for partition %d", partitionID)
-			worker.stoppingMutex.Lock()
-			worker.stopping = true
-			worker.stoppingMutex.Unlock()
-			worker.cancel()
-			workersToStop = append(workersToStop, worker)
-			delete(ps.activeStreams, partitionID)
-			ps.metric.IncPartitionReleaseTotal()
-			rebalanceHappened = true
+			partitionsToStop = append(partitionsToStop, partitionID)
 		}
 	}
 
+	for _, partitionID := range newPartitions {
+		if _, exists := ps.activeStreams[partitionID]; !exists {
+			partitionsToStart = append(partitionsToStart, partitionID)
+		}
+	}
+	ps.streamsMutex.Unlock()
+
+	for _, partitionID := range partitionsToStop {
+		ps.eventHandler.BeforePartitionStop(partitionID)
+	}
+
+	rebalanceHappened := false
+	workersToStop := make([]*streamWorker, 0)
+
+	ps.streamsMutex.Lock()
+	for _, partitionID := range partitionsToStop {
+		worker, exists := ps.activeStreams[partitionID]
+		if !exists {
+			continue
+		}
+		logger.Log.Debug("Stopping stream for partition %d", partitionID)
+		worker.stoppingMutex.Lock()
+		worker.stopping = true
+		worker.stoppingMutex.Unlock()
+		worker.cancel()
+		workersToStop = append(workersToStop, worker)
+		ps.metric.IncPartitionReleaseTotal()
+		rebalanceHappened = true
+	}
 	ps.streamsMutex.Unlock()
 
 	for _, worker := range workersToStop {
 		logger.Log.Debug("Waiting for in-flight events to complete for partition %d", worker.partitionID)
 		worker.inFlightEvents.Wait()
 		logger.Log.Debug("All in-flight events completed for partition %d", worker.partitionID)
+		ps.eventHandler.AfterPartitionStop(worker.partitionID)
+		ps.commitPendingBootstrapFromWorker(worker)
+		ps.Commit()
 	}
 
 	ps.streamsMutex.Lock()
-	defer ps.streamsMutex.Unlock()
+	for _, worker := range workersToStop {
+		delete(ps.activeStreams, worker.partitionID)
+	}
+	ps.streamsMutex.Unlock()
 
-	for _, partitionID := range newPartitions {
-		if _, exists := ps.activeStreams[partitionID]; !exists {
-			logger.Log.Debug("Starting stream for partition %d", partitionID)
+	for _, partitionID := range partitionsToStart {
+		ps.eventHandler.BeforePartitionStart(partitionID)
+	}
 
-			worker := &streamWorker{
-				partitionID:   partitionID,
-				lastEventTime: time.Now(),
-			}
-			worker.ctx, worker.cancel = context.WithCancel(ps.ctx)
-
-			ps.activeStreams[partitionID] = worker
-			ps.metric.IncPartitionAcquireTotal()
-			rebalanceHappened = true
-
-			ps.wg.Add(1)
-			go ps.managePartitionWorkerLifecycle(worker)
+	ps.streamsMutex.Lock()
+	for _, partitionID := range partitionsToStart {
+		if _, exists := ps.activeStreams[partitionID]; exists {
+			continue
 		}
+		logger.Log.Debug("Starting stream for partition %d", partitionID)
+
+		worker := &streamWorker{
+			partitionID:   partitionID,
+			lastEventTime: time.Now(),
+		}
+		worker.ctx, worker.cancel = context.WithCancel(ps.ctx)
+
+		ps.activeStreams[partitionID] = worker
+		ps.metric.IncPartitionAcquireTotal()
+		rebalanceHappened = true
+
+		ps.wg.Add(1)
+		go ps.managePartitionWorkerLifecycle(worker)
+	}
+	ps.streamsMutex.Unlock()
+
+	for _, partitionID := range partitionsToStart {
+		ps.eventHandler.AfterPartitionStart(partitionID)
 	}
 
 	if rebalanceHappened {
 		ps.metric.IncPartitionRebalanceTotal()
 	}
 
-	ps.metric.SetActivePartitionCount(len(ps.activeStreams))
-	logger.Log.Debug("Active partitions updated - count: %d, partitions: %v", len(ps.activeStreams), newPartitions)
+	ps.streamsMutex.RLock()
+	activeCount := len(ps.activeStreams)
+	ps.streamsMutex.RUnlock()
+
+	ps.metric.SetActivePartitionCount(activeCount)
+	logger.Log.Debug("Active partitions updated - count: %d, partitions: %v", activeCount, newPartitions)
 }
 
 func (ps *partitionStream) managePartitionWorkerLifecycle(worker *streamWorker) {
@@ -1076,6 +1122,12 @@ func (ps *partitionStream) createBootstrapAck(worker *streamWorker, event messag
 		pendingCount := state.pendingCheckpointCount
 		state.pendingCheckpointMutex.Unlock()
 
+		// Also update worker-level pending checkpoint for rebalance scenarios
+		worker.pendingBootstrapMutex.Lock()
+		worker.pendingBootstrapCheckpointID = event.DocumentKey.ID
+		worker.pendingBootstrapCheckpointCount++
+		worker.pendingBootstrapMutex.Unlock()
+
 		if ps.cfg.Checkpoint.Type != config.CheckpointTypeAuto || pendingCount < ps.cfg.Checkpoint.BootstrapSaveCount {
 			return
 		}
@@ -1119,6 +1171,11 @@ func (ps *partitionStream) createBootstrapAck(worker *streamWorker, event messag
 		)
 		ps.metric.IncCheckpointSaveTotal()
 		ps.metric.SetLastCheckpointTime(time.Now())
+
+		// Reset worker-level pending checkpoint count after successful save
+		worker.pendingBootstrapMutex.Lock()
+		worker.pendingBootstrapCheckpointCount = 0
+		worker.pendingBootstrapMutex.Unlock()
 
 		state.pendingCheckpointMutex.Lock()
 		state.pendingCheckpointID = nil
@@ -1408,6 +1465,39 @@ func (ps *partitionStream) getBootstrapState(worker *streamWorker) *bootstrapPro
 	return worker.bootstrapState
 }
 
+func (ps *partitionStream) commitPendingBootstrapFromWorker(worker *streamWorker) {
+	worker.pendingBootstrapMutex.Lock()
+	pendingID := worker.pendingBootstrapCheckpointID
+	pendingCount := worker.pendingBootstrapCheckpointCount
+	worker.pendingBootstrapMutex.Unlock()
+
+	if pendingID == nil || pendingCount == 0 {
+		return
+	}
+
+	saveCtx, cancel := context.WithTimeout(context.Background(), ps.cfg.Checkpoint.TokenSaveTimeout)
+	defer cancel()
+
+	saveStart := time.Now()
+	err := ps.checkpointManager.SaveBootstrapProgress(saveCtx, worker.partitionID, pendingID)
+	saveLatency := time.Since(saveStart).Milliseconds()
+	ps.metric.SetCheckpointSaveLatency(saveLatency)
+
+	if err != nil {
+		logger.Log.Error("Failed to commit bootstrap checkpoint on rebalance - partitionId: %d, error: %v", worker.partitionID, err)
+		ps.metric.IncCheckpointSaveErrorTotal()
+	} else {
+		logger.Log.Debug("Bootstrap checkpoint committed on rebalance - partitionId: %d, documentId: %v, count: %d", worker.partitionID, pendingID, pendingCount)
+		ps.metric.IncCheckpointSaveTotal()
+		ps.metric.SetLastCheckpointTime(time.Now())
+
+		worker.pendingBootstrapMutex.Lock()
+		worker.pendingBootstrapCheckpointID = nil
+		worker.pendingBootstrapCheckpointCount = 0
+		worker.pendingBootstrapMutex.Unlock()
+	}
+}
+
 func (ps *partitionStream) Stop(ctx context.Context) error {
 	logger.Log.Info("Stopping partition stream")
 
@@ -1469,4 +1559,8 @@ func (ps *partitionStream) Stop(ctx context.Context) error {
 
 	logger.Log.Info("Partition stream stopped successfully")
 	return nil
+}
+
+func (ps *partitionStream) SetEventHandler(handler models.EventHandler) {
+	ps.eventHandler = handler
 }
