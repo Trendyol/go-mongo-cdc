@@ -22,8 +22,3 @@ func (h *EmptyEventHandler) AfterPartitionStart(partitionID int) {
 }
 
 var DefaultEventHandler EventHandler = &EmptyEventHandler{}
-
-
-
-
-

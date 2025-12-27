@@ -66,6 +66,7 @@ type partitionStream struct {
 
 type streamWorker struct {
 	lastEventTime                   time.Time
+	pendingBootstrapCheckpointID    interface{}
 	stream                          connection.ChangeStream
 	ctx                             context.Context
 	cancel                          context.CancelFunc
@@ -77,14 +78,13 @@ type streamWorker struct {
 	inFlightEvents                  sync.WaitGroup
 	ackedEventCount                 int
 	partitionID                     int
+	pendingBootstrapCheckpointCount int
 	stoppingMutex                   sync.RWMutex
 	tokenMutex                      sync.RWMutex
 	bootstrapStateMutex             sync.RWMutex
 	commitMutex                     sync.Mutex
-	stopping                        bool
-	pendingBootstrapCheckpointID    interface{}
-	pendingBootstrapCheckpointCount int
 	pendingBootstrapMutex           sync.Mutex
+	stopping                        bool
 }
 
 type streamStartInfo struct {
