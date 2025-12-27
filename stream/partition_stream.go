@@ -138,17 +138,11 @@ func (ps *partitionStream) Start(ctx context.Context) error {
 		return fmt.Errorf("failed to initialize partition manager: %w", err)
 	}
 
-	/*	randomSeconds := rand.Intn(60) //nolint:gosec
-		jitter := time.Duration(randomSeconds) * time.Second
-		totalDelay := 30*time.Second + jitter
-
-	logger.Log.Info("Starting with jitter delay - Base: 30s, Jitter: %v, Total Wait: %v", jitter, totalDelay)*/
-
 	select {
 	case <-ps.ctx.Done():
 		logger.Log.Debug("Event processing cancelled during initial delay")
 		return ps.ctx.Err()
-	case <-time.After(15 * time.Second):
+	case <-time.After(30 * time.Second):
 		logger.Log.Debug("Initial delay completed before acquiring partitions")
 	}
 
