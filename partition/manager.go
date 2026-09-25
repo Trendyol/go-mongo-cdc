@@ -86,7 +86,7 @@ func (m *manager) Initialize(ctx context.Context) error {
 	m.isRunning = true
 
 	if activeWorkers, err := m.getActiveWorkerCount(context.Background()); err == nil {
-		m.lastKnownWorkerCount = activeWorkers
+		m.setLastKnownWorkerCount(activeWorkers)
 	}
 
 	m.wg.Add(1)
@@ -351,11 +351,12 @@ func (m *manager) triggerRebalanceIfNeeded() {
 		return
 	}
 
-	needsRebalance := currentWorkerCount != m.lastKnownWorkerCount || m.needsRebalance(ctx)
+	lastKnownWorkerCount := m.getLastKnownWorkerCount()
+	needsRebalance := currentWorkerCount != lastKnownWorkerCount || m.needsRebalance(ctx)
 
 	if needsRebalance {
-		if currentWorkerCount != m.lastKnownWorkerCount {
-			logger.Log.Debug("Worker count change detected - previousCount: %d, currentCount: %d", m.lastKnownWorkerCount, currentWorkerCount)
+		if currentWorkerCount != lastKnownWorkerCount {
+			logger.Log.Debug("Worker count change detected - previousCount: %d, currentCount: %d", lastKnownWorkerCount, currentWorkerCount)
 		} else {
 			logger.Log.Debug("Retrying partition acquisition - workerCount: %d", currentWorkerCount)
 		}
@@ -365,7 +366,7 @@ func (m *manager) triggerRebalanceIfNeeded() {
 		} else {
 			logger.Log.Info("Successfully rebalanced partitions - workerCount: %d", currentWorkerCount)
 
-			m.lastKnownWorkerCount = currentWorkerCount
+			m.setLastKnownWorkerCount(currentWorkerCount)
 		}
 	}
 }
@@ -871,15 +872,35 @@ func (m *manager) ResyncPartitions(ctx context.Context) error {
 		}
 	}
 
-	if m.onPartitionsChanged != nil {
-		m.onPartitionsChanged(newPartitions)
+	if callback := m.getPartitionsChangedCallback(); callback != nil {
+		callback(newPartitions)
 	}
 
 	return nil
 }
 
 func (m *manager) SetPartitionsChangedCallback(callback func(newPartitions []int)) {
+	m.mu.Lock()
+	defer m.mu.Unlock()
 	m.onPartitionsChanged = callback
+}
+
+func (m *manager) getPartitionsChangedCallback() func(newPartitions []int) {
+	m.mu.RLock()
+	defer m.mu.RUnlock()
+	return m.onPartitionsChanged
+}
+
+func (m *manager) setLastKnownWorkerCount(count int) {
+	m.mu.Lock()
+	defer m.mu.Unlock()
+	m.lastKnownWorkerCount = count
+}
+
+func (m *manager) getLastKnownWorkerCount() int {
+	m.mu.RLock()
+	defer m.mu.RUnlock()
+	return m.lastKnownWorkerCount
 }
 
 func (m *manager) ReleasePartitions(ctx context.Context) error {

@@ -62,6 +62,7 @@ type partitionStream struct {
 	cfg                    config.Config
 	wg                     sync.WaitGroup
 	streamsMutex           sync.RWMutex
+	eventHandlerMutex      sync.RWMutex
 }
 
 type streamWorker struct {
@@ -193,6 +194,8 @@ func (ps *partitionStream) acquireAndStartInitialPartitions() error {
 }
 
 func (ps *partitionStream) reconcilePartitionAssignments(newPartitions []int) {
+	eventHandler := ps.getEventHandler()
+
 	var partitionsToStop []int
 	var partitionsToStart []int
 
@@ -218,7 +221,7 @@ func (ps *partitionStream) reconcilePartitionAssignments(newPartitions []int) {
 	ps.streamsMutex.Unlock()
 
 	for _, partitionID := range partitionsToStop {
-		ps.eventHandler.BeforePartitionStop(partitionID)
+		eventHandler.BeforePartitionStop(partitionID)
 	}
 
 	rebalanceHappened := false
@@ -245,7 +248,7 @@ func (ps *partitionStream) reconcilePartitionAssignments(newPartitions []int) {
 		logger.Log.Debug("Waiting for in-flight events to complete for partition %d", worker.partitionID)
 		worker.inFlightEvents.Wait()
 		logger.Log.Debug("All in-flight events completed for partition %d", worker.partitionID)
-		ps.eventHandler.AfterPartitionStop(worker.partitionID)
+		eventHandler.AfterPartitionStop(worker.partitionID)
 		ps.commitPendingBootstrapFromWorker(worker)
 		ps.Commit()
 	}
@@ -257,7 +260,7 @@ func (ps *partitionStream) reconcilePartitionAssignments(newPartitions []int) {
 	ps.streamsMutex.Unlock()
 
 	for _, partitionID := range partitionsToStart {
-		ps.eventHandler.BeforePartitionStart(partitionID)
+		eventHandler.BeforePartitionStart(partitionID)
 	}
 
 	ps.streamsMutex.Lock()
@@ -283,7 +286,7 @@ func (ps *partitionStream) reconcilePartitionAssignments(newPartitions []int) {
 	ps.streamsMutex.Unlock()
 
 	for _, partitionID := range partitionsToStart {
-		ps.eventHandler.AfterPartitionStart(partitionID)
+		eventHandler.AfterPartitionStart(partitionID)
 	}
 
 	if rebalanceHappened {
@@ -842,7 +845,9 @@ func (ps *partitionStream) startAndManageChangeStream(
 	}
 	defer changeStream.Close(worker.ctx)
 
+	worker.tokenMutex.Lock()
 	worker.stream = changeStream
+	worker.tokenMutex.Unlock()
 
 	helpersCtx, helpersCancel := context.WithCancel(worker.ctx)
 	defer helpersCancel()
@@ -1314,10 +1319,16 @@ func (ps *partitionStream) startIdleHeartbeat(ctx context.Context, worker *strea
 func (ps *partitionStream) updateResumeTokenToHighwatermark(worker *streamWorker) error {
 	worker.tokenMutex.RLock()
 	lastToken := worker.lastAckedToken
+	stream := worker.stream
 	worker.tokenMutex.RUnlock()
 
+	if stream == nil {
+		logger.Log.Debug("Highwatermark update skipped, change stream not initialized yet - partitionId: %d", worker.partitionID)
+		return nil
+	}
+
 	// Primary method: Try to get the highwatermark from the driver's internal state.
-	highwatermarkToken := worker.stream.ResumeToken()
+	highwatermarkToken := stream.ResumeToken()
 
 	// Fallback condition: If the driver returns no token or the same old token,
 	// we actively query the server for the latest operation time.
@@ -1556,5 +1567,13 @@ func (ps *partitionStream) Stop(ctx context.Context) error {
 }
 
 func (ps *partitionStream) SetEventHandler(handler models.EventHandler) {
+	ps.eventHandlerMutex.Lock()
+	defer ps.eventHandlerMutex.Unlock()
 	ps.eventHandler = handler
+}
+
+func (ps *partitionStream) getEventHandler() models.EventHandler {
+	ps.eventHandlerMutex.RLock()
+	defer ps.eventHandlerMutex.RUnlock()
+	return ps.eventHandler
 }
